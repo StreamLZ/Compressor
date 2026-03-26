@@ -186,22 +186,26 @@ internal static unsafe partial class LzDecoder
             while (packedOffsStream != packedOffsStreamEnd)
             {
                 cmd = *packedOffsStream++;
-                if ((cmd >> 3) > 26)
+                int nb = (int)(cmd >> 3);
+                if (nb > 26)
                 {
                     return false;
                 }
-                offs = ((8 + (cmd & 7)) << (int)(cmd >> 3)) | bitsA.ReadMoreThan24Bits((int)(cmd >> 3));
+                offs = (uint)((8 + (cmd & 7)) << nb);
+                if (nb > 0) offs |= bitsA.ReadMoreThan24Bits(nb);
                 *offsStream++ = 8 - (int)offs;
                 if (packedOffsStream == packedOffsStreamEnd)
                 {
                     break;
                 }
                 cmd = *packedOffsStream++;
-                if ((cmd >> 3) > 26)
+                nb = (int)(cmd >> 3);
+                if (nb > 26)
                 {
                     return false;
                 }
-                offs = ((8 + (cmd & 7)) << (int)(cmd >> 3)) | bitsB.ReadMoreThan24BitsB((int)(cmd >> 3));
+                offs = (uint)((8 + (cmd & 7)) << nb);
+                if (nb > 0) offs |= bitsB.ReadMoreThan24BitsB(nb);
                 *offsStream++ = 8 - (int)offs;
             }
             if (multiDistScale != 1)
