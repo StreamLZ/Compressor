@@ -1847,6 +1847,26 @@ public class AsyncStreamTests
         Assert.Equal(source, decompressedStream.ToArray());
     }
 
+    [Theory]
+    [InlineData(6)]   // self-contained
+    [InlineData(9)]   // cross-block references
+    public async Task CompressStreamAsync_DecompressStreamAsync_MultiBlock_RoundTrips(int level)
+    {
+        // 500 KB forces multiple blocks (block size = 256 KB)
+        byte[] source = GenerateTestData(500_000);
+
+        using var inputStream = new MemoryStream(source);
+        using var compressedStream = new MemoryStream();
+        long compressedSize = await Slz.CompressStreamAsync(inputStream, compressedStream, level);
+        Assert.True(compressedSize > 0);
+
+        compressedStream.Position = 0;
+        using var decompressedStream = new MemoryStream();
+        long decompressedSize = await Slz.DecompressStreamAsync(compressedStream, decompressedStream);
+        Assert.Equal(source.Length, decompressedSize);
+        Assert.Equal(source, decompressedStream.ToArray());
+    }
+
     [Fact]
     public async Task CompressStreamAsync_RespectsСancellation()
     {

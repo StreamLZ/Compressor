@@ -261,6 +261,7 @@ internal static class StreamLzFrameCompressor
         CodecType codec = CodecType.High, int level = 4,
         long contentSize = -1, bool useContentChecksum = false,
         int windowSize = FrameConstants.DefaultWindowSize,
+        bool selfContained = false,
         CancellationToken cancellationToken = default)
     {
         int blockSize = FrameConstants.DefaultBlockSize;
@@ -299,6 +300,8 @@ internal static class StreamLzFrameCompressor
 
                 // Compression is CPU-bound — run synchronously on the current thread
                 int compressedSize;
+                CompressOptions? opts = selfContained ? StreamLZCompressor.GetDefaultCompressOpts(level) : null;
+                if (opts != null) opts.SelfContained = true;
                 unsafe
                 {
                     fixed (byte* pWindow = windowBuf)
@@ -308,7 +311,7 @@ internal static class StreamLzFrameCompressor
                         byte* windowBase = pWindow;
                         compressedSize = StreamLZCompressor.CompressBlock(
                             (int)codec, blockStart, pCompressed, blockBytes, level,
-                            compressOpts: null, srcWindowBase: windowBase);
+                            compressOpts: opts, srcWindowBase: windowBase);
                     }
                 }
 
