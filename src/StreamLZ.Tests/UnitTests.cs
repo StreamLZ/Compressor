@@ -1975,6 +1975,91 @@ public class SlzStreamTests
     {
         Assert.Throws<ArgumentNullException>(() => new SlzStream(null!, CompressionMode.Compress));
     }
+
+    [Theory]
+    [InlineData(6)]   // self-contained High
+    [InlineData(9)]   // non-self-contained High (cross-block references)
+    public void SlzStream_Decompress_CrossBlock_ViaCompressStream(int level)
+    {
+        // Generate data larger than one block (256 KB) to force multiple blocks
+        byte[] original = new byte[400_000];
+        var rng = new Random(123);
+        for (int i = 0; i < original.Length; i++)
+            original[i] = (byte)('A' + rng.Next(26));
+
+        // Compress via Slz.CompressStream (uses the full frame compressor with sliding window)
+        using var compressedMs = new MemoryStream();
+        Slz.CompressStream(new MemoryStream(original), compressedMs, level);
+
+        // Decompress via SlzStream (must handle cross-block references for level 9)
+        compressedMs.Position = 0;
+        using var decompressStream = new SlzStream(compressedMs, CompressionMode.Decompress);
+        using var resultMs = new MemoryStream();
+        decompressStream.CopyTo(resultMs);
+
+        Assert.Equal(original, resultMs.ToArray());
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(6)]
+    public async Task SlzStream_Async_RoundTrip(int level)
+    {
+        byte[] original = new byte[50_000];
+        var rng = new Random(99);
+        for (int i = 0; i < original.Length; i++)
+            original[i] = (byte)(rng.Next(256));
+
+        // Compress via async WriteAsync
+        using var compressedMs = new MemoryStream();
+        await using (var compressStream = new SlzStream(compressedMs, CompressionMode.Compress, leaveOpen: true, level))
+        {
+            // Write in small chunks to exercise the block-fill logic
+            for (int offset = 0; offset < original.Length; offset += 1024)
+            {
+                int count = Math.Min(1024, original.Length - offset);
+                await compressStream.WriteAsync(original.AsMemory(offset, count));
+            }
+        }
+
+        Assert.True(compressedMs.Length > 0);
+
+        // Decompress via async ReadAsync
+        compressedMs.Position = 0;
+        await using var decompressStream = new SlzStream(compressedMs, CompressionMode.Decompress);
+        byte[] result = new byte[original.Length];
+        int totalRead = 0;
+        while (totalRead < result.Length)
+        {
+            int bytesRead = await decompressStream.ReadAsync(result.AsMemory(totalRead));
+            if (bytesRead == 0) break;
+            totalRead += bytesRead;
+        }
+
+        Assert.Equal(original.Length, totalRead);
+        Assert.Equal(original, result);
+    }
+
+    [Fact]
+    public void SlzStream_Decompress_WithContentChecksum()
+    {
+        byte[] original = new byte[10_000];
+        var rng = new Random(77);
+        for (int i = 0; i < original.Length; i++)
+            original[i] = (byte)('a' + rng.Next(26));
+
+        // Compress with checksum enabled
+        using var compressedMs = new MemoryStream();
+        Slz.CompressStream(new MemoryStream(original), compressedMs, useContentChecksum: true);
+
+        // Decompress via SlzStream (should verify checksum without error)
+        compressedMs.Position = 0;
+        using var decompressStream = new SlzStream(compressedMs, CompressionMode.Decompress);
+        using var resultMs = new MemoryStream();
+        decompressStream.CopyTo(resultMs);
+
+        Assert.Equal(original, resultMs.ToArray());
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────
