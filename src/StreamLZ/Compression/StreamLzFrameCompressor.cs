@@ -279,6 +279,9 @@ internal static class StreamLzFrameCompressor
         byte[] compressedBuf = ArrayPool<byte>.Shared.Rent(compressBound + StreamLZConstants.CompressBufferPadding);
         byte[] blockHeaderBuf = new byte[8];
 
+        // Incremental XXH32 checksum over all uncompressed data (if enabled)
+        System.IO.Hashing.XxHash32? contentHasher = useContentChecksum ? new() : null;
+
         try
         {
             int dictBytes = 0;
@@ -290,6 +293,9 @@ internal static class StreamLzFrameCompressor
                 int blockBytes = await ReadFullyAsync(input, windowBuf, dictBytes, blockSize, cancellationToken).ConfigureAwait(false);
                 if (blockBytes == 0)
                     break;
+
+                // Hash uncompressed data for content checksum
+                contentHasher?.Append(windowBuf.AsSpan(dictBytes, blockBytes));
 
                 // Compression is CPU-bound — run synchronously on the current thread
                 int compressedSize;
@@ -338,6 +344,15 @@ internal static class StreamLzFrameCompressor
             FrameSerializer.WriteEndMark(blockHeaderBuf);
             await output.WriteAsync(blockHeaderBuf.AsMemory(0, 4), cancellationToken).ConfigureAwait(false);
             totalWritten += 4;
+
+            // Write XXH32 content checksum if enabled
+            if (contentHasher != null)
+            {
+                byte[] checksumBuf = new byte[4];
+                contentHasher.GetHashAndReset(checksumBuf);
+                await output.WriteAsync(checksumBuf, cancellationToken).ConfigureAwait(false);
+                totalWritten += 4;
+            }
 
             return totalWritten;
         }

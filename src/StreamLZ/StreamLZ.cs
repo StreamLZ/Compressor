@@ -229,19 +229,23 @@ public static class Slz
     /// <param name="output">Destination stream.</param>
     /// <param name="level">Compression level 1-11 (default: 6).</param>
     /// <param name="contentSize">Known content size for the header, or -1 if unknown.</param>
+    /// <param name="useContentChecksum">When true, appends an XXH32 checksum of the uncompressed content
+    /// after the end mark. The decompressor will verify this on read.</param>
     /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>Total compressed bytes written.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="input"/> or <paramref name="output"/> is null.</exception>
     /// <exception cref="OperationCanceledException">Thrown when cancellation is requested.</exception>
     public static async Task<long> CompressStreamAsync(Stream input, Stream output,
         int level = DefaultLevel, long contentSize = -1,
+        bool useContentChecksum = false,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(input);
         ArgumentNullException.ThrowIfNull(output);
         var mapped = MapLevel(level);
         return await StreamLzFrameCompressor.CompressAsync(input, output, mapped.Codec, mapped.CodecLevel,
-            contentSize, cancellationToken: cancellationToken).ConfigureAwait(false);
+            contentSize, useContentChecksum: useContentChecksum,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

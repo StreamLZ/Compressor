@@ -2116,6 +2116,32 @@ public class ContentChecksumTests
         Assert.Throws<InvalidDataException>(() => Slz.DecompressStream(corruptedMs, outputMs));
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(6)]
+    [InlineData(9)]
+    public async Task ContentChecksum_Async_RoundTrip_Verified(int level)
+    {
+        byte[] original = new byte[50_000];
+        new Random(99).NextBytes(original);
+        for (int i = 0; i < original.Length; i += 5)
+            original[i] = (byte)(i & 0xFF);
+
+        // Compress async with checksum
+        using var compressedMs = new MemoryStream();
+        using var inputMs = new MemoryStream(original);
+        await Slz.CompressStreamAsync(inputMs, compressedMs, level,
+            contentSize: original.Length, useContentChecksum: true);
+
+        // Decompress sync — should verify checksum without error
+        compressedMs.Position = 0;
+        using var outputMs = new MemoryStream();
+        long decompSize = Slz.DecompressStream(compressedMs, outputMs);
+
+        Assert.Equal(original.Length, (int)decompSize);
+        Assert.Equal(original, outputMs.ToArray());
+    }
+
     [Fact]
     public void NoChecksum_CorruptedChecksum_NoThrow()
     {
