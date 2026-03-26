@@ -73,6 +73,18 @@ int size = Slz.Compress(source, destination, level);
 int size = Slz.Decompress(compressed, destination, originalSize);
 ```
 
+### SlzStream (GZipStream-style wrapper)
+
+```csharp
+// Compress
+using var compressStream = new SlzStream(outputStream, CompressionMode.Compress);
+inputStream.CopyTo(compressStream);
+
+// Decompress
+using var decompressStream = new SlzStream(inputStream, CompressionMode.Decompress);
+decompressStream.CopyTo(outputStream);
+```
+
 ### JIT warmup (optional)
 
 ```csharp
