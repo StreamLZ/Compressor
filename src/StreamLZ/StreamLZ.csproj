@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net10.0;net8.0</TargetFrameworks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AnalysisLevel>latest-all</AnalysisLevel>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+
+    <!-- NuGet package metadata -->
+    <PackageId>StreamLZ</PackageId>
+    <Authors>StreamLZ Contributors</Authors>
+    <Copyright>Copyright (c) 2026 StreamLZ Contributors</Copyright>
+    <Description>High-performance LZ compression library for .NET. Two codecs — Fast (up to 456 MB/s compress, 5.6 GB/s decompress) and High (27% ratio on enwik8). Streaming SLZ1 frame format with sliding window, parallel compression, async API, and zero hot-path allocations.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageTags>compression;lz;lz77;fast;streaming;high-performance;parallel;async</PackageTags>
+    <PackageProjectUrl>https://github.com/StreamLZ/Compressor</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/StreamLZ/Compressor</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="StreamLZ.Tests" />
+    <InternalsVisibleTo Include="StreamLZ.Cli" />
+    <None Include="LICENSE" Pack="true" PackagePath="" />
+    <None Include="README.md" Pack="true" PackagePath="" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.IO.Hashing" Version="10.0.5" />
+  </ItemGroup>
+
+</Project>
