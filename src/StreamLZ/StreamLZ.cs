@@ -245,6 +245,7 @@ public static class Slz
         var mapped = MapLevel(level);
         return await StreamLzFrameCompressor.CompressAsync(input, output, mapped.Codec, mapped.CodecLevel,
             contentSize, useContentChecksum: useContentChecksum,
+            selfContained: mapped.SelfContained,
             cancellationToken: cancellationToken).ConfigureAwait(false);
     }
 

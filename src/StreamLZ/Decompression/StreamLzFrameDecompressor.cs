@@ -316,7 +316,9 @@ internal static class StreamLzFrameDecompressor
         windowSize = Math.Clamp(windowSize, blockSize, FrameConstants.MaxWindowSize);
 
         byte[] compressedBuf = ArrayPool<byte>.Shared.Rent(StreamLZCompressor.GetCompressBound(blockSize) + StreamLZConstants.CompressBufferPadding);
-        byte[] decompBuf = ArrayPool<byte>.Shared.Rent(blockSize + StreamLZDecoder.SafeSpace * 2);
+        // Window buffer for sliding-window dictionary context (matches sync path)
+        int windowBufSize = windowSize + blockSize + StreamLZDecoder.SafeSpace * 2;
+        byte[] windowBuf = ArrayPool<byte>.Shared.Rent(windowBufSize);
         byte[] blockHeaderBuf = new byte[8];
 
         // Incremental XXH32 checksum over all decompressed data (if frame has checksum flag)
@@ -326,6 +328,7 @@ internal static class StreamLzFrameDecompressor
         try
         {
             long totalDecompressed = 0;
+            int dictBytes = 0;
 
             // Consume any over-read bytes from the frame header into the first block header read.
             // After this, all subsequent reads go directly to the stream via ReadFullyAsync.
@@ -375,23 +378,17 @@ internal static class StreamLzFrameDecompressor
                 if (compressedSize > FrameConstants.MaxDecompressedBlockSize)
                     throw new InvalidDataException($"Block compressed size {compressedSize} exceeds maximum {FrameConstants.MaxDecompressedBlockSize}.");
 
-                // Grow buffers if needed for large blocks
+                // Grow compressed buffer if needed
                 int neededComp = compressedSize + StreamLZConstants.CompressBufferPadding;
                 if (neededComp > compressedBuf.Length)
                 {
                     ArrayPool<byte>.Shared.Return(compressedBuf);
                     compressedBuf = ArrayPool<byte>.Shared.Rent(neededComp);
                 }
-                int neededDecomp = decompressedSize + StreamLZDecoder.SafeSpace * 2;
-                if (neededDecomp > decompBuf.Length)
-                {
-                    ArrayPool<byte>.Shared.Return(decompBuf);
-                    decompBuf = ArrayPool<byte>.Shared.Rent(neededDecomp);
-                }
 
                 if (isUncompressed)
                 {
-                    int readBytes = await ReadFullyAsync(input, decompBuf, 0, decompressedSize, cancellationToken).ConfigureAwait(false);
+                    int readBytes = await ReadFullyAsync(input, windowBuf, dictBytes, decompressedSize, cancellationToken).ConfigureAwait(false);
                     if (readBytes < decompressedSize)
                         throw new InvalidDataException("Unexpected end of stream in uncompressed block.");
                 }
@@ -403,12 +400,12 @@ internal static class StreamLzFrameDecompressor
 
                     unsafe
                     {
-                        fixed (byte* pDecomp = decompBuf)
+                        fixed (byte* pWindow = windowBuf)
                         fixed (byte* pCompressed = compressedBuf)
                         {
                             int result = StreamLZDecoder.Decompress(
                                 pCompressed, compressedSize,
-                                pDecomp, decompressedSize, dstOffset: 0);
+                                pWindow, decompressedSize, dstOffset: dictBytes);
                             if (result < 0)
                                 throw new InvalidDataException("Block decompression failed.");
                             decompressedSize = result;
@@ -417,10 +414,24 @@ internal static class StreamLzFrameDecompressor
                 }
 
                 // Hash decompressed data before writing
-                asyncContentHasher?.Append(decompBuf.AsSpan(0, decompressedSize));
+                asyncContentHasher?.Append(windowBuf.AsSpan(dictBytes, decompressedSize));
 
-                await output.WriteAsync(decompBuf.AsMemory(0, decompressedSize), cancellationToken).ConfigureAwait(false);
+                await output.WriteAsync(windowBuf.AsMemory(dictBytes, decompressedSize), cancellationToken).ConfigureAwait(false);
                 totalDecompressed += decompressedSize;
+
+                // Slide the window
+                int totalUsed = dictBytes + decompressedSize;
+                if (totalUsed > windowSize)
+                {
+                    int keep = windowSize;
+                    int discard = totalUsed - keep;
+                    Buffer.BlockCopy(windowBuf, discard, windowBuf, 0, keep);
+                    dictBytes = keep;
+                }
+                else
+                {
+                    dictBytes = totalUsed;
+                }
             }
 
             // Verify XXH32 content checksum if present
@@ -442,7 +453,7 @@ internal static class StreamLzFrameDecompressor
         finally
         {
             ArrayPool<byte>.Shared.Return(compressedBuf);
-            ArrayPool<byte>.Shared.Return(decompBuf);
+            ArrayPool<byte>.Shared.Return(windowBuf);
         }
     }
 
