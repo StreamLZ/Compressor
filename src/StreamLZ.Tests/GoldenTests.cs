@@ -164,20 +164,10 @@ public class GoldenTests
 
     private static byte[] LoadGoldenFile(string resourceName)
     {
-        var assembly = typeof(GoldenTests).Assembly;
-        string fullName = $"StreamLZ.Tests.TestData.{resourceName}";
-
-        using var stream = assembly.GetManifestResourceStream(fullName);
-        if (stream == null)
-        {
-            throw new FileNotFoundException(
-                $"Golden file not found: {fullName}. " +
-                $"Available resources: {string.Join(", ", assembly.GetManifestResourceNames())}");
-        }
-
-        using var ms = new MemoryStream();
-        stream.CopyTo(ms);
-        return ms.ToArray();
+        string path = Path.Combine(AppContext.BaseDirectory, "TestData", resourceName);
+        if (!File.Exists(path))
+            throw new FileNotFoundException($"Golden file not found: {path}");
+        return File.ReadAllBytes(path);
     }
 
     private static string GetProjectDir([CallerFilePath] string? filePath = null)
