@@ -27,12 +27,13 @@ internal static class StreamLzFrameCompressor
     /// <param name="windowSize">Sliding window size in bytes (default 4MB, max 1GB). Larger values
     /// improve ratio but use more memory. Both compressor and decompressor need this much memory.</param>
     /// <param name="selfContained">When true, each chunk is independently decompressible (enables parallel decompression).</param>
+    /// <param name="maxThreads">Maximum compression threads. 0 = auto (one per core, limited by available memory).</param>
     /// <returns>Total number of compressed bytes written to <paramref name="output"/>.</returns>
     public static long Compress(Stream input, Stream output,
         CodecType codec = CodecType.High, int level = 4,
         long contentSize = -1, bool useContentChecksum = false,
         int windowSize = FrameConstants.DefaultWindowSize,
-        bool selfContained = false)
+        bool selfContained = false, int maxThreads = 0)
     {
         int blockSize = FrameConstants.DefaultBlockSize;
         windowSize = Math.Clamp(windowSize, blockSize, FrameConstants.MaxWindowSize);
@@ -47,7 +48,7 @@ internal static class StreamLzFrameCompressor
         // Incremental XXH32 checksum over all uncompressed data (if enabled)
         System.IO.Hashing.XxHash32? contentHasher = useContentChecksum ? new() : null;
 
-        int numThreads = StreamLZCompressor.CalculateMaxThreads(
+        int numThreads = maxThreads > 0 ? maxThreads : StreamLZCompressor.CalculateMaxThreads(
             contentSize > 0 ? (int)Math.Min(contentSize, int.MaxValue) : 100_000_000, level);
 
         // Large-chunk path: read many chunks, compress as one block using the

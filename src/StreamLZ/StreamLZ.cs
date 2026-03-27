@@ -31,8 +31,8 @@ namespace StreamLZ;
 /// and require the caller to track the original size.
 /// </para>
 /// <para>
-/// For files of any size or stream-based I/O, use <see cref="CompressStream(Stream, Stream, int, long, bool)"/>,
-/// <see cref="DecompressStream"/>, <see cref="CompressFile(string, string, int, bool)"/>, or <see cref="DecompressFile"/>.
+/// For files of any size or stream-based I/O, use <see cref="CompressStream(Stream, Stream, int, long, bool, int)"/>,
+/// <see cref="DecompressStream"/>, <see cref="CompressFile(string, string, int, bool, int)"/>, or <see cref="DecompressFile"/>.
 /// These use the SLZ1 frame format with a sliding window for cross-block match references.
 /// </para>
 /// <para><b>Thread safety:</b> All static methods on this class are thread-safe.
@@ -226,7 +226,9 @@ public static class Slz
     }
 
     /// <summary>
-    /// Decompresses SLZ1-framed data into <paramref name="destination"/> without allocation.
+    /// Decompresses SLZ1-framed data into <paramref name="destination"/>.
+    /// Avoids allocating the output array — the caller provides the buffer.
+    /// Internally uses MemoryStream for frame parsing.
     /// </summary>
     /// <param name="compressed">SLZ1-framed compressed data.</param>
     /// <param name="destination">Buffer for decompressed output. Must be large enough to hold
@@ -348,22 +350,23 @@ public static class Slz
     /// <param name="contentSize">Known content size for the header, or -1 if unknown.</param>
     /// <param name="useContentChecksum">When true, appends an XXH32 checksum of the uncompressed content
     /// after the end mark. The decompressor will verify this on read.</param>
+    /// <param name="maxThreads">Maximum compression threads. 0 = auto (default).</param>
     /// <returns>Total compressed bytes written.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="input"/> or <paramref name="output"/> is null.</exception>
     public static long CompressStream(Stream input, Stream output, int level = DefaultLevel,
-        long contentSize = -1, bool useContentChecksum = false)
+        long contentSize = -1, bool useContentChecksum = false, int maxThreads = 0)
     {
         ArgumentNullException.ThrowIfNull(input);
         ArgumentNullException.ThrowIfNull(output);
         var mapped = MapLevel(level);
         return StreamLzFrameCompressor.Compress(input, output, mapped.Codec, mapped.CodecLevel, contentSize,
-            useContentChecksum: useContentChecksum, selfContained: mapped.SelfContained);
+            useContentChecksum: useContentChecksum, selfContained: mapped.SelfContained, maxThreads: maxThreads);
     }
 
-    /// <inheritdoc cref="CompressStream(Stream, Stream, int, long, bool)"/>
+    /// <inheritdoc cref="CompressStream(Stream, Stream, int, long, bool, int)"/>
     public static long CompressStream(Stream input, Stream output, SlzCompressionLevel level,
-        long contentSize = -1, bool useContentChecksum = false)
-        => CompressStream(input, output, (int)level, contentSize, useContentChecksum);
+        long contentSize = -1, bool useContentChecksum = false, int maxThreads = 0)
+        => CompressStream(input, output, (int)level, contentSize, useContentChecksum, maxThreads);
 
     /// <summary>
     /// Decompresses SLZ1-framed data from <paramref name="input"/> to <paramref name="output"/>.
@@ -449,9 +452,10 @@ public static class Slz
     /// <param name="level">Compression level 1-11 (default: 6).</param>
     /// <param name="useContentChecksum">When true, appends an XXH32 checksum of the
     /// uncompressed content after the end mark for integrity verification.</param>
+    /// <param name="maxThreads">Maximum compression threads. 0 = auto (default).</param>
     /// <returns>Total compressed bytes written.</returns>
     public static long CompressFile(string inputPath, string outputPath,
-        int level = DefaultLevel, bool useContentChecksum = false)
+        int level = DefaultLevel, bool useContentChecksum = false, int maxThreads = 0)
     {
         ArgumentNullException.ThrowIfNull(inputPath);
         ArgumentNullException.ThrowIfNull(outputPath);
@@ -461,13 +465,13 @@ public static class Slz
         using var output = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None, ioBufSize, FileOptions.SequentialScan);
         return StreamLzFrameCompressor.Compress(input, output, mapped.Codec, mapped.CodecLevel,
             contentSize: input.Length, useContentChecksum: useContentChecksum,
-            selfContained: mapped.SelfContained);
+            selfContained: mapped.SelfContained, maxThreads: maxThreads);
     }
 
-    /// <inheritdoc cref="CompressFile(string, string, int, bool)"/>
+    /// <inheritdoc cref="CompressFile(string, string, int, bool, int)"/>
     public static long CompressFile(string inputPath, string outputPath, SlzCompressionLevel level,
-        bool useContentChecksum = false)
-        => CompressFile(inputPath, outputPath, (int)level, useContentChecksum);
+        bool useContentChecksum = false, int maxThreads = 0)
+        => CompressFile(inputPath, outputPath, (int)level, useContentChecksum, maxThreads);
 
     /// <summary>
     /// Decompresses an SLZ1-framed file.
