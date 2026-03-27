@@ -47,7 +47,7 @@ Offset  Size  Field
 4       1     Version (must be 1; decoders must reject values > 1)
 5       1     Flags (see below)
 6       1     Codec ID
-7       1     Compression level (0-9)
+7       1     Compression level (1-9)
 8       1     Block size (log2 encoding, see below)
 9       1     Reserved (must be 0)
 10      8     Content size (int64, present if flag bit 0 set)
