@@ -559,6 +559,10 @@ internal static unsafe class LzDecoder
                 }
                 match = dstBegin - *off32Stream++;
                 recentOffs = (nint)(match - dst);
+                if (dstEnd - dst < length)
+                {
+                    return null;
+                }
                 do
                 {
                     CopyHelpers.Copy64(dst, match);

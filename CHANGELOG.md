@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.2]
+
+### Security
+- Add missing bounds check on 32-bit long match path (cmd == 2) in Fast
+  decoder. The v1.0.1 fix covered short tokens and 16-bit long matches
+  but missed the 32-bit long match path.
+- Clamp pipelined scratch buffer size in TryDecodePipelined to prevent
+  out-of-bounds access if CalculateScratchSize exceeds the allocation.
+
 ## [1.0.1]
 
 ### Security
