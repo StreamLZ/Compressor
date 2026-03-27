@@ -538,6 +538,8 @@ public static class Slz
     /// cache/memory cold start, not JIT). Adds ~15ms to startup.
     /// Under Native AOT this is a no-op — all methods are already compiled ahead of time.
     /// </remarks>
+    [System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage("Trimming", "IL2026",
+        Justification = "PrepareHotMethods is only called when dynamic code is supported (JIT runtime). Under AOT/trimming the early return skips all reflection.")]
     public static void WarmUp()
     {
         if (!System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported)

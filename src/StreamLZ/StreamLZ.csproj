@@ -24,13 +24,15 @@
     <PackageProjectUrl>https://github.com/StreamLZ/Compressor</PackageProjectUrl>
     <RepositoryUrl>https://github.com/StreamLZ/Compressor</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
+    <IsTrimmable>true</IsTrimmable>
+    <IsAotCompatible>true</IsAotCompatible>
   </PropertyGroup>
 
   <ItemGroup>
     <InternalsVisibleTo Include="StreamLZ.Tests" />
     <InternalsVisibleTo Include="StreamLZ.Cli" />
-    <None Include="LICENSE" Pack="true" PackagePath="" />
-    <None Include="README.md" Pack="true" PackagePath="" />
+    <None Include="../../LICENSE" Pack="true" PackagePath="" />
+    <None Include="../../README.md" Pack="true" PackagePath="" />
   </ItemGroup>
 
   <ItemGroup>
