@@ -292,6 +292,29 @@ public sealed class SlzStream : Stream, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Async version of <see cref="FinalizeCompress"/>. The CPU-bound compression
+    /// stays synchronous; only the inner-stream writes are awaited.
+    /// </summary>
+    private async Task FinalizeCompressAsync()
+    {
+        FlushBlock();
+
+        if (_frameHeaderWritten)
+        {
+            byte[] endMark = new byte[4];
+            FrameSerializer.WriteEndMark(endMark);
+            await _innerStream.WriteAsync(endMark).ConfigureAwait(false);
+
+            if (_compressContentHasher != null)
+            {
+                byte[] checksumBuf = new byte[4];
+                _compressContentHasher.GetHashAndReset(checksumBuf);
+                await _innerStream.WriteAsync(checksumBuf).ConfigureAwait(false);
+            }
+        }
+    }
+
     // ════════════════════════════════════════════════════════════════
     //  Decompress path
     // ════════════════════════════════════════════════════════════════
@@ -603,7 +626,7 @@ public sealed class SlzStream : Stream, IAsyncDisposable
         if (!_disposed)
         {
             if (_mode == CompressionMode.Compress)
-                FinalizeCompress();
+                await FinalizeCompressAsync().ConfigureAwait(false);
 
             if (_compressInputBuf != null) ArrayPool<byte>.Shared.Return(_compressInputBuf);
             if (_compressOutputBuf != null) ArrayPool<byte>.Shared.Return(_compressOutputBuf);

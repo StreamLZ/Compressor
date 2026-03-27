@@ -178,9 +178,10 @@ public static class Slz
         if (source.Length == 0)
             return [];
 
-        using var input = new MemoryStream(source.ToArray(), writable: false);
-        using var output = new MemoryStream();
         var mapped = MapLevel(level);
+        using var input = new MemoryStream(source.ToArray(), writable: false);
+        int estimatedSize = source.Length + FrameConstants.MaxHeaderSize + 64;
+        using var output = new MemoryStream(estimatedSize);
         StreamLzFrameCompressor.Compress(input, output, mapped.Codec, mapped.CodecLevel,
             contentSize: source.Length, selfContained: mapped.SelfContained);
         return output.ToArray();
