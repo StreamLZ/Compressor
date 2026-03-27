@@ -86,6 +86,11 @@ internal static unsafe partial class Compressor
         public int RecentOffs0, RecentOffs1, RecentOffs2;
         public int MatchLen;
         public int LitLen;
+        /// <summary>
+        /// Packed recent-match-after-literals descriptor. 0 = none.
+        /// Low byte = literal count (1 or 2), upper bytes = match length (value >> 8).
+        /// Used by the DP parser to represent a "match recent0 after N literals" shortcut.
+        /// </summary>
         public int QuickRecentMatchLenLitLen;
         public int PrevState;
 

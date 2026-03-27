@@ -451,9 +451,8 @@ internal static unsafe class Encoder
     /// </summary>
     private static int GetScratchUsage(int codecId, int chunkLength)
     {
-        int result = 2 * chunkLength + 32;
-        if (codecId != 9 && codecId != 11)
-            result += chunkLength;
+        // codecId is always 0 (High), 1 (Fast), or 2 (Turbo) — all need the extra chunkLength.
+        int result = 3 * chunkLength + 32;
         return Math.Min(result + 0xD000, 0x6C000);
     }
 
