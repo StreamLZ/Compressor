@@ -255,6 +255,7 @@ internal static class StreamLzFrameCompressor
     /// <param name="useContentChecksum">Whether to write an XXH32 content checksum after the last block.</param>
     /// <param name="windowSize">Sliding window size in bytes (default 4MB, max 1GB). Larger values
     /// improve ratio but use more memory. Both compressor and decompressor need this much memory.</param>
+    /// <param name="selfContained">When true, each chunk is independently decompressible (enables parallel decompression).</param>
     /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>Total number of compressed bytes written to <paramref name="output"/>.</returns>
     public static async Task<long> CompressAsync(Stream input, Stream output,
