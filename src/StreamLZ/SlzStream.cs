@@ -4,6 +4,7 @@ using System.Buffers;
 using System.Buffers.Binary;
 using System.IO.Compression;
 using System.IO.Hashing;
+using System.Numerics;
 using StreamLZ.Common;
 using StreamLZ.Compression;
 using StreamLZ.Decompression;
@@ -654,8 +655,33 @@ public class SlzStreamOptions
     public int Level { get; set; } = Slz.DefaultLevel;
     /// <summary>When true, appends an XXH32 content checksum after the last block (Compress mode only).</summary>
     public bool UseContentChecksum { get; set; }
-    /// <summary>Block size in bytes. Must be a power of 2. Default: 256KB.</summary>
-    public int BlockSize { get; set; } = FrameConstants.DefaultBlockSize;
-    /// <summary>Sliding window size in bytes. Larger values improve ratio but use more memory. Default: 4MB.</summary>
-    public int WindowSize { get; set; } = FrameConstants.DefaultWindowSize;
+
+    private int _blockSize = FrameConstants.DefaultBlockSize;
+    private int _windowSize = FrameConstants.DefaultWindowSize;
+
+    /// <summary>Block size in bytes. Must be a power of 2 between 64KB and 4MB. Default: 256KB.</summary>
+    public int BlockSize
+    {
+        get => _blockSize;
+        set
+        {
+            if (!BitOperations.IsPow2(value) || value < 65536 || value > 4 * 1024 * 1024)
+                throw new ArgumentOutOfRangeException(nameof(value),
+                    $"BlockSize must be a power of 2 between 64KB and 4MB, got {value}.");
+            _blockSize = value;
+        }
+    }
+
+    /// <summary>Sliding window size in bytes. Must be between 64KB and 1GB. Default: 4MB.</summary>
+    public int WindowSize
+    {
+        get => _windowSize;
+        set
+        {
+            if (value < 65536 || value > 1073741824)
+                throw new ArgumentOutOfRangeException(nameof(value),
+                    $"WindowSize must be between 64KB and 1GB, got {value}.");
+            _windowSize = value;
+        }
+    }
 }
