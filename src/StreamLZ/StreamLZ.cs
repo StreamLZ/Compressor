@@ -536,9 +536,13 @@ public static class Slz
     /// Called automatically by the <see cref="Slz"/> static constructor on first use.
     /// Reduces first-call decompress penalty from ~30% to ~7% (residual gap is
     /// cache/memory cold start, not JIT). Adds ~15ms to startup.
+    /// Under Native AOT this is a no-op — all methods are already compiled ahead of time.
     /// </remarks>
     public static void WarmUp()
     {
+        if (!System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported)
+            return;
+
         PrepareHotMethods(typeof(StreamLZDecoder));
         PrepareHotMethods(typeof(Decompression.High.LzDecoder));
         PrepareHotMethods(typeof(Decompression.Fast.LzDecoder));
@@ -548,6 +552,7 @@ public static class Slz
         PrepareHotMethods(typeof(Common.CopyHelpers));
     }
 
+    [System.Diagnostics.CodeAnalysis.RequiresUnreferencedCode("Uses reflection to enumerate methods for JIT pre-compilation.")]
     private static void PrepareHotMethods(Type type)
     {
         foreach (var method in type.GetMethods(
