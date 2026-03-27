@@ -24,6 +24,7 @@
     <PackageProjectUrl>https://github.com/StreamLZ/Compressor</PackageProjectUrl>
     <RepositoryUrl>https://github.com/StreamLZ/Compressor</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
+    <PackageIcon>icon512.png</PackageIcon>
     <IsTrimmable>true</IsTrimmable>
     <IsAotCompatible>true</IsAotCompatible>
   </PropertyGroup>
@@ -33,6 +34,7 @@
     <InternalsVisibleTo Include="StreamLZ.Cli" />
     <None Include="../../LICENSE" Pack="true" PackagePath="" />
     <None Include="../../README.md" Pack="true" PackagePath="" />
+    <None Include="../../icon512.png" Pack="true" PackagePath="" />
   </ItemGroup>
 
   <ItemGroup>
