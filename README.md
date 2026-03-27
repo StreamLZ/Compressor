@@ -167,32 +167,32 @@ Slz.WarmUp();
 
 | Compressor | Ratio | Compress | Decompress |
 |---|---|---|---|
-| Snappy | 56.7% | 497 MB/s | 1,306 MB/s |
-| LZ4 Fast | 57.3% | 484 MB/s | 4,335 MB/s |
-| **SLZ L1** | **58.6%** | **348 MB/s** | **5,961 MB/s** |
-| Zstd 1 | 40.7% | 424 MB/s | 935 MB/s |
-| LZ4 Max | 41.9% | 23 MB/s | 4,541 MB/s |
+| Snappy | 56.7% | 521 MB/s | 1,122 MB/s |
+| LZ4 Fast | 57.3% | 489 MB/s | 4,335 MB/s |
+| **SLZ L1** | **58.6%** | **356 MB/s** | **5,961 MB/s** |
+| Zstd 1 | 40.7% | 409 MB/s | 944 MB/s |
+| LZ4 Max | 41.9% | 23 MB/s | 4,335 MB/s |
 | **SLZ L5** | **42.2%** | **61 MB/s** | **4,768 MB/s** |
-| **SLZ L6** | **33.7%** | **59 MB/s** | **3,815 MB/s** |
-| Zstd 3 | 35.5% | 273 MB/s | 1,289 MB/s |
-| Zstd 9 | 31.1% | 66 MB/s | 1,403 MB/s |
-| **SLZ L11** | **27.3%** | **5.7 MB/s** | **1,467 MB/s** |
-| Zstd 19 | 26.9% | 2.2 MB/s | 1,207 MB/s |
+| **SLZ L6** | **33.7%** | **61 MB/s** | **3,974 MB/s** |
+| Zstd 3 | 35.5% | 266 MB/s | 883 MB/s |
+| Zstd 9 | 31.1% | 65 MB/s | 1,207 MB/s |
+| **SLZ L11** | **27.3%** | **5.7 MB/s** | **1,445 MB/s** |
+| Zstd 19 | 26.9% | 2.2 MB/s | 1,255 MB/s |
 
 ### silesia (212 MB mixed, 3-run median)
 
 | Compressor | Ratio | Compress | Decompress |
 |---|---|---|---|
-| Snappy | 48.1% | 802 MB/s | 1,970 MB/s |
-| LZ4 Fast | 47.4% | 712 MB/s | 4,510 MB/s |
-| **SLZ L1** | **47.1%** | **533 MB/s** | **6,342 MB/s** |
-| Zstd 1 | 34.5% | 575 MB/s | 1,309 MB/s |
+| Snappy | 48.1% | 752 MB/s | 1,970 MB/s |
+| LZ4 Fast | 47.4% | 653 MB/s | 4,510 MB/s |
+| **SLZ L1** | **47.1%** | **547 MB/s** | **6,342 MB/s** |
+| Zstd 1 | 34.5% | 570 MB/s | 1,526 MB/s |
 | LZ4 Max | 36.3% | 17 MB/s | 4,832 MB/s |
-| **SLZ L5** | **36.4%** | **82 MB/s** | **5,485 MB/s** |
-| **SLZ L6** | **28.2%** | **86 MB/s** | **6,150 MB/s** |
-| Zstd 9 | 27.9% | 91 MB/s | 1,318 MB/s |
-| **SLZ L11** | **24.7%** | **7.7 MB/s** | **1,735 MB/s** |
-| Zstd 19 | 24.9% | 3.5 MB/s | 1,215 MB/s |
+| **SLZ L5** | **36.4%** | **82 MB/s** | **5,637 MB/s** |
+| **SLZ L6** | **28.2%** | **89 MB/s** | **5,798 MB/s** |
+| Zstd 9 | 27.9% | 94 MB/s | 1,586 MB/s |
+| **SLZ L11** | **24.7%** | **7.6 MB/s** | **1,750 MB/s** |
+| Zstd 19 | 24.9% | 3.5 MB/s | 1,109 MB/s |
 
 *All benchmarks on Intel Arrow Lake-S (Ultra 9 285K), .NET 10, multi-threaded.*
 
