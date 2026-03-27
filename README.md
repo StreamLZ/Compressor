@@ -4,13 +4,22 @@ High-performance LZ compression library for .NET with streaming support.
 
 ## Features
 
-- **5.6 GB/s decompress** at level 1, **27% ratio** at level 11 (enwik8)
+- **6.0 GB/s decompress** at level 1, **27% ratio** at level 11 (enwik8)
 - **Single level scale** (1-11) — no codec selection needed
 - **Streaming** — SLZ1 frame format supports files of any size
 - **Sliding window** — cross-block match references for better ratio
-- **Parallel compression** — automatic multi-threading
+- **Parallel compression** — automatic multi-threading with configurable thread limits
+- **Async** — `CompressFileAsync`, `DecompressFileAsync`, `IAsyncDisposable` on `SlzStream`
+- **Validation** — `TryDecompress` (non-throwing), `IsValidFrame`, content checksums
 - **Zero allocations** on the hot path (pooled scratch buffers)
-- **JIT warmup** — `Slz.WarmUp()` pre-compiles decompression hot paths
+- **Native AOT and trimming** compatible
+- Targets **net8.0** and **net10.0**
+
+## Installation
+
+```
+dotnet add package StreamLZ
+```
 
 ## Quick Start
 
@@ -37,17 +46,17 @@ byte[] max = Slz.CompressFramed(data, SlzCompressionLevel.Maximum);
 
 | Level | Compress | Decompress | Ratio (enwik8) | Description |
 |-------|----------|------------|----------------|-------------|
-| 1 | 456 MB/s | 5.3 GB/s | 56.5% | Fastest |
-| 2 | 278 MB/s | 5.6 GB/s | 53.9% | |
-| 3 | 222 MB/s | 4.8 GB/s | 52.3% | |
-| 4 | 155 MB/s | 4.5 GB/s | 48.4% | |
+| 1 | 378 MB/s | 6.0 GB/s | 58.6% | Fastest |
+| 2 | 295 MB/s | 6.0 GB/s | 56.9% | |
+| 3 | 278 MB/s | 5.6 GB/s | 56.5% | |
+| 4 | 286 MB/s | 5.3 GB/s | 54.0% | |
 | 5 | 61 MB/s | 4.8 GB/s | 42.2% | |
-| **6** | **58 MB/s** | **3.8 GB/s** | **33.7%** | **Default** |
-| 7 | 42 MB/s | 3.8 GB/s | 33.6% | |
-| 8 | 33 MB/s | 3.8 GB/s | 33.7% | |
-| 9 | 6.0 MB/s | 1.4 GB/s | 27.4% | |
-| 10 | 5.9 MB/s | 1.4 GB/s | 27.3% | |
-| 11 | 5.7 MB/s | 1.4 GB/s | 27.3% | Maximum ratio |
+| **6** | **60 MB/s** | **3.8 GB/s** | **33.7%** | **Default** |
+| 7 | 42 MB/s | 3.7 GB/s | 33.6% | |
+| 8 | 34 MB/s | 3.5 GB/s | 33.7% | |
+| 9 | 6.1 MB/s | 1.4 GB/s | 27.4% | |
+| 10 | 6.0 MB/s | 1.2 GB/s | 27.2% | |
+| 11 | 5.7 MB/s | 926 MB/s | 27.2% | Maximum ratio |
 
 ## API
 
