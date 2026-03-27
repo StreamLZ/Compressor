@@ -580,7 +580,9 @@ internal static unsafe partial class LzDecoder
         byte* scratch2 = (byte*)NativeMemory.AllocZeroed(StreamLZConstants.ScratchSize);
         try
         {
-            nint scratchUsage2 = StreamLZConstants.CalculateScratchSize(dstCount2);
+            nint scratchUsage2 = Math.Min(
+                StreamLZConstants.CalculateScratchSize(dstCount2),
+                StreamLZConstants.ScratchSize);
 
             // Capture pointers as nint for lambda (C# can't capture pointer locals)
             nint pSrc2 = (nint)src2Data, pSrc2End = (nint)(src2Data + srcUsed2);
