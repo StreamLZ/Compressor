@@ -341,6 +341,7 @@ internal static unsafe class LzDecoder
         byte* srcEnd, FastLzTable* lz, int* savedDist, nuint startOff)
     {
         byte* dstEnd = dst + dstSize;
+        byte* dstSafeEnd = dstEnd - StreamLZDecoder.SafeSpace;
         byte* cmdStream = lz->CommandStream.Start;
         byte* cmdStreamEnd = lz->CommandStream.End;
         byte* lengthStream = lz->LengthStream;
@@ -370,6 +371,17 @@ internal static unsafe class LzDecoder
             {
                 // Short token: most frequent path (~90% of commands).
                 // Bit 7 selects new vs recent offset; bits 6-3 = matchLen; bits 2-0 = litLen.
+                //
+                // Safety: reject if dst has overrun the output buffer. Each short
+                // token writes at most 22 bytes (7 lit + 15 match), which is within
+                // SafeSpace for the final token. But a malicious stream with many
+                // tokens and a small declared dstSize would cascade past SafeSpace.
+                // This check catches the cascade — the predictor eliminates it for
+                // legitimate streams where dst stays within bounds.
+                if (dst >= dstEnd)
+                {
+                    return null;
+                }
                 nint newDist = *off16Stream;
                 nuint useDistance = (cmd >> 7) - 1; // 0 = recent offset, 0xFFFF..FF = new offset
                 nuint literalLength = cmd & 7;
@@ -386,6 +398,12 @@ internal static unsafe class LzDecoder
                 // Branchless offset select: XOR-mask swaps recentOffs with -newDist when useDistance != 0
                 recentOffs ^= (nint)(useDistance & (nuint)(recentOffs ^ -newDist));
                 off16Stream = (ushort*)((nuint)off16Stream + (useDistance & 2));
+                // Validate that the match offset doesn't reference before the output buffer start.
+                // The 32-bit offset paths already validate this; the 16-bit path must too.
+                if (dst + recentOffs < dstStart)
+                {
+                    return null;
+                }
                 match = dst + recentOffs;
                 CopyHelpers.Copy64(dst, match);
                 CopyHelpers.Copy64(dst + 8, match + 8);
@@ -497,7 +515,15 @@ internal static unsafe class LzDecoder
                     return null;
                 }
                 match = dst - *off16Stream++;
+                if (match < dstStart)
+                {
+                    return null;
+                }
                 recentOffs = (nint)(match - dst);
+                if (dstEnd - dst < length)
+                {
+                    return null;
+                }
                 do
                 {
                     CopyHelpers.Copy64(dst, match);
