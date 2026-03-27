@@ -107,6 +107,9 @@ await Slz.DecompressFileAsync("output.slz", "restored.txt", cancellationToken: c
 
 // With content checksum for integrity verification
 Slz.CompressFile("input.txt", "output.slz", useContentChecksum: true);
+
+// Limit compression threads (for server workloads)
+Slz.CompressFile("input.txt", "output.slz", maxThreads: 4);
 ```
 
 ### SlzStream (GZipStream-style wrapper)

@@ -57,7 +57,7 @@ public static class FrameConstants
 [Flags]
 [System.Diagnostics.CodeAnalysis.SuppressMessage("Design", "CA1028", Justification = "Byte maps directly to wire format")]
 [System.Diagnostics.CodeAnalysis.SuppressMessage("Naming", "CA1711", Justification = "Flags suffix is descriptive for a [Flags] enum")]
-public enum FrameFlags : byte
+internal enum FrameFlags : byte
 {
     /// <summary>No optional features.</summary>
     None = 0,
@@ -84,7 +84,7 @@ public readonly struct FrameHeader : IEquatable<FrameHeader>
     public byte Version { get; init; }
 
     /// <summary>Feature flags.</summary>
-    public FrameFlags Flags { get; init; }
+    internal FrameFlags Flags { get; init; }
 
     /// <summary>Codec used for compression (0 = High, 1 = Fast).</summary>
     public byte Codec { get; init; }

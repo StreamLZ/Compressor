@@ -104,6 +104,17 @@ public sealed class SlzStream : Stream, IAsyncDisposable
     /// <summary>
     /// Initializes a new instance of <see cref="SlzStream"/> with the specified options.
     /// </summary>
+    /// <param name="stream">The underlying stream to compress into or decompress from.</param>
+    /// <param name="mode">Whether to compress or decompress.</param>
+    /// <param name="options">Configuration options including Level, BlockSize, WindowSize,
+    /// UseContentChecksum, and LeaveOpen.</param>
+    /// <remarks>
+    /// In Decompress mode, <see cref="SlzStreamOptions.Level"/>,
+    /// <see cref="SlzStreamOptions.BlockSize"/>, and
+    /// <see cref="SlzStreamOptions.UseContentChecksum"/> are ignored — these values
+    /// are determined by the frame header. Only <see cref="SlzStreamOptions.LeaveOpen"/>
+    /// and <see cref="SlzStreamOptions.WindowSize"/> apply in Decompress mode.
+    /// </remarks>
     public SlzStream(Stream stream, CompressionMode mode, SlzStreamOptions options)
         : this(stream, mode, (options ?? throw new ArgumentNullException(nameof(options))).LeaveOpen, options.Level)
     {
@@ -671,6 +682,12 @@ public class SlzStreamOptions
             _blockSize = value;
         }
     }
+
+    /// <summary>Maximum compression threads. 0 = auto (one per core, limited by available memory). Default: 0.
+    /// This property is used by <see cref="Slz.CompressStream(Stream, Stream, int, long, bool)"/>,
+    /// <see cref="Slz.CompressFile(string, string, int, bool)"/>, and their async variants.
+    /// <see cref="SlzStream"/> compresses one block at a time and does not use this value.</summary>
+    public int MaxThreads { get; set; }
 
     /// <summary>Sliding window size in bytes. Must be between 64KB and 1GB. Default: 4MB.</summary>
     public int WindowSize
