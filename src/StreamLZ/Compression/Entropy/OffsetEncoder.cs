@@ -117,7 +117,7 @@ internal static unsafe class OffsetEncoder
     /// <summary>
     /// Converts a histogram to approximate entropy cost per symbol.
     /// </summary>
-    public static void ConvertHistoToCost(HistoU8* src, uint* dst, int extra, int maxSymbolCount = 255)
+    public static void ConvertHistoToCost(ByteHistogram* src, uint* dst, int extra, int maxSymbolCount = 255)
     {
         uint histoSum = 0;
         for (int i = 0; i < 256; i++)
@@ -165,21 +165,21 @@ internal static unsafe class OffsetEncoder
 
     /// <summary>
     /// Approximate entropy cost of a uint* histogram array.
-    /// Delegates to <see cref="HistoU8.GetCostApproxCore"/> when called with a
-    /// <see cref="HistoU8"/> pointer.
+    /// Delegates to <see cref="ByteHistogram.GetCostApproxCore"/> when called with a
+    /// <see cref="ByteHistogram"/> pointer.
     /// </summary>
     internal static uint GetHistoCostApprox(uint* histo, int arrSize, int histoSum)
     {
         fixed (uint* log2Table = Log2LookupTable)
         {
-            return HistoU8.GetCostApproxCore(histo, arrSize, histoSum, log2Table);
+            return ByteHistogram.GetCostApproxCore(histo, arrSize, histoSum, log2Table);
         }
     }
 
     /// <summary>
-    /// Approximate entropy cost of a <see cref="HistoU8"/>.
+    /// Approximate entropy cost of a <see cref="ByteHistogram"/>.
     /// </summary>
-    internal static uint GetHistoCostApprox(HistoU8* h, int histoSum)
+    internal static uint GetHistoCostApprox(ByteHistogram* h, int histoSum)
     {
         fixed (uint* log2Table = Log2LookupTable)
         {
@@ -203,7 +203,7 @@ internal static unsafe class OffsetEncoder
         Span<uint> lowHisto = stackalloc uint[128];
         lowHisto.Clear();
 
-        HistoU8 highHisto = default;
+        ByteHistogram highHisto = default;
 
         uint bitsForData = 0;
         for (int i = 0; i < offsCount; i++)
@@ -540,7 +540,7 @@ internal static unsafe class OffsetEncoder
         int opts, float speedTradeoff,
         float* costPtr, int minMatchLen, bool useOffsetModuloCoding,
         int* offsEncodeTypePtr, int level,
-        HistoU8* histoPtr, HistoU8* histoLoPtr)
+        ByteHistogram* histoPtr, ByteHistogram* histoLoPtr)
     {
         int n = int.MaxValue;
 
@@ -593,7 +593,7 @@ internal static unsafe class OffsetEncoder
                     byte* tmpDst = tmpDstStart;
                     *tmpDst++ = (byte)(offsEncodeType + 127);
 
-                    HistoU8 histoBuf = default;
+                    ByteHistogram histoBuf = default;
                     float cost = StreamLZConstants.InvalidCost;
 
                     int n1 = EntropyEncoder.EncodeArrayU8CompactHeader(tmpDst, tmpDstEnd,

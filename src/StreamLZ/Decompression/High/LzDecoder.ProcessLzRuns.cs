@@ -341,7 +341,7 @@ internal static unsafe partial class LzDecoder
             int literalLengthInt = (int)literalLength;
 
             // Save the previous lastOffset for literal delta decoding.
-            // The encoder computes SubLits[i] = src[i] - src[i - Recent0] using the
+            // The encoder computes DeltaLiterals[i] = src[i] - src[i - Recent0] using the
             // PREVIOUS token's Recent0, then updates Recent0 after writing literals.
             // The decoder must match: use the old lastOffset for literals, then rotate.
             int litDeltaOffset = lastOffset;

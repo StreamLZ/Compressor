@@ -24,7 +24,7 @@ internal static unsafe partial class Compressor
         };
     }
 
-    private static void RescaleOne(ref HistoU8 h)
+    private static void RescaleOne(ref ByteHistogram h)
     {
         for (int i = 0; i < 256; i++)
         {
@@ -45,7 +45,7 @@ internal static unsafe partial class Compressor
         RescaleOne(ref s.MatchLenHisto);
     }
 
-    private static void RescaleAddOne(ref HistoU8 h, ref HistoU8 t)
+    private static void RescaleAddOne(ref ByteHistogram h, ref ByteHistogram t)
     {
         for (int i = 0; i < 256; i++)
         {
@@ -173,34 +173,34 @@ internal static unsafe partial class Compressor
 
     private static void MakeCostModel(ref Stats h, ref CostModel costModel)
     {
-        fixed (HistoU8* pOffs = &h.OffsHisto)
+        fixed (ByteHistogram* pOffs = &h.OffsHisto)
         fixed (uint* pOffsCost = costModel.OffsCost)
             OffsetEncoder.ConvertHistoToCost(pOffs, pOffsCost, 36);
 
         if (h.OffsEncodeType > 1)
         {
-            fixed (HistoU8* pOffsLo = &h.OffsLoHisto)
+            fixed (ByteHistogram* pOffsLo = &h.OffsLoHisto)
             fixed (uint* pOffsLoCost = costModel.OffsLoCost)
                 OffsetEncoder.ConvertHistoToCost(pOffsLo, pOffsLoCost, 0);
         }
 
-        fixed (HistoU8* pToken = &h.TokenHisto)
+        fixed (ByteHistogram* pToken = &h.TokenHisto)
         fixed (uint* pTokenCost = costModel.TokenCost)
             OffsetEncoder.ConvertHistoToCost(pToken, pTokenCost, 18);
 
-        fixed (HistoU8* pMatchLen = &h.MatchLenHisto)
+        fixed (ByteHistogram* pMatchLen = &h.MatchLenHisto)
         fixed (uint* pMatchLenCost = costModel.MatchLenCost)
             OffsetEncoder.ConvertHistoToCost(pMatchLen, pMatchLenCost, 12);
 
         if (costModel.ChunkType == 1)
         {
-            fixed (HistoU8* pLit = &h.LitRaw)
+            fixed (ByteHistogram* pLit = &h.LitRaw)
             fixed (uint* pLitCost = costModel.LitCost)
                 OffsetEncoder.ConvertHistoToCost(pLit, pLitCost, 0);
         }
         else
         {
-            fixed (HistoU8* pLit = &h.LitSub)
+            fixed (ByteHistogram* pLit = &h.LitSub)
             fixed (uint* pLitCost = costModel.LitCost)
                 OffsetEncoder.ConvertHistoToCost(pLit, pLitCost, 0);
         }

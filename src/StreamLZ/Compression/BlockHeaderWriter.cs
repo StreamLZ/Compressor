@@ -6,6 +6,19 @@ namespace StreamLZ.Compression;
 
 internal static unsafe partial class StreamLZCompressor
 {
+    // ────────────────────────────────────────────────────────────
+    //  Block header byte 0 flags
+    //  Bit layout: [7] uncompressed | [6] keyframe | [5] twoPhase | [4] selfContained | [3:0] magic nibble
+    // ────────────────────────────────────────────────────────────
+    private const byte BlockHeaderMagicNibble = 0x05;
+    private const byte BlockHeaderSelfContainedFlag = 0x10;
+    private const byte BlockHeaderTwoPhaseFlag = 0x20;
+    private const byte BlockHeaderKeyframeFlag = 0x40;
+    private const byte BlockHeaderUncompressedFlag = 0x80;
+
+    /// <summary>CRC-present flag in block header byte 1.</summary>
+    private const byte BlockHeaderCrcFlag = 0x80;
+
     /// <summary>
     /// Result of compressing a single 256KB block in parallel.
     /// The header + compressed data are stored in TmpBuf[0..TotalBytes].
@@ -31,15 +44,12 @@ internal static unsafe partial class StreamLZCompressor
     internal static byte* WriteBlockHdr(byte* dst, int comprId, bool crc, bool keyframe, bool uncompressed,
         bool selfContained = false, bool twoPhase = false)
     {
-        // Block header byte 0 bit layout:
-        //   [3:0]  magic nibble (0x5)
-        //   [4]    SelfContained flag
-        //   [5]    TwoPhase flag
-        //   [6]    keyframe (RestartDecoder) flag
-        //   [7]    uncompressed flag
-        const byte BlockHeaderBase = 5; // Wire format: magic nibble 0x5 in the low 4 bits
-        dst[0] = (byte)(BlockHeaderBase + (selfContained ? 0x10 : 0) + (twoPhase ? 0x20 : 0) + (keyframe ? 0x40 : 0) + (uncompressed ? 0x80 : 0));
-        dst[1] = (byte)(comprId + (crc ? 0x80 : 0));
+        dst[0] = (byte)(BlockHeaderMagicNibble
+            + (selfContained ? BlockHeaderSelfContainedFlag : 0)
+            + (twoPhase ? BlockHeaderTwoPhaseFlag : 0)
+            + (keyframe ? BlockHeaderKeyframeFlag : 0)
+            + (uncompressed ? BlockHeaderUncompressedFlag : 0));
+        dst[1] = (byte)(comprId + (crc ? BlockHeaderCrcFlag : 0));
         return dst + 2;
     }
 

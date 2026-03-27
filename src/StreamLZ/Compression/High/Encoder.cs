@@ -28,16 +28,16 @@ internal static unsafe partial class Compressor
         fixed (byte* pBase = buf)
         {
             byte* p = pBase;
-            writer.LitsStart = writer.Lits = p; p += literalCapacity;
-            writer.SubLitsStart = writer.SubLits = p; p += literalCapacity;
+            writer.LiteralsStart = writer.Literals = p; p += literalCapacity;
+            writer.DeltaLiteralsStart = writer.DeltaLiterals = p; p += literalCapacity;
             writer.TokensStart = writer.Tokens = p; p += tokenCapacity;
-            writer.U8Offs = writer.U8OffsStart = p; p += u8OffsetCapacity;
+            writer.NearOffsets = writer.NearOffsetsStart = p; p += u8OffsetCapacity;
             // Align to 4
             p = (byte*)(((nuint)p + 3) & ~(nuint)3);
-            writer.U32Offs = writer.U32OffsStart = (uint*)p; p += u32OffsetCapacity * 4;
-            writer.Lrl8 = writer.Lrl8Start = p; p += runLength8Capacity;
+            writer.FarOffsets = writer.FarOffsetsStart = (uint*)p; p += u32OffsetCapacity * 4;
+            writer.LiteralRunLengths = writer.LiteralRunLengthsStart = p; p += runLength8Capacity;
             p = (byte*)(((nuint)p + 3) & ~(nuint)3);
-            writer.Len32 = writer.Len32Start = (uint*)p;
+            writer.OverflowLengths = writer.OverflowLengthsStart = (uint*)p;
         }
 
         writer.Recent0 = StreamLZConstants.InitialRecentOffset;
@@ -53,12 +53,12 @@ internal static unsafe partial class Compressor
             mlToken = 15;
             if (matchLength >= 255 + 17)
             {
-                *writer.Lrl8++ = 255;
-                *writer.Len32++ = (uint)(matchLength - 255 - 17);
+                *writer.LiteralRunLengths++ = 255;
+                *writer.OverflowLengths++ = (uint)(matchLength - 255 - 17);
             }
             else
             {
-                *writer.Lrl8++ = (byte)(matchLength - 17);
+                *writer.LiteralRunLengths++ = (byte)(matchLength - 17);
             }
         }
         return mlToken << 2;
@@ -68,27 +68,27 @@ internal static unsafe partial class Compressor
     {
         if (doSubtract)
         {
-            OffsetEncoder.SubtractBytesUnsafe(writer.SubLits, p, (nuint)len, (nuint)(-writer.Recent0));
-            writer.SubLits += len;
+            OffsetEncoder.SubtractBytesUnsafe(writer.DeltaLiterals, p, (nuint)len, (nuint)(-writer.Recent0));
+            writer.DeltaLiterals += len;
         }
 
-        byte* d = writer.Lits;
+        byte* d = writer.Literals;
         byte* dEnd = d + len;
         do
         {
             *(uint*)d = *(uint*)p;
             d += 4; p += 4;
         } while (d < dEnd);
-        writer.Lits = dEnd;
+        writer.Literals = dEnd;
 
         if (len >= 258)
         {
-            *writer.Lrl8++ = 255;
-            *writer.Len32++ = (uint)(len - 258);
+            *writer.LiteralRunLengths++ = 255;
+            *writer.OverflowLengths++ = (uint)(len - 258);
         }
         else
         {
-            *writer.Lrl8++ = (byte)(len - 3);
+            *writer.LiteralRunLengths++ = (byte)(len - 3);
         }
     }
 
@@ -106,22 +106,22 @@ internal static unsafe partial class Compressor
             return 3;
         }
 
-        byte* lrl8 = writer.Lrl8;
+        byte* lrl8 = writer.LiteralRunLengths;
         *lrl8 = (byte)(len - 3);
-        writer.Lrl8 = (len >= 3) ? lrl8 + 1 : lrl8;
+        writer.LiteralRunLengths = (len >= 3) ? lrl8 + 1 : lrl8;
 
-        byte* ll = writer.Lits;
+        byte* ll = writer.Literals;
         *(ulong*)ll = *(ulong*)p;
-        writer.Lits = ll + len;
+        writer.Literals = ll + len;
 
         if (doSubtract)
         {
-            byte* sl = writer.SubLits;
+            byte* sl = writer.DeltaLiterals;
             for (nint i = 0; i < len; i++)
             {
                 sl[i] = (byte)(p[i] - p[i - writer.Recent0]);
             }
-            writer.SubLits = sl + len;
+            writer.DeltaLiterals = sl + len;
         }
         return (int)Math.Min(len, 3);
     }
@@ -130,16 +130,16 @@ internal static unsafe partial class Compressor
     private static void WriteFarOffset(ref HighStreamWriter writer, uint offset)
     {
         int bsr = (int)(uint)BitOperations.Log2(offset - (uint)StreamLZConstants.LowOffsetEncodingLimit);
-        *writer.U8Offs++ = (byte)(bsr | StreamLZConstants.HighOffsetMarker);
-        *writer.U32Offs++ = offset;
+        *writer.NearOffsets++ = (byte)(bsr | StreamLZConstants.HighOffsetMarker);
+        *writer.FarOffsets++ = offset;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void WriteNearOffset(ref HighStreamWriter writer, uint offset)
     {
         int bsr = (int)(uint)BitOperations.Log2(offset + StreamLZConstants.OffsetBiasConstant);
-        *writer.U8Offs++ = (byte)(((offset - 8) & 0xF) | (uint)(16 * (bsr - 9)));
-        *writer.U32Offs++ = offset;
+        *writer.NearOffsets++ = (byte)(((offset - 8) & 0xF) | (uint)(16 * (bsr - 9)));
+        *writer.FarOffsets++ = offset;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -196,12 +196,12 @@ internal static unsafe partial class Compressor
         nint len = (nint)(pend - p);
         if (len > 0)
         {
-            Buffer.MemoryCopy(p, writer.Lits, len, len);
-            writer.Lits += len;
+            Buffer.MemoryCopy(p, writer.Literals, len, len);
+            writer.Literals += len;
             if (doSubtract)
             {
-                OffsetEncoder.SubtractBytes(writer.SubLits, p, (nuint)len, (nuint)(-writer.Recent0));
-                writer.SubLits += len;
+                OffsetEncoder.SubtractBytes(writer.DeltaLiterals, p, (nuint)len, (nuint)(-writer.Recent0));
+                writer.DeltaLiterals += len;
             }
         }
     }
@@ -232,14 +232,14 @@ internal static unsafe partial class Compressor
         int flagIgnoreU32Length = 0;
         Debug.Assert((lzcoder.EncodeFlags & 1) == 0);
 
-        int numLits = (int)(writer.Lits - writer.LitsStart);
+        int numLits = (int)(writer.Literals - writer.LiteralsStart);
         float litCost = StreamLZConstants.InvalidCost;
         float memcpyCost = numLits + 3;
 
         if (numLits < 32 || level <= -4)
         {
             *chunkTypePtr = 1;
-            int n = EntropyEncoder.EncodeArrayU8_Memcpy(dst, destinationEnd, writer.LitsStart, numLits);
+            int n = EntropyEncoder.EncodeArrayU8_Memcpy(dst, destinationEnd, writer.LiteralsStart, numLits);
             if (n < 0)
             {
                 return sourceLength;
@@ -249,13 +249,13 @@ internal static unsafe partial class Compressor
         }
         else
         {
-            HistoU8 litsHisto, litsubHisto;
-            bool hasLitsub = writer.SubLits != writer.SubLitsStart;
+            ByteHistogram litsHisto, litsubHisto;
+            bool hasLitsub = writer.DeltaLiterals != writer.DeltaLiteralsStart;
 
-            EntropyEncoder.CountBytesHistoU8(writer.LitsStart, numLits, &litsHisto);
+            EntropyEncoder.CountBytesHistogram(writer.LiteralsStart, numLits, &litsHisto);
             if (hasLitsub)
             {
-                EntropyEncoder.CountBytesHistoU8(writer.SubLitsStart, numLits, &litsubHisto);
+                EntropyEncoder.CountBytesHistogram(writer.DeltaLiteralsStart, numLits, &litsubHisto);
             }
             else
             {
@@ -286,7 +286,7 @@ internal static unsafe partial class Compressor
                 {
                     *chunkTypePtr = 0;
                     float litsubCost = StreamLZConstants.InvalidCost;
-                    litN = EntropyEncoder.EncodeArrayU8WithHisto(dst, destinationEnd, writer.SubLitsStart, numLits,
+                    litN = EntropyEncoder.EncodeArrayU8WithHisto(dst, destinationEnd, writer.DeltaLiteralsStart, numLits,
                         litsubHisto, lzcoder.EntropyOptions, lzcoder.SpeedTradeoff,
                         &litsubCost, level);
                     if (litN < 0)
@@ -307,7 +307,7 @@ internal static unsafe partial class Compressor
 
             if (!skipNormalLit)
             {
-                int n = EntropyEncoder.EncodeArrayU8WithHisto(dst, destinationEnd, writer.LitsStart, numLits,
+                int n = EntropyEncoder.EncodeArrayU8WithHisto(dst, destinationEnd, writer.LiteralsStart, numLits,
                     litsHisto, lzcoder.EntropyOptions, lzcoder.SpeedTradeoff,
                     &litCost, level);
                 if (n > 0)
@@ -338,8 +338,8 @@ internal static unsafe partial class Compressor
         int offsEncodeType = 0;
         float offsCost = StreamLZConstants.InvalidCost;
         int offsN = EntropyEncoder.EncodeLzOffsets(dst, destinationEnd,
-            writer.U8OffsStart, writer.U32OffsStart,
-            (int)(writer.U8Offs - writer.U8OffsStart),
+            writer.NearOffsetsStart, writer.FarOffsetsStart,
+            (int)(writer.NearOffsets - writer.NearOffsetsStart),
             lzcoder.EntropyOptions, lzcoder.SpeedTradeoff,
             &offsCost, 8, (lzcoder.EncodeFlags & 4) != 0, &offsEncodeType, level,
             stats != null ? &stats->OffsHisto : null,
@@ -355,8 +355,8 @@ internal static unsafe partial class Compressor
         }
 
         float lrl8Cost = StreamLZConstants.InvalidCost;
-        int lrl8N = EntropyEncoder.EncodeArrayU8(dst, destinationEnd, writer.Lrl8Start,
-            (int)(writer.Lrl8 - writer.Lrl8Start),
+        int lrl8N = EntropyEncoder.EncodeArrayU8(dst, destinationEnd, writer.LiteralRunLengthsStart,
+            (int)(writer.LiteralRunLengths - writer.LiteralRunLengthsStart),
             lzcoder.EntropyOptions, lzcoder.SpeedTradeoff,
             &lrl8Cost, level, stats != null ? &stats->MatchLenHisto : null);
         if (lrl8N < 0)
@@ -365,8 +365,8 @@ internal static unsafe partial class Compressor
         }
         dst += lrl8N;
 
-        int lrlNum = (int)(writer.Lrl8 - writer.Lrl8Start);
-        int offsNum = (int)(writer.U8Offs - writer.U8OffsStart);
+        int lrlNum = (int)(writer.LiteralRunLengths - writer.LiteralRunLengthsStart);
+        int offsNum = (int)(writer.NearOffsets - writer.NearOffsetsStart);
         int tokNum = (int)(writer.Tokens - writer.TokensStart);
         int required = Math.Max(lrlNum, offsNum) + lrlNum + numLits + 4 * lrlNum + 6 * offsNum + tokNum + 16;
         required = Math.Max(Math.Max(required, 2 * numLits), numLits + 2 * tokNum) + StreamLZConstants.EntropyScratchSize;
@@ -377,9 +377,9 @@ internal static unsafe partial class Compressor
             return sourceLength;
         }
 
-        int bitsN = EntropyEncoder.WriteLzOffsetBits(dst, destinationEnd, writer.U8OffsStart, writer.U32OffsStart,
+        int bitsN = EntropyEncoder.WriteLzOffsetBits(dst, destinationEnd, writer.NearOffsetsStart, writer.FarOffsetsStart,
             offsNum, offsEncodeType,
-            writer.Len32Start, (int)(writer.Len32 - writer.Len32Start),
+            writer.OverflowLengthsStart, (int)(writer.OverflowLengths - writer.OverflowLengthsStart),
             flagIgnoreU32Length);
         if (bitsN < 0)
         {
@@ -395,7 +395,7 @@ internal static unsafe partial class Compressor
         float writeBitsCost = (CostCoefficients.Current.HighWriteBitsBase + sourceLength * CostCoefficients.Current.HighWriteBitsPerSrcByte + tokNum * CostCoefficients.Current.HighWriteBitsPerToken + lrlNum * CostCoefficients.Current.HighWriteBitsPerLrl) *
             lzcoder.SpeedTradeoff + (initialBytes + flagIgnoreU32Length + bitsN);
         float cost = tokenCost + litCost + offsCost + lrl8Cost + writeBitsCost;
-        *costPtr = (float)((CostCoefficients.Current.LengthBase + lrlNum * CostCoefficients.Current.LengthU8PerItem + (int)(writer.Len32 - writer.Len32Start) * CostCoefficients.Current.LengthU32PerItem) *
+        *costPtr = (float)((CostCoefficients.Current.LengthBase + lrlNum * CostCoefficients.Current.LengthU8PerItem + (int)(writer.OverflowLengths - writer.OverflowLengthsStart) * CostCoefficients.Current.LengthU32PerItem) *
             lzcoder.SpeedTradeoff) + cost;
         return (int)(dst - destinationStart);
     }

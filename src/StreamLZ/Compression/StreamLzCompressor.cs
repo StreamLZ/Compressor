@@ -12,7 +12,7 @@ using StreamLZ.Compression.MatchFinding;
 namespace StreamLZ.Compression;
 
 // All shared types (CodecType, CompressOptions, LzCoder, LzTemp, LzScratchBlock,
-// HistoU8, LengthAndOffset, HashPos, MatchUtils, CompressUtils)
+// ByteHistogram, LengthAndOffset, HashPos, MatchUtils, CompressUtils)
 // are defined in their own files (same namespace).
 // BitWriter64Forward / BitWriter64Backward are defined in BitWriter.cs.
 // Block header writers are in BlockHeaderWriter.cs.
@@ -855,7 +855,7 @@ internal static unsafe partial class StreamLZCompressor
                         if (lzCost < memsetCost && lzCost <= plainHuffCost && n >= 0 && n < roundBytes)
                         {
                             // Write LZ chunk: 3-byte header then n compressed bytes
-                            uint innerHdr = (uint)n | (uint)chunkType << 19 | StreamLZConstants.ChunkHeaderCompressedFlag;
+                            uint innerHdr = (uint)n | (uint)chunkType << StreamLZConstants.SubChunkTypeShift | StreamLZConstants.ChunkHeaderCompressedFlag;
                             dst = WriteBE24(dst, innerHdr) + n;
                             totalCost += lzCost;
                         }

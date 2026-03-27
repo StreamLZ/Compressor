@@ -39,13 +39,13 @@ internal static unsafe partial class Compressor
     /// </summary>
     internal struct HighStreamWriter
     {
-        public byte* LitsStart, Lits;
-        public byte* SubLitsStart, SubLits;
+        public byte* LiteralsStart, Literals;
+        public byte* DeltaLiteralsStart, DeltaLiterals;
         public byte* TokensStart, Tokens;
-        public byte* U8OffsStart, U8Offs;
-        public uint* U32OffsStart, U32Offs;
-        public byte* Lrl8Start, Lrl8;
-        public uint* Len32Start, Len32;
+        public byte* NearOffsetsStart, NearOffsets;
+        public uint* FarOffsetsStart, FarOffsets;
+        public byte* LiteralRunLengthsStart, LiteralRunLengths;
+        public uint* OverflowLengthsStart, OverflowLengths;
         public int SrcLen;
         public byte* SrcPtr;
         public int Recent0;
@@ -148,12 +148,12 @@ internal static unsafe partial class Compressor
     /// <summary>Running compression statistics (histograms for each stream).</summary>
     internal struct Stats
     {
-        public HistoU8 LitRaw;
-        public HistoU8 LitSub;
-        public HistoU8 TokenHisto;
-        public HistoU8 MatchLenHisto;
+        public ByteHistogram LitRaw;
+        public ByteHistogram LitSub;
+        public ByteHistogram TokenHisto;
+        public ByteHistogram MatchLenHisto;
         public int OffsEncodeType;
-        public HistoU8 OffsHisto;
-        public HistoU8 OffsLoHisto;
+        public ByteHistogram OffsHisto;
+        public ByteHistogram OffsLoHisto;
     }
 }

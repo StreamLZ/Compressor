@@ -27,7 +27,7 @@ internal static unsafe class MultiArrayEncoder
     /// </summary>
     private struct HistoAndCount
     {
-        public HistoU8 Histo;
+        public ByteHistogram Histo;
         public int Sum;
         public int Temp;
     }
@@ -64,7 +64,7 @@ internal static unsafe class MultiArrayEncoder
     /// <param name="histo">Histogram to evaluate.</param>
     /// <param name="histoSum">Total count in histogram.</param>
     /// <returns>Approximate cost in bits.</returns>
-    internal delegate uint GetCostFunc(HistoU8* histo, int histoSum);
+    internal delegate uint GetCostFunc(ByteHistogram* histo, int histoSum);
 
     /// <summary>
     /// Delegate for encoding a sub-array with compact header.
@@ -82,26 +82,26 @@ internal static unsafe class MultiArrayEncoder
     /// <returns>Compressed size, or -1 on failure.</returns>
     internal delegate int EncodeArrayFunc(byte* dst, byte* dstEnd, byte* src, int srcSize,
                                         int opts, float speedTradeoff,
-                                        float* costPtr, int level, HistoU8* histoPtr);
+                                        float* costPtr, int level, ByteHistogram* histoPtr);
 
     #endregion
 
     #region Helpers
 
     /// <summary>
-    /// Counts byte occurrences into a HistoU8.
+    /// Counts byte occurrences into a ByteHistogram.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void CountBytesHistoU8(byte* src, int size, HistoU8* histo)
+    public static void CountBytesHistogram(byte* src, int size, ByteHistogram* histo)
     {
-        Unsafe.InitBlockUnaligned(histo, 0, (uint)sizeof(HistoU8));
+        Unsafe.InitBlockUnaligned(histo, 0, (uint)sizeof(ByteHistogram));
         for (int i = 0; i < size; i++)
         {
             histo->Count[src[i]]++;
         }
     }
 
-    private static void SubtractHisto(HistoU8* dst, HistoU8* a, HistoU8* b)
+    private static void SubtractHisto(ByteHistogram* dst, ByteHistogram* a, ByteHistogram* b)
     {
         for (int i = 0; i < 256; i++)
         {
@@ -109,7 +109,7 @@ internal static unsafe class MultiArrayEncoder
         }
     }
 
-    private static void AddHistogram(HistoU8* d, HistoU8* a, HistoU8* b)
+    private static void AddHistogram(ByteHistogram* d, ByteHistogram* a, ByteHistogram* b)
     {
         for (int i = 0; i < 256; i++)
         {
@@ -120,9 +120,9 @@ internal static unsafe class MultiArrayEncoder
     private static void AddHistogram(ref HistoAndCount dst, ref HistoAndCount src)
     {
         dst.Sum += src.Sum;
-        AddHistogram((HistoU8*)Unsafe.AsPointer(ref dst.Histo),
-                     (HistoU8*)Unsafe.AsPointer(ref dst.Histo),
-                     (HistoU8*)Unsafe.AsPointer(ref src.Histo));
+        AddHistogram((ByteHistogram*)Unsafe.AsPointer(ref dst.Histo),
+                     (ByteHistogram*)Unsafe.AsPointer(ref dst.Histo),
+                     (ByteHistogram*)Unsafe.AsPointer(ref src.Histo));
     }
 
     #endregion
@@ -133,7 +133,7 @@ internal static unsafe class MultiArrayEncoder
     /// Computes approximate bit cost (in 1/256 units) for a histogram using log2 lookup.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static uint GetApproxHistoBitsFrac(HistoU8* h, int histoSum, uint* log2Table)
+    private static uint GetApproxHistoBitsFrac(ByteHistogram* h, int histoSum, uint* log2Table)
     {
         if (histoSum <= 0)
         {
@@ -160,12 +160,12 @@ internal static unsafe class MultiArrayEncoder
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static uint GetApproxHistoBits(HistoU8* h, int histoSum, uint* log2Table)
+    private static uint GetApproxHistoBits(ByteHistogram* h, int histoSum, uint* log2Table)
     {
         return GetApproxHistoBitsFrac(h, histoSum, log2Table) >> 8;
     }
 
-    private static void MakeHistoBitProfile(HistoU8* h, int histoSum, BitProfile* bp, uint* log2Table)
+    private static void MakeHistoBitProfile(ByteHistogram* h, int histoSum, BitProfile* bp, uint* log2Table)
     {
         if (histoSum <= 0)
         {
@@ -185,7 +185,7 @@ internal static unsafe class MultiArrayEncoder
         }
     }
 
-    private static uint GetHistoBitUsageWithBitProfile(HistoU8* h, int histoSum, BitProfile* bp)
+    private static uint GetHistoBitUsageWithBitProfile(ByteHistogram* h, int histoSum, BitProfile* bp)
     {
         uint rv = 0;
         for (int i = 0; i < 256; i++)
@@ -229,7 +229,7 @@ internal static unsafe class MultiArrayEncoder
         // Compute initial costs
         for (int i = 0; i < n; i++)
         {
-            HistoU8* hp = (HistoU8*)Unsafe.AsPointer(ref histos[i].Histo);
+            ByteHistogram* hp = (ByteHistogram*)Unsafe.AsPointer(ref histos[i].Histo);
             histos[i].Temp = (int)getCost(hp, histos[i].Sum);
         }
 
@@ -239,14 +239,14 @@ internal static unsafe class MultiArrayEncoder
         {
             ReduceEntry* bPtr = ents;
 
-            HistoU8 tempValues;
+            ByteHistogram tempValues;
 
             for (int i = 0; i < n; i++)
             {
                 for (int j = i + 1; j < n; j++)
                 {
-                    AddHistogram(&tempValues, (HistoU8*)Unsafe.AsPointer(ref histos[i].Histo),
-                                 (HistoU8*)Unsafe.AsPointer(ref histos[j].Histo));
+                    AddHistogram(&tempValues, (ByteHistogram*)Unsafe.AsPointer(ref histos[i].Histo),
+                                 (ByteHistogram*)Unsafe.AsPointer(ref histos[j].Histo));
 
                     bPtr->CostInBits = (int)getCost(&tempValues, histos[i].Sum + histos[j].Sum);
                     bPtr->JValue = j;
@@ -286,8 +286,8 @@ internal static unsafe class MultiArrayEncoder
                 {
                     if (hi.Sum != 0 && hj.Sum != 0)
                     {
-                        AddHistogram(&tempValues, (HistoU8*)Unsafe.AsPointer(ref hi.Histo),
-                                     (HistoU8*)Unsafe.AsPointer(ref hj.Histo));
+                        AddHistogram(&tempValues, (ByteHistogram*)Unsafe.AsPointer(ref hi.Histo),
+                                     (ByteHistogram*)Unsafe.AsPointer(ref hj.Histo));
 
                         bPtr->CostInBits = (int)getCost(&tempValues, hi.Sum + hj.Sum);
                         bPtr->JValue = cur.JValue;
@@ -329,7 +329,7 @@ internal static unsafe class MultiArrayEncoder
     /// Slides a histogram window left or right to better match symbol distribution.
     /// Returns the adjusted start pointer.
     /// </summary>
-    private static byte* AdjustHistoWindow(HistoU8* histo,
+    private static byte* AdjustHistoWindow(ByteHistogram* histo,
                                            byte* dataCur, int size,
                                            byte* dataStart, byte* dataEnd)
     {
@@ -512,8 +512,8 @@ internal static unsafe class MultiArrayEncoder
     /// Returns positive if histo1 is worse than histo2 (i.e., should move bytes to histo2).
     /// </summary>
     private static int GetBetterHisto(byte* src, int srcSize,
-                                      HistoU8* histo1, uint histo1Sum,
-                                      HistoU8* histo2, uint histo2Sum,
+                                      ByteHistogram* histo1, uint histo1Sum,
+                                      ByteHistogram* histo2, uint histo2Sum,
                                       uint* log2Table)
     {
         int factor1 = histo1Sum > 0 ? (int)(0x40000000u / histo1Sum) : 0;
@@ -545,7 +545,7 @@ internal static unsafe class MultiArrayEncoder
     #region MoveBytesBetweenHistos
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void MoveBytesBetweenHistos(byte* src, int srcSize, HistoU8* from, HistoU8* to)
+    private static void MoveBytesBetweenHistos(byte* src, int srcSize, ByteHistogram* from, ByteHistogram* to)
     {
         for (int i = 0; i < srcSize; i++)
         {
@@ -563,10 +563,10 @@ internal static unsafe class MultiArrayEncoder
     /// Fine-tunes split boundaries between adjacent histogram blocks by moving individual bytes.
     /// </summary>
     private static void OptimizeSplitBoundaries(byte* src, byte* srcEnd,
-                                                 HistoU8* histos, uint* sizes, uint* offsets,
+                                                 ByteHistogram* histos, uint* sizes, uint* offsets,
                                                  int numArrs)
     {
-        HistoU8* h = histos + 1;
+        ByteHistogram* h = histos + 1;
         for (int i = 1; i < numArrs; i++, h++)
         {
             byte* p = &src[offsets[i]];
@@ -664,7 +664,7 @@ internal static unsafe class MultiArrayEncoder
 
     #region MultiArrayAddCandidate
 
-    private static void MultiArrayAddCandidate(int idx, int arrayCount, HistoU8* histo,
+    private static void MultiArrayAddCandidate(int idx, int arrayCount, ByteHistogram* histo,
                                                 uint* chunkSizes, uint* chunkOffs,
                                                 MultiHistCandi* mhs, int* numMhs,
                                                 byte* src, int finetuneSize, int direction,
@@ -875,9 +875,9 @@ internal static unsafe class MultiArrayEncoder
                 ref HistoAndCount back = ref arrHisto[arrHistoCount++];
                 int n = Math.Min(numBytes, 256);
                 back.Sum = n;
-                CountBytesHistoU8(dataCur, n, (HistoU8*)Unsafe.AsPointer(ref back.Histo));
+                CountBytesHistogram(dataCur, n, (ByteHistogram*)Unsafe.AsPointer(ref back.Histo));
 
-                byte* adjusted = AdjustHistoWindow((HistoU8*)Unsafe.AsPointer(ref back.Histo),
+                byte* adjusted = AdjustHistoWindow((ByteHistogram*)Unsafe.AsPointer(ref back.Histo),
                                                    dataCur, n, dataStart, dataEndLocal);
                 if (adjusted < dataCur)
                 {
@@ -905,7 +905,7 @@ internal static unsafe class MultiArrayEncoder
                 dummy.Histo.Count[i] = 10;
             }
             dummy.Sum = 256 * 10;
-            MakeHistoBitProfile((HistoU8*)Unsafe.AsPointer(ref dummy.Histo), dummy.Sum,
+            MakeHistoBitProfile((ByteHistogram*)Unsafe.AsPointer(ref dummy.Histo), dummy.Sum,
                                &arrBitProfile[bpCount++], log2Table);
         }
 
@@ -916,7 +916,7 @@ internal static unsafe class MultiArrayEncoder
         for (int i = 0; i < arrHistoCount; i++)
         {
             arrBitUsage[i] = (int)GetApproxHistoBitsFrac(
-                (HistoU8*)Unsafe.AsPointer(ref arrHisto[i].Histo), arrHisto[i].Sum, log2Table);
+                (ByteHistogram*)Unsafe.AsPointer(ref arrHisto[i].Histo), arrHisto[i].Sum, log2Table);
             arrScore[i] = int.MaxValue;
             arrBestIdx[i] = 0;
         }
@@ -929,7 +929,7 @@ internal static unsafe class MultiArrayEncoder
             for (int j = 0; j < arrHistoCount; j++)
             {
                 int bitUsage = (int)GetHistoBitUsageWithBitProfile(
-                    (HistoU8*)Unsafe.AsPointer(ref arrHisto[j].Histo), arrHisto[j].Sum,
+                    (ByteHistogram*)Unsafe.AsPointer(ref arrHisto[j].Histo), arrHisto[j].Sum,
                     &arrBitProfile[bpCount - 1]);
                 bitUsage -= arrBitUsage[j];
                 if (bitUsage < arrScore[j])
@@ -950,7 +950,7 @@ internal static unsafe class MultiArrayEncoder
 
             arrHistoGood[goodCount++] = arrHisto[worstIndex];
             MakeHistoBitProfile(
-                (HistoU8*)Unsafe.AsPointer(ref arrHistoGood[goodCount - 1].Histo),
+                (ByteHistogram*)Unsafe.AsPointer(ref arrHistoGood[goodCount - 1].Histo),
                 arrHistoGood[goodCount - 1].Sum,
                 &arrBitProfile[bpCount++], log2Table);
 
@@ -989,7 +989,7 @@ internal static unsafe class MultiArrayEncoder
         if (arrHistoCount > maxArrs)
         {
             ReduceNumHistograms(arrHisto, ref arrHistoCount, 2.0f, 0.0f, maxArrs,
-                (HistoU8* h, int sum) => GetApproxHistoBits(h, sum, log2Table), log2Table);
+                (ByteHistogram* h, int sum) => GetApproxHistoBits(h, sum, log2Table), log2Table);
         }
 
         if (arrHistoCount <= 1)
@@ -1056,10 +1056,10 @@ internal static unsafe class MultiArrayEncoder
             while (k-- > 0)
             {
                 MakeHistoBitProfile(
-                    (HistoU8*)Unsafe.AsPointer(ref arrHisto[k].Histo), arrHisto[k].Sum,
+                    (ByteHistogram*)Unsafe.AsPointer(ref arrHisto[k].Histo), arrHisto[k].Sum,
                     &arrBitProfile[k], log2Table);
                 uint fracBits = GetHistoBitUsageWithBitProfile(
-                    (HistoU8*)Unsafe.AsPointer(ref arrHisto[k].Histo), arrHisto[k].Sum,
+                    (ByteHistogram*)Unsafe.AsPointer(ref arrHisto[k].Histo), arrHisto[k].Sum,
                     &arrBitProfile[k]);
                 if (fracBits >= (uint)CostCoefficients.Current.MultiArrayIncompressibleThreshold * (uint)arrHisto[k].Sum)
                 {
@@ -1555,7 +1555,7 @@ internal static unsafe class MultiArrayEncoder
     /// </summary>
     [SkipLocalsInit]
     private static int EncodeMultiArray_Short(byte* dst, byte* dstEnd, byte* src, int srcSize,
-                                              HistoU8* histo, int level, int opts,
+                                              ByteHistogram* histo, int level, int opts,
                                               float speedTradeoff,
                                               float maxAllowedCost, float* costPtr,
                                               EncodeArrayFunc encodeArray,
@@ -1563,15 +1563,15 @@ internal static unsafe class MultiArrayEncoder
                                               uint* log2Table)
     {
         float bestCost = StreamLZConstants.InvalidCost;  // Will be set by caller's cost function
-        HistoU8 histoL, histoR;
-        HistoU8* bestHisto = stackalloc HistoU8[2];
+        ByteHistogram histoL, histoR;
+        ByteHistogram* bestHisto = stackalloc ByteHistogram[2];
         int bestSplit = 0;
 
         int nLoops = Math.Max(Math.Min((srcSize + 128) >> 8, 8), 1);
         for (int i = 0; i < nLoops; i++)
         {
             int splitPos = srcSize * (i + 1) / (nLoops + 1);
-            CountBytesHistoU8(src, splitPos, &histoL);
+            CountBytesHistogram(src, splitPos, &histoL);
             SubtractHisto(&histoR, histo, &histoL);
 
             // Estimate cost for two halves (using approximate cost)
@@ -1684,7 +1684,7 @@ internal static unsafe class MultiArrayEncoder
     /// </summary>
     [SkipLocalsInit]
     private static int EncodeMultiArray_Long(byte* dst, byte* dstEnd, byte* src, int srcSize,
-                                             HistoU8* histo, int level, int opts,
+                                             ByteHistogram* histo, int level, int opts,
                                              float speedTradeoff,
                                              float maxAllowedCost, float* costPtr,
                                              EncodeArrayFunc encodeArray,
@@ -1693,7 +1693,7 @@ internal static unsafe class MultiArrayEncoder
     {
         int numBlksBase = (level == 9) ? 62 : Math.Max(Math.Min(1 << level, 32), 8);
         int numBlks = Math.Max(Math.Min(numBlksBase, (srcSize + 256) >> 9), 3);
-        HistoU8* histos = (HistoU8*)NativeMemory.AllocZeroed((nuint)(numBlks * sizeof(HistoU8)));
+        ByteHistogram* histos = (ByteHistogram*)NativeMemory.AllocZeroed((nuint)(numBlks * sizeof(ByteHistogram)));
         MultiHistCandi* mhs = null;
 
         try
@@ -1708,7 +1708,7 @@ internal static unsafe class MultiArrayEncoder
             int size = (i == numBlks - 1) ? srcSize - pos : bytesPerBlk;
             chunkPos[i] = (uint)pos;
             chunkSize[i] = (uint)size;
-            CountBytesHistoU8(src + pos, size, &histos[i]);
+            CountBytesHistogram(src + pos, size, &histos[i]);
         }
 
         int mhsCapacity = numBlks * 3;
@@ -1781,7 +1781,7 @@ internal static unsafe class MultiArrayEncoder
         OptimizeSplitBoundaries(src, src + srcSize, histos, chunkSize, chunkPos, numBlks);
 
         // Greedy merge of adjacent blocks
-        HistoU8 tmpHist;
+        ByteHistogram tmpHist;
         float* scores = stackalloc float[64];
 
         MergeEntry* ents = stackalloc MergeEntry[63];
@@ -1980,7 +1980,7 @@ internal static unsafe class MultiArrayEncoder
     [SkipLocalsInit]
     public static int EncodeArrayU8_MultiArray(byte* dst, byte* dstEnd,
                                                byte* src, int srcSize,
-                                               HistoU8* histo, int level, int opts,
+                                               ByteHistogram* histo, int level, int opts,
                                                float speedTradeoff,
                                                float costThres, float* costPtr,
                                                EncodeArrayFunc encodeArray,

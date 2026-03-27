@@ -709,7 +709,7 @@ internal static unsafe class LzDecoder
             {
                 src += 3;
                 srcUsed = chunkhdr & 0x7FFFF;
-                mode = (chunkhdr >> 19) & 0xF;
+                mode = (chunkhdr >> StreamLZConstants.SubChunkTypeShift) & 0xF;
                 if (srcEnd - src < srcUsed)
                 {
                     throw new InvalidDataException("Fast chunk compressed chunk source data truncated.");

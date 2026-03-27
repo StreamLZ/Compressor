@@ -418,7 +418,7 @@ internal static unsafe class TansEncoder
     /// Uses a heap to greedily adjust weights to minimize KL divergence.
     /// </summary>
     [SkipLocalsInit]
-    private static int Tans_NormalizeCounts(uint* lookup, uint L, HistoU8* histo, int histoSum, int numSyms)
+    private static int Tans_NormalizeCounts(uint* lookup, uint L, ByteHistogram* histo, int histoSum, int numSyms)
     {
         int symsUsed = 0;
         double multiplier = (double)L / (double)histoSum;
@@ -872,7 +872,7 @@ internal static unsafe class TansEncoder
     /// <returns>Compressed size in bytes, or -1 if encoding is not beneficial.</returns>
     [SkipLocalsInit]
     public static int EncodeArrayU8_tANS(byte* dst, byte* dstEnd, byte* src, int srcSize,
-                                          HistoU8* histo, float speedTradeoff,
+                                          ByteHistogram* histo, float speedTradeoff,
                                           float* costPtr, uint* log2LookupTable)
     {
         if (srcSize < 32)
@@ -1000,7 +1000,7 @@ internal static unsafe class TansEncoder
     /// </summary>
     [SkipLocalsInit]
     public static int EncodeArrayU8_tANS(byte* dst, byte* dstEnd, byte* src, int srcSize,
-                                          HistoU8* histo, float speedTradeoff,
+                                          ByteHistogram* histo, float speedTradeoff,
                                           float* costPtr)
     {
         return EncodeArrayU8_tANS(dst, dstEnd, src, srcSize, histo, speedTradeoff, costPtr, null);

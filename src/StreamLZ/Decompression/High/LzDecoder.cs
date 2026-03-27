@@ -528,7 +528,7 @@ internal static unsafe partial class LzDecoder
         }
         src += 3;
         int srcUsed1 = chunkhdr1 & 0x7FFFF;
-        int mode1 = (chunkhdr1 >> 19) & 0xF;
+        int mode1 = (chunkhdr1 >> StreamLZConstants.SubChunkTypeShift) & 0xF;
         if (srcEnd - src < srcUsed1 || srcUsed1 >= dstCount1)
         {
             return 0;
@@ -548,7 +548,7 @@ internal static unsafe partial class LzDecoder
             return 0; // entropy-only, can't pipeline
         }
         int srcUsed2 = chunkhdr2 & 0x7FFFF;
-        int mode2 = (chunkhdr2 >> 19) & 0xF;
+        int mode2 = (chunkhdr2 >> StreamLZConstants.SubChunkTypeShift) & 0xF;
         byte* src2Data = src2Hdr + 3;
         if (srcEnd - src2Data < srcUsed2 || srcUsed2 >= dstCount2)
         {
@@ -686,7 +686,7 @@ internal static unsafe partial class LzDecoder
             {
                 src += 3;
                 srcUsed = chunkhdr & 0x7FFFF;
-                mode = (chunkhdr >> 19) & 0xF;
+                mode = (chunkhdr >> StreamLZConstants.SubChunkTypeShift) & 0xF;
                 if (srcEnd - src < srcUsed)
                 {
                     throw new InvalidDataException($"High DecodeChunk: source data truncated (need {srcUsed} bytes, have {(int)(srcEnd - src)}).");

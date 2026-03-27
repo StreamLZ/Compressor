@@ -9,7 +9,7 @@ namespace StreamLZ.Compression;
 /// 256-bin byte histogram with utility methods.
 /// </summary>
 [StructLayout(LayoutKind.Sequential)]
-internal unsafe struct HistoU8
+internal unsafe struct ByteHistogram
 {
     /// <summary>Per-byte-value frequency counts (256 entries, one per possible byte value).</summary>
     public fixed uint Count[256];

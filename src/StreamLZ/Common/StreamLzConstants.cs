@@ -47,6 +47,13 @@ internal static class StreamLZConstants
     public const int CompressBufferPadding = 16;
 
     /// <summary>
+    /// Bit position of the chunk type field in the 3-byte big-endian sub-chunk header.
+    /// The sub-chunk header packs: [23] compressed flag | [22:19] type | [18:0] size.
+    /// Equals <c>ChunkSizeBits + 1</c> because bit 18 is reserved for the size MSB.
+    /// </summary>
+    public const int SubChunkTypeShift = 19;
+
+    /// <summary>
     /// Bit flag in the 3-byte big-endian chunk header indicating the chunk contains LZ-compressed data.
     /// When clear, the chunk is entropy-only (pure Huffman, no match-copy loop).
     /// </summary>
