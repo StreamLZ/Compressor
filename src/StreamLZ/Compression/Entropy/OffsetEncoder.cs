@@ -549,7 +549,7 @@ internal static unsafe class OffsetEncoder
         // Fast path for minMatchLen == 8: encode with plain array encoder
         if (minMatchLen == 8)
         {
-            n = HighEntropyEncoder.EncodeArrayU8(dst, dstEnd, u8Offs, offsCount, opts,
+            n = EntropyEncoder.EncodeArrayU8(dst, dstEnd, u8Offs, offsCount, opts,
                 speedTradeoff, costPtr, level, histoPtr);
             if (n < 0)
             {
@@ -596,7 +596,7 @@ internal static unsafe class OffsetEncoder
                     HistoU8 histoBuf = default;
                     float cost = StreamLZConstants.InvalidCost;
 
-                    int n1 = HighEntropyEncoder.EncodeArrayU8CompactHeader(tmpDst, tmpDstEnd,
+                    int n1 = EntropyEncoder.EncodeArrayU8CompactHeader(tmpDst, tmpDstEnd,
                         u8OffsHi, offsCount, opts, speedTradeoff, &cost, level,
                         histoPtr != null ? &histoBuf : null);
                     if (n1 < 0)
@@ -609,7 +609,7 @@ internal static unsafe class OffsetEncoder
                     if (offsEncodeType > 1)
                     {
                         costLo = StreamLZConstants.InvalidCost;
-                        n1 = HighEntropyEncoder.EncodeArrayU8CompactHeader(tmpDst, tmpDstEnd,
+                        n1 = EntropyEncoder.EncodeArrayU8CompactHeader(tmpDst, tmpDstEnd,
                             u8OffsLo, offsCount, opts, speedTradeoff, &costLo, level,
                             histoLoPtr);
                         if (n1 < 0)

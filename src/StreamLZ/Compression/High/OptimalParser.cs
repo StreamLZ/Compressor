@@ -185,7 +185,7 @@ internal static unsafe partial class Compressor
         }
 
         int stateWidth = (lzcoder.CompressionLevel >= 8) ? 2 : 1;
-        int fourOrEight = (lzcoder.CompressionLevel >= 6) ? 8 : 4;
+        int maxLiteralRunTrials = (lzcoder.CompressionLevel >= 6) ? 8 : 4;
 
         var opts2 = lzcoder.Options!;
         int dictSize = opts2.DictionarySize > 0 && opts2.DictionarySize <= StreamLZConstants.MaxDictionarySize
@@ -571,16 +571,16 @@ internal static unsafe partial class Compressor
 
                             int bestLengthSoFar = 0;
                             int litsSincePrev = pos - prevOffset;
-                            int bestBitsY = 0x7FFFFFFF;
+                            int lowestCostFromAnyLazyTrial = 0x7FFFFFFF;
 
                             // For each literal-run length
-                            for (int lazy = 0; lazy <= fourOrEight; lazy++)
+                            for (int lazy = 0; lazy <= maxLiteralRunTrials; lazy++)
                             {
                                 int literalRunLength, totalBits, prevState;
 
                                 if (stateWidth == 1)
                                 {
-                                    literalRunLength = (lazy == fourOrEight && litsSincePrev > fourOrEight) ? litsSincePrev : lazy;
+                                    literalRunLength = (lazy == maxLiteralRunTrials && litsSincePrev > maxLiteralRunTrials) ? litsSincePrev : lazy;
                                     if (pos - literalRunLength < chunkStart)
                                     {
                                         break;
@@ -686,9 +686,9 @@ internal static unsafe partial class Compressor
                                     break;
                                 }
 
-                                if (totalBits < bestBitsY)
+                                if (totalBits < lowestCostFromAnyLazyTrial)
                                 {
-                                    bestBitsY = totalBits;
+                                    lowestCostFromAnyLazyTrial = totalBits;
 
                                     // For each match entry
                                     for (int matchidx = 0; matchidx < numMatch; matchidx++)

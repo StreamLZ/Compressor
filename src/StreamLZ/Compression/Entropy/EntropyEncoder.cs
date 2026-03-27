@@ -1,4 +1,4 @@
-// HighEntropyEncoder.cs — Entropy encoding, cost estimation, and bitstream writing.
+// EntropyEncoder.cs — Entropy encoding, cost estimation, and bitstream writing.
 // Shared by High and Fast compressors.
 
 using System.Numerics;
@@ -11,7 +11,7 @@ namespace StreamLZ.Compression.Entropy;
 /// Entropy encoding, cost estimation, and bitstream writing functions shared by
 /// High and Fast compressors.
 /// </summary>
-internal static class HighEntropyEncoder
+internal static class EntropyEncoder
 {
     /// <summary>Encode a byte array using memcpy (identity) encoding.</summary>
     public static unsafe int EncodeArrayU8_Memcpy(byte* dst, byte* dstEnd, byte* src, int count)
