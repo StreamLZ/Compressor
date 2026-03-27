@@ -687,6 +687,9 @@ internal static unsafe class StreamLZDecoder
                 new Span<byte>(localScratch, scratchSize).Clear();
                 StreamLZHeader hdr = default;
                 int srcUsed = 0, dstUsed = 0;
+                // Self-contained chunks decode with dstOffset = 0 because they must not
+                // depend on earlier chunk output. The encoder appends a tail prefix table
+                // for the first 8 bytes of chunks 1..N, which phase 3 restores below.
                 bool ok = DecodeStep(ref hdr, ref srcUsed, ref dstUsed,
                     localScratch, scratchSize,
                     (byte*)dstN + q.DstOffset, 0, q.DstSize,
@@ -705,6 +708,8 @@ internal static unsafe class StreamLZDecoder
         }
 
         // Phase 3: Restore first 8 bytes of each chunk (except #0) from the tail.
+        // Chunk 0 keeps its inline prefix; later chunks borrow those bytes so they
+        // can decode independently and then receive the real prefix here.
         for (int i = 0; i < numChunks - 1; i++)
         {
             var q = chunks[i + 1];

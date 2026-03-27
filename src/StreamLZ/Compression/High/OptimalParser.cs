@@ -210,6 +210,10 @@ internal static unsafe partial class Compressor
             MatchFinder.ExtractLaoFromMls(mls, mlsStart, srcSize, laoManaged, 4);
         }
 
+        // Self-contained chunks may only reference bytes already decoded inside the
+        // same chunk. LAO offsets are absolute back-distances from the current
+        // position, so we compact each candidate list down to matches that fit
+        // within the chunk-local history available at that position.
         // Self-contained: filter out matches that cross chunk boundaries, compacting valid entries
         if (sc)
         {

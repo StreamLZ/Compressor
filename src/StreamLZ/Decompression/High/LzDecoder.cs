@@ -134,6 +134,9 @@ internal static unsafe partial class LzDecoder
         int n, i;
         int u32LenStreamSize = 0;
 
+        // The side bitstream is consumed from both ends: forward-coded entries come
+        // from bitsA, backward-coded entries come from bitsB. A valid stream makes
+        // the two readers meet exactly once all offset/length extras are decoded.
         bitsA.BitPos = 24;
         bitsA.Bits = 0;
         bitsA.P = src;
@@ -148,6 +151,8 @@ internal static unsafe partial class LzDecoder
 
         if (!excessFlag)
         {
+            // Non-excess blocks start with the u32 length-stream count in the
+            // backward reader before the alternating backward-coded payload.
             if (bitsB.Bits < 0x2000)
             {
                 return false;
@@ -179,7 +184,9 @@ internal static unsafe partial class LzDecoder
         }
         else
         {
-            // New way of coding offsets
+            // New way of coding offsets: the high bits of cmd give the number of
+            // explicit low bits to read, while the low 3 bits select the bucket base.
+            // nb == 0 is valid and means the bucket base fully determines the offset.
             int* offsStreamOrg = offsStream;
             byte* packedOffsStreamEnd = packedOffsStream + packedOffsStreamSize;
             uint cmd, offs;
@@ -243,7 +250,8 @@ internal static unsafe partial class LzDecoder
             }
         }
 
-        // Verify the forward and backward readers meet
+        // Rewind each reader to the next unread byte before comparing pointers.
+        // If they do not meet exactly, the packed side bitstream was malformed.
         bitsA.P -= (24 - bitsA.BitPos) >> 3;
         bitsB.P += (24 - bitsB.BitPos) >> 3;
 
