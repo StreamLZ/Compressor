@@ -30,12 +30,13 @@ namespace StreamLZ;
 /// Memory usage is bounded by block size + window size.
 /// </para>
 /// </remarks>
-public sealed class SlzStream : Stream
+public sealed class SlzStream : Stream, IAsyncDisposable
 {
     private readonly Stream _innerStream;
     private readonly CompressionMode _mode;
     private readonly bool _leaveOpen;
     private readonly int _level;
+    private readonly bool _useContentChecksum;
     private bool _disposed;
 
     // ── Compress state ──
@@ -44,6 +45,7 @@ public sealed class SlzStream : Stream
     private byte[]? _compressOutputBuf;  // receives compressed block output
     private bool _frameHeaderWritten;
     private int _blockSize;
+    private XxHash32? _compressContentHasher;
 
     // ── Decompress state ──
     private byte[]? _windowBuf;          // sliding window + current block output
@@ -96,6 +98,17 @@ public sealed class SlzStream : Stream
         _level = Math.Clamp(level, 1, 11);
         _blockSize = FrameConstants.DefaultBlockSize;
         _windowSize = FrameConstants.DefaultWindowSize;
+    }
+
+    /// <summary>
+    /// Initializes a new instance of <see cref="SlzStream"/> with the specified options.
+    /// </summary>
+    public SlzStream(Stream stream, CompressionMode mode, SlzStreamOptions options)
+        : this(stream, mode, (options ?? throw new ArgumentNullException(nameof(options))).LeaveOpen, options.Level)
+    {
+        _blockSize = options.BlockSize;
+        _windowSize = options.WindowSize;
+        _useContentChecksum = options.UseContentChecksum;
     }
 
     /// <inheritdoc/>
@@ -195,6 +208,9 @@ public sealed class SlzStream : Stream
         int compBound = StreamLZCompressor.GetCompressBound(_blockSize);
         _compressOutputBuf = ArrayPool<byte>.Shared.Rent(compBound + StreamLZConstants.CompressBufferPadding);
         _compressInputPos = 0;
+
+        if (_useContentChecksum)
+            _compressContentHasher = new XxHash32();
     }
 
     private void EnsureFrameHeaderWritten()
@@ -204,7 +220,8 @@ public sealed class SlzStream : Stream
 
         var mapped = Slz.MapLevel(_level);
         Span<byte> headerBuf = stackalloc byte[FrameConstants.MaxHeaderSize];
-        int headerSize = FrameSerializer.WriteHeader(headerBuf, (int)mapped.Codec, mapped.CodecLevel, _blockSize);
+        int headerSize = FrameSerializer.WriteHeader(headerBuf, (int)mapped.Codec, mapped.CodecLevel, _blockSize,
+            useContentChecksum: _useContentChecksum);
         _innerStream.Write(headerBuf[..headerSize]);
         _frameHeaderWritten = true;
     }
@@ -218,6 +235,10 @@ public sealed class SlzStream : Stream
 
         var mapped = Slz.MapLevel(_level);
         int inputLen = _compressInputPos;
+
+        // Hash uncompressed data for content checksum
+        _compressContentHasher?.Append(_compressInputBuf.AsSpan(0, inputLen));
+
         int compBound = StreamLZCompressor.GetCompressBound(inputLen);
 
         if (_compressOutputBuf!.Length < compBound + StreamLZConstants.CompressBufferPadding)
@@ -261,6 +282,13 @@ public sealed class SlzStream : Stream
             Span<byte> endMark = stackalloc byte[4];
             FrameSerializer.WriteEndMark(endMark);
             _innerStream.Write(endMark);
+
+            if (_compressContentHasher != null)
+            {
+                Span<byte> checksumBuf = stackalloc byte[4];
+                _compressContentHasher.GetHashAndReset(checksumBuf);
+                _innerStream.Write(checksumBuf);
+            }
         }
     }
 
@@ -565,4 +593,46 @@ public sealed class SlzStream : Stream
         }
         base.Dispose(disposing);
     }
+
+    /// <summary>
+    /// Asynchronously disposes the stream, finalizing compression if needed and
+    /// optionally disposing the inner stream.
+    /// </summary>
+    public override async ValueTask DisposeAsync()
+    {
+        if (!_disposed)
+        {
+            if (_mode == CompressionMode.Compress)
+                FinalizeCompress();
+
+            if (_compressInputBuf != null) ArrayPool<byte>.Shared.Return(_compressInputBuf);
+            if (_compressOutputBuf != null) ArrayPool<byte>.Shared.Return(_compressOutputBuf);
+            if (_windowBuf != null) ArrayPool<byte>.Shared.Return(_windowBuf);
+            if (_compressedReadBuf != null) ArrayPool<byte>.Shared.Return(_compressedReadBuf);
+
+            if (!_leaveOpen)
+                await _innerStream.DisposeAsync().ConfigureAwait(false);
+
+            _disposed = true;
+        }
+        GC.SuppressFinalize(this);
+        await base.DisposeAsync().ConfigureAwait(false);
+    }
+}
+
+/// <summary>
+/// Options for configuring an <see cref="SlzStream"/> instance.
+/// </summary>
+public class SlzStreamOptions
+{
+    /// <summary>If true, the inner stream is not closed when the SlzStream is disposed.</summary>
+    public bool LeaveOpen { get; set; }
+    /// <summary>Compression level 1-11 (only used in Compress mode). Default: 6.</summary>
+    public int Level { get; set; } = Slz.DefaultLevel;
+    /// <summary>When true, appends an XXH32 content checksum after the last block (Compress mode only).</summary>
+    public bool UseContentChecksum { get; set; }
+    /// <summary>Block size in bytes. Must be a power of 2. Default: 256KB.</summary>
+    public int BlockSize { get; set; } = FrameConstants.DefaultBlockSize;
+    /// <summary>Sliding window size in bytes. Larger values improve ratio but use more memory. Default: 4MB.</summary>
+    public int WindowSize { get; set; } = FrameConstants.DefaultWindowSize;
 }
