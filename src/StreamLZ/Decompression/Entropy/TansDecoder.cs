@@ -21,7 +21,7 @@ internal static unsafe class TansDecoder
     /// A[] holds symbols with weight 1, B[] holds (symbol &lt;&lt; 16 | weight) for weight >= 2.
     /// </summary>
     [StructLayout(LayoutKind.Sequential)]
-    public unsafe struct TansData
+    internal unsafe struct TansData
     {
         public uint AUsed;
         public uint BUsed;
@@ -33,7 +33,7 @@ internal static unsafe class TansDecoder
     /// Single entry in the TANS decode LUT.
     /// </summary>
     [StructLayout(LayoutKind.Sequential)]
-    public struct TansLutEnt
+    internal struct TansLutEnt
     {
         public uint X;
         public byte BitsX;
@@ -45,7 +45,7 @@ internal static unsafe class TansDecoder
     /// Parameters for the 5-state interleaved TANS decoder.
     /// </summary>
     [StructLayout(LayoutKind.Sequential)]
-    public unsafe struct TansDecoderParams
+    internal unsafe struct TansDecoderParams
     {
         public TansLutEnt* Lut;
         public byte* Dst;

@@ -21,7 +21,7 @@ internal static unsafe partial class HuffmanDecoder
     /// Range entry used during Huffman code-length table construction.
     /// </summary>
     [StructLayout(LayoutKind.Sequential)]
-    public struct HuffRange
+    internal struct HuffRange
     {
         public ushort Symbol;
         public ushort Num;
@@ -34,7 +34,7 @@ internal static unsafe partial class HuffmanDecoder
     /// Two forward streams (src, src_mid) and one backward stream (src_end).
     /// </summary>
     [StructLayout(LayoutKind.Sequential)]
-    public unsafe struct HuffReader
+    internal unsafe struct HuffReader
     {
         public byte* Output;
         public byte* OutputEnd;
@@ -54,7 +54,7 @@ internal static unsafe partial class HuffmanDecoder
     /// Secondary bit reader used by Golomb-Rice decoding.
     /// </summary>
     [StructLayout(LayoutKind.Sequential)]
-    public unsafe struct BitReader2
+    internal unsafe struct BitReader2
     {
         public byte* P;
         public byte* PEnd;

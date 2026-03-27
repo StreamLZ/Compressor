@@ -17,16 +17,26 @@ namespace StreamLZ;
 /// <item><term>6-8</term><description>Balanced (3.8 GB/s decompress, ~34% ratio on enwik8)</description></item>
 /// <item><term>9-11</term><description>Maximum ratio (~27% on enwik8, 1.4 GB/s decompress)</description></item>
 /// </list>
-/// <para>Default level is 6 (balanced speed and ratio).</para>
+/// <para>Default level is 6 (balanced speed and ratio). Values outside 1-11 are
+/// clamped: values &lt;= 1 map to level 1, values &gt;= 11 map to level 11.</para>
 /// <para>
-/// For in-memory compression of data under 2 GB, use <see cref="Compress(ReadOnlySpan{byte}, Span{byte}, int)"/>
-/// and <see cref="Decompress(ReadOnlySpan{byte}, Span{byte}, int)"/>.
+/// For the simplest round-trip experience, use <see cref="CompressFramed"/> and
+/// <see cref="DecompressFramed"/>. These use the SLZ1 frame format and are self-describing
+/// — no external metadata is needed to decompress.
+/// </para>
+/// <para>
+/// For zero-copy in-memory compression of data under 2 GB, use
+/// <see cref="Compress(ReadOnlySpan{byte}, Span{byte}, int)"/> and
+/// <see cref="Decompress(ReadOnlySpan{byte}, Span{byte}, int)"/>. These use raw blocks
+/// and require the caller to track the original size.
 /// </para>
 /// <para>
 /// For files of any size or stream-based I/O, use <see cref="CompressStream"/>,
 /// <see cref="DecompressStream"/>, <see cref="CompressFile"/>, or <see cref="DecompressFile"/>.
 /// These use the SLZ1 frame format with a sliding window for cross-block match references.
 /// </para>
+/// <para><b>Thread safety:</b> All static methods on this class are thread-safe.
+/// <see cref="SlzStream"/> instances are not thread-safe (same as <see cref="System.IO.Compression.GZipStream"/>).</para>
 /// </remarks>
 public static class Slz
 {
@@ -138,6 +148,67 @@ public static class Slz
             System.Buffers.ArrayPool<byte>.Shared.Return(rented);
         }
     }
+
+    // ────────────────────────────────────────────────────────────────
+    //  Framed in-memory compression (self-describing round-trip)
+    // ────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Compresses <paramref name="source"/> using the SLZ1 frame format and returns the
+    /// compressed bytes. The output is self-describing: <see cref="DecompressFramed"/>
+    /// can decompress it without knowing the original size.
+    /// </summary>
+    /// <param name="source">The data to compress.</param>
+    /// <param name="level">Compression level 1-11 (default: 6).</param>
+    /// <returns>Compressed byte array in SLZ1 frame format.</returns>
+    public static byte[] CompressFramed(ReadOnlySpan<byte> source, int level = DefaultLevel)
+    {
+        if (source.Length == 0)
+            return [];
+
+        using var input = new MemoryStream(source.ToArray(), writable: false);
+        using var output = new MemoryStream();
+        var mapped = MapLevel(level);
+        StreamLzFrameCompressor.Compress(input, output, mapped.Codec, mapped.CodecLevel,
+            contentSize: source.Length, selfContained: mapped.SelfContained);
+        return output.ToArray();
+    }
+
+    /// <summary>
+    /// Decompresses SLZ1-framed data produced by <see cref="CompressFramed"/>.
+    /// No external metadata (original size) is needed — the frame header contains it.
+    /// </summary>
+    /// <param name="compressed">SLZ1-framed compressed data.</param>
+    /// <returns>Decompressed byte array.</returns>
+    /// <exception cref="InvalidDataException">Thrown when the data is not a valid SLZ1 frame
+    /// or is corrupt.</exception>
+    public static byte[] DecompressFramed(ReadOnlySpan<byte> compressed)
+    {
+        if (compressed.Length == 0)
+            return [];
+
+        // Parse the frame header to get the content size for a single allocation
+        if (FrameSerializer.TryReadHeader(compressed, out FrameHeader header) && header.ContentSize >= 0)
+        {
+            byte[] result = new byte[header.ContentSize];
+            using var input = new MemoryStream(compressed.ToArray(), writable: false);
+            using var output = new MemoryStream(result, writable: true);
+            long written = StreamLzFrameDecompressor.Decompress(input, output);
+            if (written != header.ContentSize)
+                throw new InvalidDataException($"SLZ1 frame content size mismatch: header says {header.ContentSize} bytes, decompressed {written}.");
+            return result;
+        }
+
+        // Content size not in header — decompress with growing buffer
+        using var inputStream = new MemoryStream(compressed.ToArray(), writable: false);
+        using var outputStream = new MemoryStream();
+        StreamLzFrameDecompressor.Decompress(inputStream, outputStream);
+        return outputStream.ToArray();
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    //  Raw in-memory decompression (caller-managed buffers)
+    // ────────────────────────────────────────────────────────────────
 
     /// <summary>
     /// Decompresses <paramref name="source"/> into <paramref name="destination"/>.
@@ -278,8 +349,11 @@ public static class Slz
     /// <param name="inputPath">Path to the input file.</param>
     /// <param name="outputPath">Path to the compressed output file.</param>
     /// <param name="level">Compression level 1-11 (default: 6).</param>
+    /// <param name="useContentChecksum">When true, appends an XXH32 checksum of the
+    /// uncompressed content after the end mark for integrity verification.</param>
     /// <returns>Total compressed bytes written.</returns>
-    public static long CompressFile(string inputPath, string outputPath, int level = DefaultLevel)
+    public static long CompressFile(string inputPath, string outputPath,
+        int level = DefaultLevel, bool useContentChecksum = false)
     {
         ArgumentNullException.ThrowIfNull(inputPath);
         ArgumentNullException.ThrowIfNull(outputPath);
@@ -288,7 +362,8 @@ public static class Slz
         using var input = new FileStream(inputPath, FileMode.Open, FileAccess.Read, FileShare.Read, ioBufSize, FileOptions.SequentialScan);
         using var output = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None, ioBufSize, FileOptions.SequentialScan);
         return StreamLzFrameCompressor.Compress(input, output, mapped.Codec, mapped.CodecLevel,
-            contentSize: input.Length, selfContained: mapped.SelfContained);
+            contentSize: input.Length, useContentChecksum: useContentChecksum,
+            selfContained: mapped.SelfContained);
     }
 
     /// <summary>

@@ -49,7 +49,7 @@ internal static unsafe partial class Compressor
 
     /// <summary>A single token in the parsed LZ sequence.</summary>
     [StructLayout(LayoutKind.Sequential)]
-    public struct Token
+    internal struct Token
     {
         public int RecentOffset0;
         public int LitLen;
@@ -66,7 +66,7 @@ internal static unsafe partial class Compressor
     }
 
     /// <summary>Token array exported from the optimal parser for two-phase compression.</summary>
-    public class ExportedTokens
+    internal class ExportedTokens
     {
         public Token[] Tokens = Array.Empty<Token>();
         public int Count;
