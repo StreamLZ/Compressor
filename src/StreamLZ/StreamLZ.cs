@@ -20,7 +20,7 @@ namespace StreamLZ;
 /// <para>Default level is 6 (balanced speed and ratio). Values outside 1-11 are
 /// clamped: values &lt;= 1 map to level 1, values &gt;= 11 map to level 11.</para>
 /// <para>
-/// For the simplest round-trip experience, use <see cref="CompressFramed"/> and
+/// For the simplest round-trip experience, use <see cref="CompressFramed(ReadOnlySpan{byte}, int)"/> and
 /// <see cref="DecompressFramed"/>. These use the SLZ1 frame format and are self-describing
 /// — no external metadata is needed to decompress.
 /// </para>
@@ -126,6 +126,12 @@ public static class Slz
     }
 
     /// <summary>
+    /// Compresses <paramref name="source"/> into <paramref name="destination"/>.
+    /// </summary>
+    public static int Compress(ReadOnlySpan<byte> source, Span<byte> destination, SlzCompressionLevel level)
+        => Compress(source, destination, (int)level);
+
+    /// <summary>
     /// Compresses <paramref name="source"/> and returns the compressed bytes.
     /// </summary>
     /// <param name="source">The data to compress.</param>
@@ -148,6 +154,12 @@ public static class Slz
             System.Buffers.ArrayPool<byte>.Shared.Return(rented);
         }
     }
+
+    /// <summary>
+    /// Compresses <paramref name="source"/> and returns the compressed bytes.
+    /// </summary>
+    public static byte[] Compress(ReadOnlySpan<byte> source, SlzCompressionLevel level)
+        => Compress(source, (int)level);
 
     // ────────────────────────────────────────────────────────────────
     //  Framed in-memory compression (self-describing round-trip)
@@ -175,7 +187,13 @@ public static class Slz
     }
 
     /// <summary>
-    /// Decompresses SLZ1-framed data produced by <see cref="CompressFramed"/>.
+    /// Compresses <paramref name="source"/> using the SLZ1 frame format.
+    /// </summary>
+    public static byte[] CompressFramed(ReadOnlySpan<byte> source, SlzCompressionLevel level)
+        => CompressFramed(source, (int)level);
+
+    /// <summary>
+    /// Decompresses SLZ1-framed data produced by <see cref="CompressFramed(ReadOnlySpan{byte}, int)"/>.
     /// No external metadata (original size) is needed — the frame header contains it.
     /// </summary>
     /// <param name="compressed">SLZ1-framed compressed data.</param>
@@ -231,6 +249,39 @@ public static class Slz
         if (result < 0)
             throw new InvalidDataException("StreamLZ decompression failed: compressed data is corrupt or truncated.");
         return result;
+    }
+
+    /// <summary>
+    /// Attempts to decompress <paramref name="source"/> into <paramref name="destination"/>
+    /// without throwing on invalid data.
+    /// </summary>
+    /// <param name="source">The compressed data.</param>
+    /// <param name="destination">Buffer for decompressed output (must be at least
+    /// <paramref name="decompressedSize"/> + <see cref="SafeSpace"/> bytes).</param>
+    /// <param name="decompressedSize">Expected decompressed size in bytes.</param>
+    /// <param name="bytesWritten">On success, the number of decompressed bytes written.</param>
+    /// <returns><c>true</c> if decompression succeeded; <c>false</c> if the data is corrupt or invalid.</returns>
+    public static bool TryDecompress(ReadOnlySpan<byte> source, Span<byte> destination,
+        int decompressedSize, out int bytesWritten)
+    {
+        bytesWritten = 0;
+        if (decompressedSize < 0 || decompressedSize > int.MaxValue - SafeSpace)
+            return false;
+        if (destination.Length < decompressedSize + SafeSpace)
+            return false;
+
+        try
+        {
+            int result = StreamLZDecoder.Decompress(source, destination, decompressedSize);
+            if (result < 0)
+                return false;
+            bytesWritten = result;
+            return true;
+        }
+        catch (InvalidDataException)
+        {
+            return false;
+        }
     }
 
     /// <summary>
@@ -377,6 +428,97 @@ public static class Slz
         ArgumentNullException.ThrowIfNull(inputPath);
         ArgumentNullException.ThrowIfNull(outputPath);
         return StreamLzFrameDecompressor.DecompressFile(inputPath, outputPath);
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    //  Async file convenience methods
+    // ────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Asynchronously compresses a file using the SLZ1 frame format.
+    /// </summary>
+    /// <param name="inputPath">Path to the input file.</param>
+    /// <param name="outputPath">Path to the compressed output file.</param>
+    /// <param name="level">Compression level 1-11 (default: 6).</param>
+    /// <param name="useContentChecksum">When true, appends an XXH32 content checksum.</param>
+    /// <param name="cancellationToken">Token to cancel the operation.</param>
+    /// <returns>Total compressed bytes written.</returns>
+    public static async Task<long> CompressFileAsync(string inputPath, string outputPath,
+        int level = DefaultLevel, bool useContentChecksum = false,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(inputPath);
+        ArgumentNullException.ThrowIfNull(outputPath);
+        var mapped = MapLevel(level);
+        const int ioBufSize = 1024 * 1024;
+#pragma warning disable CA2007 // await using on FileStream — disposal is synchronous
+        await using var input = new FileStream(inputPath, FileMode.Open, FileAccess.Read, FileShare.Read, ioBufSize, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        await using var output = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None, ioBufSize, FileOptions.Asynchronous | FileOptions.SequentialScan);
+#pragma warning restore CA2007
+        return await StreamLzFrameCompressor.CompressAsync(input, output, mapped.Codec, mapped.CodecLevel,
+            contentSize: input.Length, useContentChecksum: useContentChecksum,
+            selfContained: mapped.SelfContained,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Asynchronously decompresses an SLZ1-framed file.
+    /// </summary>
+    /// <param name="inputPath">Path to the compressed input file.</param>
+    /// <param name="outputPath">Path to the decompressed output file.</param>
+    /// <param name="cancellationToken">Token to cancel the operation.</param>
+    /// <returns>Total decompressed bytes written.</returns>
+    public static async Task<long> DecompressFileAsync(string inputPath, string outputPath,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(inputPath);
+        ArgumentNullException.ThrowIfNull(outputPath);
+        const int ioBufSize = 1024 * 1024;
+#pragma warning disable CA2007 // await using on FileStream — disposal is synchronous
+        await using var input = new FileStream(inputPath, FileMode.Open, FileAccess.Read, FileShare.Read, ioBufSize, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        await using var output = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None, ioBufSize, FileOptions.Asynchronous | FileOptions.SequentialScan);
+#pragma warning restore CA2007
+        return await StreamLzFrameDecompressor.DecompressAsync(input, output,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    //  Validation
+    // ────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Checks whether <paramref name="data"/> begins with a valid SLZ1 frame header.
+    /// Does not decompress or validate the compressed payload.
+    /// </summary>
+    /// <param name="data">The data to check.</param>
+    /// <returns><c>true</c> if the data starts with a valid SLZ1 frame header.</returns>
+    public static bool IsValidFrame(ReadOnlySpan<byte> data)
+    {
+        return FrameSerializer.TryReadHeader(data, out _);
+    }
+
+    /// <summary>
+    /// Checks whether the stream begins with a valid SLZ1 frame header.
+    /// Reads up to <see cref="Common.FrameConstants.MaxHeaderSize"/> bytes.
+    /// The stream position is restored if the stream supports seeking.
+    /// </summary>
+    /// <param name="input">The stream to check.</param>
+    /// <returns><c>true</c> if the stream starts with a valid SLZ1 frame header.</returns>
+    public static bool IsValidFrame(Stream input)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        long startPos = input.CanSeek ? input.Position : -1;
+        byte[] buf = new byte[FrameConstants.MaxHeaderSize];
+        int bytesRead = 0;
+        while (bytesRead < buf.Length)
+        {
+            int n = input.Read(buf, bytesRead, buf.Length - bytesRead);
+            if (n == 0) break;
+            bytesRead += n;
+        }
+        bool valid = FrameSerializer.TryReadHeader(buf.AsSpan(0, bytesRead), out _);
+        if (startPos >= 0) input.Position = startPos;
+        return valid;
     }
 
     // ────────────────────────────────────────────────────────────────

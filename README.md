@@ -17,20 +17,20 @@ High-performance LZ compression library for .NET with streaming support.
 ```csharp
 using StreamLZ;
 
-// Compress a file (level 6 = default, balanced)
-Slz.CompressFile("input.txt", "output.slz");
+// Simplest: compress and decompress byte arrays (SLZ1 framed, self-describing)
+byte[] compressed = Slz.CompressFramed(data);
+byte[] restored = Slz.DecompressFramed(compressed); // no size tracking needed
 
-// Decompress a file
+// Compress / decompress files
+Slz.CompressFile("input.txt", "output.slz");
 Slz.DecompressFile("output.slz", "restored.txt");
 
-// Stream-based
-using var input = File.OpenRead("input.txt");
-using var output = File.Create("output.slz");
+// Stream-based (any size)
 Slz.CompressStream(input, output, level: 6);
 
-// In-memory
-byte[] data = File.ReadAllBytes("input.txt");
-byte[] compressed = Slz.Compress(data, level: 3);
+// Named compression levels
+byte[] fast = Slz.CompressFramed(data, SlzCompressionLevel.Fast);
+byte[] max = Slz.CompressFramed(data, SlzCompressionLevel.Maximum);
 ```
 
 ## Compression Levels
@@ -51,38 +51,94 @@ byte[] compressed = Slz.Compress(data, level: 3);
 
 ## API
 
-### File compression (any size)
+StreamLZ offers three API tiers. Choose based on your use case:
+
+### Framed in-memory (simplest — self-describing round-trip)
+
+Uses the SLZ1 frame format. Output includes size metadata so decompression
+needs no external information. Best for storing/transmitting compressed blobs.
 
 ```csharp
-Slz.CompressFile(inputPath, outputPath, level);
-Slz.DecompressFile(inputPath, outputPath);
+byte[] compressed = Slz.CompressFramed(data);
+byte[] restored = Slz.DecompressFramed(compressed);
+
+// Named levels for readability
+byte[] fast = Slz.CompressFramed(data, SlzCompressionLevel.Fast);
 ```
 
-### Stream compression (any size)
+### Raw in-memory (zero-copy — caller manages buffers)
+
+No framing. Caller must track the original size and provide output buffers
+(including `Slz.SafeSpace` extra bytes for decompression). Best for hot paths
+where you control the buffer lifecycle.
 
 ```csharp
-Slz.CompressStream(input, output, level);
+int bound = Slz.GetCompressBound(data.Length);
+byte[] dst = new byte[bound];
+int compSize = Slz.Compress(data, dst, level: 3);
+
+byte[] output = new byte[originalSize + Slz.SafeSpace];
+Slz.Decompress(compressed, output, originalSize);
+
+// Non-throwing variant for untrusted data
+if (Slz.TryDecompress(compressed, output, originalSize, out int written))
+    // success
+```
+
+**Important:** Raw and framed formats are not interchangeable. Data compressed
+with `Compress` must be decompressed with `Decompress` (not `DecompressFramed`),
+and vice versa.
+
+### File and stream (any size, SLZ1 framed)
+
+Uses the SLZ1 frame format with a sliding window for cross-block match references.
+Supports files of any size with bounded memory usage.
+
+```csharp
+// Sync
+Slz.CompressFile("input.txt", "output.slz");
+Slz.DecompressFile("output.slz", "restored.txt");
+Slz.CompressStream(input, output, level: 6);
 Slz.DecompressStream(input, output);
-```
 
-### In-memory compression (under 2 GB)
+// Async
+await Slz.CompressFileAsync("input.txt", "output.slz", cancellationToken: ct);
+await Slz.DecompressFileAsync("output.slz", "restored.txt", cancellationToken: ct);
 
-```csharp
-byte[] compressed = Slz.Compress(data, level);
-int size = Slz.Compress(source, destination, level);
-int size = Slz.Decompress(compressed, destination, originalSize);
+// With content checksum for integrity verification
+Slz.CompressFile("input.txt", "output.slz", useContentChecksum: true);
 ```
 
 ### SlzStream (GZipStream-style wrapper)
 
 ```csharp
-// Compress
-using var compressStream = new SlzStream(outputStream, CompressionMode.Compress);
+// Compress (supports await using for async disposal)
+await using var compressStream = new SlzStream(outputStream, CompressionMode.Compress);
 inputStream.CopyTo(compressStream);
 
 // Decompress
-using var decompressStream = new SlzStream(inputStream, CompressionMode.Decompress);
+await using var decompressStream = new SlzStream(inputStream, CompressionMode.Decompress);
 decompressStream.CopyTo(outputStream);
+
+// With options
+var options = new SlzStreamOptions
+{
+    Level = 9,
+    UseContentChecksum = true,
+    LeaveOpen = true
+};
+await using var stream = new SlzStream(inner, CompressionMode.Compress, options);
+```
+
+**Note:** Disposing an `SlzStream` in compress mode without writing any data produces
+no output. To get a valid empty SLZ1 stream, write at least one byte, or use
+`CompressFramed(ReadOnlySpan<byte>.Empty)`.
+
+### Validation
+
+```csharp
+bool valid = Slz.IsValidFrame(compressedData);
+bool valid = Slz.IsValidFrame(stream); // rewinds if seekable
 ```
 
 ### JIT warmup (optional)
