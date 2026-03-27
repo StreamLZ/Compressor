@@ -42,7 +42,7 @@ public class FramedApiTest
     [Fact]
     public void CompressFramed_DecompressFramed_Enwik8()
     {
-        string path = @"C:\Users\james.JAMESWORK2025\Repos\StreamLZ\assets\enwik8.txt";
+        string path = System.IO.Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "assets", "enwik8.txt");
         if (!System.IO.File.Exists(path)) return;
 
         byte[] original = System.IO.File.ReadAllBytes(path);

@@ -45,13 +45,10 @@ internal unsafe struct BitWriter64Forward
     /// <summary>
     /// Flushes complete bytes from the bit buffer to the output pointer (forward direction).
     /// </summary>
-    // When Pos == 63 (buffer empty), t == 0 and the shift by Pos+1 == 64 is
-    // technically undefined in .NET, but harmless: t == 0 means no bytes advance
-    // and the store is a dead write. Guarding with `if (t == 0) return` would be
-    // cleaner but changes the write pattern — left as-is for bitstream safety.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Flush()
     {
+        if (Pos == 63) return; // buffer empty, nothing to flush
         uint t = (63 - Pos) >> 3;
         ulong v = Bits << (int)(Pos + 1);
         Pos += 8 * t;
@@ -140,10 +137,10 @@ internal unsafe struct BitWriter64Backward
     /// <summary>
     /// Flushes complete bytes from the bit buffer to the output pointer (backward direction).
     /// </summary>
-    // Same undefined-shift-by-64 note as forward Flush — harmless dead write.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Flush()
     {
+        if (Pos == 63) return; // buffer empty, nothing to flush
         uint t = (63 - Pos) >> 3;
         ulong v = Bits << (int)(Pos + 1);
         Pos += 8 * t;

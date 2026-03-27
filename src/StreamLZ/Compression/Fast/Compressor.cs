@@ -176,7 +176,7 @@ internal static unsafe class Compressor
         }
 
         int minimumMatchLength = 4;
-        if (sourceLength > 0x4000 && level >= -2 && level <= 3 && EntropyEncoder.IsProbablyText(sourceStart, sourceLength))
+        if (sourceLength > 0x4000 && level >= -2 && level <= 3 && StreamLZCompressor.IsProbablyText(sourceStart, sourceLength))
             minimumMatchLength = 6;
 
         if (level == 3)

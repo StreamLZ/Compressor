@@ -12,7 +12,12 @@ internal static unsafe partial class Compressor
     private const int MaxBytesPerRound = 4096;
     private const int RecentOffsetCount = 3;
 
-    /// <summary>Recent-offset ring for High (3 entries, stored at indices 4-6).</summary>
+    /// <summary>
+    /// Recent-offset ring for the High compressor (3 active entries at indices 4-6).
+    /// The carousel rotation uses overlapping array access patterns that require
+    /// scratch space at indices 0-3. This layout matches the decoder's carousel in
+    /// ProcessLzRuns and must not be changed without updating both sides.
+    /// </summary>
     [StructLayout(LayoutKind.Sequential)]
     internal struct HighRecentOffs
     {
