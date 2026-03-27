@@ -39,6 +39,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="StreamLZ.Tests" />
     <InternalsVisibleTo Include="StreamLZ.Cli" />
+    <InternalsVisibleTo Include="slz" />
     <None Include="../../LICENSE" Pack="true" PackagePath="" />
     <None Include="../../README.md" Pack="true" PackagePath="" />
     <None Include="../../icon512.png" Pack="true" PackagePath="" />
