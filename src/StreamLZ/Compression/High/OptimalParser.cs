@@ -25,8 +25,9 @@ internal static unsafe partial class Compressor
 
         int initialCopyBytes = (startPos == 0) ? 8 : 0;
         int pos = initialCopyBytes, lastPos = initialCopyBytes;
-        int dictSize = lzcoder.Options.DictionarySize > 0 && lzcoder.Options.DictionarySize <= StreamLZConstants.MaxDictionarySize
-            ? lzcoder.Options.DictionarySize : StreamLZConstants.MaxDictionarySize;
+        var opts = lzcoder.Options!;
+        int dictSize = opts.DictionarySize > 0 && opts.DictionarySize <= StreamLZConstants.MaxDictionarySize
+            ? opts.DictionarySize : StreamLZConstants.MaxDictionarySize;
 
         while (pos < sourceLength - 16)
         {
@@ -186,14 +187,15 @@ internal static unsafe partial class Compressor
         int stateWidth = (lzcoder.CompressionLevel >= 8) ? 2 : 1;
         int fourOrEight = (lzcoder.CompressionLevel >= 6) ? 8 : 4;
 
-        int dictSize = lzcoder.Options.DictionarySize > 0 && lzcoder.Options.DictionarySize <= StreamLZConstants.MaxDictionarySize
-            ? lzcoder.Options.DictionarySize : StreamLZConstants.MaxDictionarySize;
+        var opts2 = lzcoder.Options!;
+        int dictSize = opts2.DictionarySize > 0 && opts2.DictionarySize <= StreamLZConstants.MaxDictionarySize
+            ? opts2.DictionarySize : StreamLZConstants.MaxDictionarySize;
 
-        bool sc = lzcoder.Options.SelfContained;
+        bool sc = opts2.SelfContained;
         int scPosInChunk = startPos & (StreamLZConstants.ChunkSize - 1);
         int initialCopyBytes = (startPos == 0) ? 8 : 0;
         byte* srcEndSafe = source + srcSize - 8;
-        int minMatchLength = Math.Max(lzcoder.Options.MinMatchLength, 4);
+        int minMatchLength = Math.Max(opts2.MinMatchLength, 4);
         int lengthLongEnoughThres = 1 << Math.Min(8, lzcoder.CompressionLevel);
 
         // windowBase = source for the optimal parser (matches are relative to current chunk)
@@ -295,7 +297,7 @@ internal static unsafe partial class Compressor
             int bestLength = nFirst;
 
             // Try min_match_length = 3 for level >= 7
-            if (lzcoder.CompressionLevel >= 7 && lzcoder.Options.MinMatchLength <= 3)
+            if (lzcoder.CompressionLevel >= 7 && opts2.MinMatchLength <= 3)
             {
                 cost = StreamLZConstants.InvalidCost;
                 int tmpCT;
@@ -316,7 +318,7 @@ internal static unsafe partial class Compressor
             }
 
             // Try min_match_length = 8
-            if (lzcoder.Options.MinMatchLength < 8)
+            if (opts2.MinMatchLength < 8)
             {
                 cost = StreamLZConstants.InvalidCost;
                 int tmpCT;
@@ -337,7 +339,7 @@ internal static unsafe partial class Compressor
 
             if (lzcoder.CompressionLevel >= 7)
             {
-                minMatchLength = Math.Max(lzcoder.Options.MinMatchLength, 3);
+                minMatchLength = Math.Max(opts2.MinMatchLength, 3);
             }
             tmpDst = (byte*)pStatePin;
             tmpDstEnd = tmpDst + lztemp.States.Size;

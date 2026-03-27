@@ -355,8 +355,9 @@ internal static unsafe class FastParser
 
         bool useLiteralEntropyCoding = coder.UseLiteralEntropyCoding;
 
-        uint dictionarySize = FastConstants.GetEffectiveDictionarySize(coder.Options!);
-        int minimumMatchLength = Math.Max(coder.Options.MinMatchLength, 4);
+        var opts = coder.Options!;
+        uint dictionarySize = FastConstants.GetEffectiveDictionarySize(opts);
+        int minimumMatchLength = Math.Max(opts.MinMatchLength, 4);
 
         FastStreamWriter writer;
         FastStreamWriter.Initialize(&writer, sourceLength, source, useLiteralEntropyCoding && (level >= 0));
@@ -435,8 +436,9 @@ internal static unsafe class FastParser
 
         bool useLiteralEntropyCoding = coder.UseLiteralEntropyCoding;
 
-        uint dictionarySize = FastConstants.GetEffectiveDictionarySize(coder.Options!);
-        int minimumMatchLength = Math.Max(coder.Options.MinMatchLength, 4);
+        var opts = coder.Options!;
+        uint dictionarySize = FastConstants.GetEffectiveDictionarySize(opts);
+        int minimumMatchLength = Math.Max(opts.MinMatchLength, 4);
 
         FastStreamWriter writer;
         FastStreamWriter.Initialize(&writer, sourceLength, source, useLiteralEntropyCoding && (level >= 0));
@@ -515,8 +517,9 @@ internal static unsafe class FastParser
 
         bool useLiteralEntropyCoding = coder.UseLiteralEntropyCoding;
 
-        uint dictionarySize = FastConstants.GetEffectiveDictionarySize(coder.Options!);
-        int minimumMatchLength = Math.Max(coder.Options.MinMatchLength, 4);
+        var opts = coder.Options!;
+        uint dictionarySize = FastConstants.GetEffectiveDictionarySize(opts);
+        int minimumMatchLength = Math.Max(opts.MinMatchLength, 4);
 
         FastStreamWriter writer;
         FastStreamWriter.Initialize(&writer, sourceLength, source, useLiteralEntropyCoding && (level >= 0));
