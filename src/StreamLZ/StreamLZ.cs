@@ -21,7 +21,7 @@ namespace StreamLZ;
 /// clamped: values &lt;= 1 map to level 1, values &gt;= 11 map to level 11.</para>
 /// <para>
 /// For the simplest round-trip experience, use <see cref="CompressFramed(ReadOnlySpan{byte}, int)"/> and
-/// <see cref="DecompressFramed"/>. These use the SLZ1 frame format and are self-describing
+/// <see cref="DecompressFramed(ReadOnlySpan{byte})"/>. These use the SLZ1 frame format and are self-describing
 /// — no external metadata is needed to decompress.
 /// </para>
 /// <para>
@@ -31,8 +31,8 @@ namespace StreamLZ;
 /// and require the caller to track the original size.
 /// </para>
 /// <para>
-/// For files of any size or stream-based I/O, use <see cref="CompressStream"/>,
-/// <see cref="DecompressStream"/>, <see cref="CompressFile"/>, or <see cref="DecompressFile"/>.
+/// For files of any size or stream-based I/O, use <see cref="CompressStream(Stream, Stream, int, long, bool)"/>,
+/// <see cref="DecompressStream"/>, <see cref="CompressFile(string, string, int, bool)"/>, or <see cref="DecompressFile"/>.
 /// These use the SLZ1 frame format with a sliding window for cross-block match references.
 /// </para>
 /// <para><b>Thread safety:</b> All static methods on this class are thread-safe.
@@ -167,7 +167,7 @@ public static class Slz
 
     /// <summary>
     /// Compresses <paramref name="source"/> using the SLZ1 frame format and returns the
-    /// compressed bytes. The output is self-describing: <see cref="DecompressFramed"/>
+    /// compressed bytes. The output is self-describing: <see cref="DecompressFramed(ReadOnlySpan{byte})"/>
     /// can decompress it without knowing the original size.
     /// </summary>
     /// <param name="source">The data to compress.</param>
@@ -225,6 +225,41 @@ public static class Slz
         return outputStream.ToArray();
     }
 
+    /// <summary>
+    /// Decompresses SLZ1-framed data into <paramref name="destination"/> without allocation.
+    /// </summary>
+    /// <param name="compressed">SLZ1-framed compressed data.</param>
+    /// <param name="destination">Buffer for decompressed output. Must be large enough to hold
+    /// the decompressed data plus <see cref="SafeSpace"/> bytes.</param>
+    /// <returns>Number of decompressed bytes written.</returns>
+    /// <exception cref="InvalidDataException">Thrown when the data is not valid SLZ1 or is corrupt.</exception>
+    /// <exception cref="ArgumentException">Thrown when <paramref name="destination"/> is too small.</exception>
+    public static int DecompressFramed(ReadOnlySpan<byte> compressed, Span<byte> destination)
+    {
+        if (compressed.Length == 0)
+            return 0;
+
+        if (!FrameSerializer.TryReadHeader(compressed, out FrameHeader header))
+            throw new InvalidDataException("Not a valid SLZ1 stream: expected magic bytes 'SLZ1'.");
+
+        if (header.ContentSize >= 0)
+        {
+            int needed = (int)header.ContentSize + SafeSpace;
+            if (destination.Length < needed)
+                throw new ArgumentException($"Destination buffer too small. Need at least {needed} bytes (contentSize {header.ContentSize} + SafeSpace {SafeSpace}), got {destination.Length}.", nameof(destination));
+        }
+
+        using var input = new MemoryStream(compressed.ToArray(), writable: false);
+        using var output = new MemoryStream();
+        long written = StreamLzFrameDecompressor.Decompress(input, output);
+
+        if (destination.Length < (int)written + SafeSpace)
+            throw new ArgumentException($"Destination buffer too small. Need at least {(int)written + SafeSpace} bytes, got {destination.Length}.", nameof(destination));
+
+        output.GetBuffer().AsSpan(0, (int)written).CopyTo(destination);
+        return (int)written;
+    }
+
     // ────────────────────────────────────────────────────────────────
     //  Raw in-memory decompression (caller-managed buffers)
     // ────────────────────────────────────────────────────────────────
@@ -279,7 +314,7 @@ public static class Slz
             bytesWritten = result;
             return true;
         }
-        catch (InvalidDataException)
+        catch (Exception ex) when (ex is not OutOfMemoryException and not StackOverflowException)
         {
             return false;
         }
@@ -324,6 +359,11 @@ public static class Slz
         return StreamLzFrameCompressor.Compress(input, output, mapped.Codec, mapped.CodecLevel, contentSize,
             useContentChecksum: useContentChecksum, selfContained: mapped.SelfContained);
     }
+
+    /// <inheritdoc cref="CompressStream(Stream, Stream, int, long, bool)"/>
+    public static long CompressStream(Stream input, Stream output, SlzCompressionLevel level,
+        long contentSize = -1, bool useContentChecksum = false)
+        => CompressStream(input, output, (int)level, contentSize, useContentChecksum);
 
     /// <summary>
     /// Decompresses SLZ1-framed data from <paramref name="input"/> to <paramref name="output"/>.
@@ -372,6 +412,12 @@ public static class Slz
             cancellationToken: cancellationToken).ConfigureAwait(false);
     }
 
+    /// <inheritdoc cref="CompressStreamAsync(Stream, Stream, int, long, bool, CancellationToken)"/>
+    public static Task<long> CompressStreamAsync(Stream input, Stream output, SlzCompressionLevel level,
+        long contentSize = -1, bool useContentChecksum = false,
+        CancellationToken cancellationToken = default)
+        => CompressStreamAsync(input, output, (int)level, contentSize, useContentChecksum, cancellationToken);
+
     /// <summary>
     /// Asynchronously decompresses SLZ1-framed data from <paramref name="input"/> to <paramref name="output"/>.
     /// </summary>
@@ -418,6 +464,11 @@ public static class Slz
             selfContained: mapped.SelfContained);
     }
 
+    /// <inheritdoc cref="CompressFile(string, string, int, bool)"/>
+    public static long CompressFile(string inputPath, string outputPath, SlzCompressionLevel level,
+        bool useContentChecksum = false)
+        => CompressFile(inputPath, outputPath, (int)level, useContentChecksum);
+
     /// <summary>
     /// Decompresses an SLZ1-framed file.
     /// </summary>
@@ -462,6 +513,11 @@ public static class Slz
             cancellationToken: cancellationToken).ConfigureAwait(false);
     }
 
+    /// <inheritdoc cref="CompressFileAsync(string, string, int, bool, CancellationToken)"/>
+    public static Task<long> CompressFileAsync(string inputPath, string outputPath, SlzCompressionLevel level,
+        bool useContentChecksum = false, CancellationToken cancellationToken = default)
+        => CompressFileAsync(inputPath, outputPath, (int)level, useContentChecksum, cancellationToken);
+
     /// <summary>
     /// Asynchronously decompresses an SLZ1-framed file.
     /// </summary>
@@ -501,14 +557,17 @@ public static class Slz
     /// <summary>
     /// Checks whether the stream begins with a valid SLZ1 frame header.
     /// Reads up to <see cref="Common.FrameConstants.MaxHeaderSize"/> bytes.
-    /// The stream position is restored if the stream supports seeking.
+    /// The stream position is always restored after reading.
     /// </summary>
-    /// <param name="input">The stream to check.</param>
+    /// <param name="input">The stream to check. Must be seekable.</param>
     /// <returns><c>true</c> if the stream starts with a valid SLZ1 frame header.</returns>
+    /// <exception cref="NotSupportedException">Thrown when <paramref name="input"/> is not seekable.</exception>
     public static bool IsValidFrame(Stream input)
     {
         ArgumentNullException.ThrowIfNull(input);
-        long startPos = input.CanSeek ? input.Position : -1;
+        if (!input.CanSeek)
+            throw new NotSupportedException("IsValidFrame requires a seekable stream. Non-seekable streams would lose the header bytes.");
+        long startPos = input.Position;
         byte[] buf = new byte[FrameConstants.MaxHeaderSize];
         int bytesRead = 0;
         while (bytesRead < buf.Length)
@@ -518,7 +577,7 @@ public static class Slz
             bytesRead += n;
         }
         bool valid = FrameSerializer.TryReadHeader(buf.AsSpan(0, bytesRead), out _);
-        if (startPos >= 0) input.Position = startPos;
+        input.Position = startPos;
         return valid;
     }
 
