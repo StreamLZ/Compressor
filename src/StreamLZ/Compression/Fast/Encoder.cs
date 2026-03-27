@@ -58,15 +58,19 @@ internal unsafe struct FastStreamWriter
         writer->SourcePointer = source;
         writer->SourceLength = sourceLength;
 
-        int literalSize = checked(sourceLength + 8);
-        int tokenSize = sourceLength / 2 + 8;
-        int offset16Size = sourceLength / 3;
-        int offset32Size = sourceLength / 8;
-        int lengthSize = sourceLength / 29;
+        int literalSize, tokenSize, offset16Size, offset32Size, lengthSize, totalSize;
+        checked
+        {
+            literalSize = sourceLength + 8;
+            tokenSize = sourceLength / 2 + 8;
+            offset16Size = sourceLength / 3;
+            offset32Size = sourceLength / 8;
+            lengthSize = sourceLength / 29;
 
-        int totalSize = checked(literalSize + tokenSize + offset16Size * 2 + lengthSize + offset32Size * 4 + 256);
-        if (useDeltaLiterals)
-            totalSize += literalSize;
+            totalSize = literalSize + tokenSize + offset16Size * 2 + lengthSize + offset32Size * 4 + 256;
+            if (useDeltaLiterals)
+                totalSize += literalSize;
+        }
         byte* buffer = (byte*)NativeMemory.Alloc((nuint)totalSize);
 
         writer->AllocationBase = buffer;

@@ -143,6 +143,13 @@ public static class FrameSerializer
         int blockSize = FrameConstants.DefaultBlockSize, long contentSize = -1,
         bool useContentChecksum = false, bool useBlockChecksums = false)
     {
+        if (codec < 0 || codec > 2)
+            throw new ArgumentOutOfRangeException(nameof(codec), $"Codec must be 0-2, got {codec}.");
+        if (level < 1 || level > 9)
+            throw new ArgumentOutOfRangeException(nameof(level), $"Level must be 1-9, got {level}.");
+        if (blockSize < FrameConstants.MinBlockSize || blockSize > FrameConstants.MaxBlockSize)
+            throw new ArgumentOutOfRangeException(nameof(blockSize), $"Block size must be between {FrameConstants.MinBlockSize} and {FrameConstants.MaxBlockSize}, got {blockSize}.");
+
         FrameFlags flags = FrameFlags.None;
         if (contentSize >= 0) flags |= FrameFlags.ContentSizePresent;
         if (useContentChecksum) flags |= FrameFlags.ContentChecksum;

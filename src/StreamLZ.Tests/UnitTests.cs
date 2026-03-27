@@ -1239,10 +1239,10 @@ public class FrameFormatTests
     public void FrameHeader_WriteRead_RoundTrips()
     {
         Span<byte> buf = stackalloc byte[FrameConstants.MaxHeaderSize];
-        int written = FrameSerializer.WriteHeader(buf, 3, 5, contentSize: 12345);
+        int written = FrameSerializer.WriteHeader(buf, 0, 5, contentSize: 12345);
         Assert.True(FrameSerializer.TryReadHeader(buf[..written], out FrameHeader header));
         Assert.Equal(FrameConstants.Version, header.Version);
-        Assert.Equal(3, header.Codec);
+        Assert.Equal(0, header.Codec);
         Assert.Equal(5, header.Level);
         Assert.Equal(12345L, header.ContentSize);
         Assert.Equal(FrameConstants.DefaultBlockSize, header.BlockSize);

@@ -218,22 +218,6 @@ internal static class EntropyEncoder
         }
     }
 
-    /// <summary>Determine whether source data is probably text.</summary>
-    public static unsafe bool IsProbablyText(byte* p, int size)
-    {
-        int textChars = 0;
-        int limit = Math.Min(size, 4096);
-        for (int i = 0; i < limit; i++)
-        {
-            byte ch = p[i];
-            if ((ch >= 0x20 && ch <= 0x7E) || ch == '\n' || ch == '\r' || ch == '\t')
-            {
-                textChars++;
-            }
-        }
-        return textChars > limit * 3 / 4;
-    }
-
     /// <summary>Compute hash bits based on source length and level.</summary>
     public static int GetHashBits(int srcLen, int level, CompressOptions copts,
                                    int minLowLevelBits, int maxLowLevelBits, int minHighLevelBits, int maxHighLevelBits)
