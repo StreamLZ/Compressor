@@ -720,6 +720,9 @@ internal sealed class MatchHasher2
         _firstHash = GC.AllocateUninitializedArray<uint>(1 << aBits);
         _longHash = GC.AllocateUninitializedArray<uint>(1 << bBits);
         _nextHash = GC.AllocateUninitializedArray<ushort>(1 << cBits);
+        Array.Clear(_firstHash);
+        Array.Clear(_longHash);
+        Array.Clear(_nextHash);
     }
 
     /// <summary>
@@ -996,6 +999,7 @@ internal sealed class FastMatchHasher<T> where T : unmanaged, INumberBase<T>
         }
 
         _hashTable = GC.AllocateUninitializedArray<T>(1 << bits);
+        Array.Clear(_hashTable);
     }
 
     /// <summary>
