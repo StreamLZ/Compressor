@@ -340,7 +340,13 @@ internal static unsafe partial class LzDecoder
 
             int literalLengthInt = (int)literalLength;
 
-            // Rotate recent offsets
+            // Save the previous lastOffset for literal delta decoding.
+            // The encoder computes SubLits[i] = src[i] - src[i - Recent0] using the
+            // PREVIOUS token's Recent0, then updates Recent0 after writing literals.
+            // The decoder must match: use the old lastOffset for literals, then rotate.
+            int litDeltaOffset = lastOffset;
+
+            // Rotate recent offsets (updates lastOffset for the MATCH copy)
             offset = recentOffsets[offsetIndex + 3];
             recentOffsets[offsetIndex + 3] = recentOffsets[offsetIndex + 2];
             recentOffsets[offsetIndex + 2] = recentOffsets[offsetIndex + 1];
@@ -370,7 +376,7 @@ internal static unsafe partial class LzDecoder
             // eliminates it from the fast path.
             if (dst >= dstSafeEnd)
             {
-                CopyLiteralAddExact(dst, litStream, &dst[lastOffset], literalLengthInt);
+                CopyLiteralAddExact(dst, litStream, &dst[litDeltaOffset], literalLengthInt);
                 dst += literalLengthInt;
                 litStream += literalLengthInt;
 
@@ -379,19 +385,19 @@ internal static unsafe partial class LzDecoder
             }
             else
             {
-                // Copy literals with delta add
-                CopyHelpers.Copy64Add(dst, litStream, &dst[lastOffset]);
+                // Copy literals with delta add (using PREVIOUS token's offset)
+                CopyHelpers.Copy64Add(dst, litStream, &dst[litDeltaOffset]);
                 if (literalLength > 8)
                 {
-                    CopyHelpers.Copy64Add(dst + 8, litStream + 8, &dst[lastOffset + 8]);
+                    CopyHelpers.Copy64Add(dst + 8, litStream + 8, &dst[litDeltaOffset + 8]);
                     if (literalLength > 16)
                     {
-                        CopyHelpers.Copy64Add(dst + 16, litStream + 16, &dst[lastOffset + 16]);
+                        CopyHelpers.Copy64Add(dst + 16, litStream + 16, &dst[litDeltaOffset + 16]);
                         if (literalLength > 24)
                         {
                             do
                             {
-                                CopyHelpers.Copy64Add(dst + 24, litStream + 24, &dst[lastOffset + 24]);
+                                CopyHelpers.Copy64Add(dst + 24, litStream + 24, &dst[litDeltaOffset + 24]);
                                 literalLength -= 8;
                                 dst += 8;
                                 litStream += 8;
