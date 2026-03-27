@@ -461,38 +461,7 @@ internal static unsafe class StreamLZDecoder
     private static int SerialDecodeLoop(byte* src, int srcLen, byte* dst, int dstLen,
                                         byte* scratch, int scratchSize)
     {
-        StreamLZHeader hdr = default;
-        int offset = 0;
-        int remaining = dstLen;
-        int srcUsed = 0, dstUsed = 0;
-
-        while (remaining > 0)
-        {
-            if (!DecodeStep(ref hdr, ref srcUsed, ref dstUsed,
-                            scratch, scratchSize,
-                            dst, offset, remaining,
-                            src, srcLen))
-            {
-                throw new InvalidDataException("StreamLZ serial decode step failed.");
-            }
-
-            if (srcUsed == 0)
-            {
-                throw new InvalidDataException("StreamLZ serial decode made no progress (zero bytes consumed).");
-            }
-
-            src += srcUsed;
-            srcLen -= srcUsed;
-            remaining -= dstUsed;
-            offset += dstUsed;
-        }
-
-        if (srcLen != 0)
-        {
-            throw new InvalidDataException("StreamLZ serial decode has trailing compressed bytes after full output produced.");
-        }
-
-        return offset;
+        return SerialDecodeLoopWithOffset(src, srcLen, dst, dstLen, 0, scratch, scratchSize);
     }
 
     /// <summary>

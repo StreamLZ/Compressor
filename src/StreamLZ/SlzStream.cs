@@ -459,7 +459,7 @@ public sealed class SlzStream : Stream
             throw new InvalidDataException("StreamLZ frame header too short.");
 
         if (!FrameSerializer.TryReadHeader(headerBuf, out FrameHeader header))
-            throw new InvalidDataException("Invalid StreamLZ frame header.");
+            throw new InvalidDataException("Not a valid SLZ1 stream: expected magic bytes 'SLZ1'.");
 
         _blockSize = header.BlockSize;
         _frameFlags = header.Flags;

@@ -239,7 +239,7 @@ internal static unsafe partial class Compressor
         if (numLits < 32 || level <= -4)
         {
             *chunkTypePtr = 1;
-            int n = HighEntropyEncoder.EncodeArrayU8_Memcpy(dst, destinationEnd, writer.LitsStart, numLits);
+            int n = EntropyEncoder.EncodeArrayU8_Memcpy(dst, destinationEnd, writer.LitsStart, numLits);
             if (n < 0)
             {
                 return sourceLength;
@@ -252,10 +252,10 @@ internal static unsafe partial class Compressor
             HistoU8 litsHisto, litsubHisto;
             bool hasLitsub = writer.SubLits != writer.SubLitsStart;
 
-            HighEntropyEncoder.CountBytesHistoU8(writer.LitsStart, numLits, &litsHisto);
+            EntropyEncoder.CountBytesHistoU8(writer.LitsStart, numLits, &litsHisto);
             if (hasLitsub)
             {
-                HighEntropyEncoder.CountBytesHistoU8(writer.SubLitsStart, numLits, &litsubHisto);
+                EntropyEncoder.CountBytesHistoU8(writer.SubLitsStart, numLits, &litsubHisto);
             }
             else
             {
@@ -286,7 +286,7 @@ internal static unsafe partial class Compressor
                 {
                     *chunkTypePtr = 0;
                     float litsubCost = StreamLZConstants.InvalidCost;
-                    litN = HighEntropyEncoder.EncodeArrayU8WithHisto(dst, destinationEnd, writer.SubLitsStart, numLits,
+                    litN = EntropyEncoder.EncodeArrayU8WithHisto(dst, destinationEnd, writer.SubLitsStart, numLits,
                         litsubHisto, lzcoder.EntropyOptions, lzcoder.SpeedTradeoff,
                         &litsubCost, level);
                     if (litN < 0)
@@ -307,7 +307,7 @@ internal static unsafe partial class Compressor
 
             if (!skipNormalLit)
             {
-                int n = HighEntropyEncoder.EncodeArrayU8WithHisto(dst, destinationEnd, writer.LitsStart, numLits,
+                int n = EntropyEncoder.EncodeArrayU8WithHisto(dst, destinationEnd, writer.LitsStart, numLits,
                     litsHisto, lzcoder.EntropyOptions, lzcoder.SpeedTradeoff,
                     &litCost, level);
                 if (n > 0)
@@ -325,7 +325,7 @@ internal static unsafe partial class Compressor
         }
 
         float tokenCost = StreamLZConstants.InvalidCost;
-        int tokN = HighEntropyEncoder.EncodeArrayU8(dst, destinationEnd, writer.TokensStart,
+        int tokN = EntropyEncoder.EncodeArrayU8(dst, destinationEnd, writer.TokensStart,
             (int)(writer.Tokens - writer.TokensStart),
             lzcoder.EntropyOptions, lzcoder.SpeedTradeoff,
             &tokenCost, level, stats != null ? &stats->TokenHisto : null);
@@ -337,7 +337,7 @@ internal static unsafe partial class Compressor
 
         int offsEncodeType = 0;
         float offsCost = StreamLZConstants.InvalidCost;
-        int offsN = HighEntropyEncoder.EncodeLzOffsets(dst, destinationEnd,
+        int offsN = EntropyEncoder.EncodeLzOffsets(dst, destinationEnd,
             writer.U8OffsStart, writer.U32OffsStart,
             (int)(writer.U8Offs - writer.U8OffsStart),
             lzcoder.EntropyOptions, lzcoder.SpeedTradeoff,
@@ -355,7 +355,7 @@ internal static unsafe partial class Compressor
         }
 
         float lrl8Cost = StreamLZConstants.InvalidCost;
-        int lrl8N = HighEntropyEncoder.EncodeArrayU8(dst, destinationEnd, writer.Lrl8Start,
+        int lrl8N = EntropyEncoder.EncodeArrayU8(dst, destinationEnd, writer.Lrl8Start,
             (int)(writer.Lrl8 - writer.Lrl8Start),
             lzcoder.EntropyOptions, lzcoder.SpeedTradeoff,
             &lrl8Cost, level, stats != null ? &stats->MatchLenHisto : null);
@@ -377,7 +377,7 @@ internal static unsafe partial class Compressor
             return sourceLength;
         }
 
-        int bitsN = HighEntropyEncoder.WriteLzOffsetBits(dst, destinationEnd, writer.U8OffsStart, writer.U32OffsStart,
+        int bitsN = EntropyEncoder.WriteLzOffsetBits(dst, destinationEnd, writer.U8OffsStart, writer.U32OffsStart,
             offsNum, offsEncodeType,
             writer.Len32Start, (int)(writer.Len32 - writer.Len32Start),
             flagIgnoreU32Length);

@@ -146,7 +146,7 @@ internal static unsafe class Compressor
         int level = mapped.EngineLevel;
         bool useLiteralEntropyCoding = mapped.UseLiteralEntropyCoding;
 
-        int hashBits = HighEntropyEncoder.GetHashBits(sourceLength, Math.Max(level, 2), compressionOptions, 16, 20, 17, 24);
+        int hashBits = EntropyEncoder.GetHashBits(sourceLength, Math.Max(level, 2), compressionOptions, 16, 20, 17, 24);
 
         coder.SubChunkSize = 0x20000;
         coder.CheckPlainHuffman = useLiteralEntropyCoding && (level >= 4);
@@ -176,7 +176,7 @@ internal static unsafe class Compressor
         }
 
         int minimumMatchLength = 4;
-        if (sourceLength > 0x4000 && level >= -2 && level <= 3 && HighEntropyEncoder.IsProbablyText(sourceStart, sourceLength))
+        if (sourceLength > 0x4000 && level >= -2 && level <= 3 && EntropyEncoder.IsProbablyText(sourceStart, sourceLength))
             minimumMatchLength = 6;
 
         if (level == 3)

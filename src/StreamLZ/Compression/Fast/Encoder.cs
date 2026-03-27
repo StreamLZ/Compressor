@@ -494,8 +494,8 @@ internal static unsafe class Encoder
             *chunkTypeOutput = 0;
 
             HistoU8 deltaLiteralHisto;
-            HighEntropyEncoder.CountBytesHistoU8(writer->DeltaLiteralStart, deltaLiteralCount, &deltaLiteralHisto);
-            int encodedLiteralBytes = HighEntropyEncoder.EncodeArrayU8WithHisto(destination, destinationEnd, writer->DeltaLiteralStart, deltaLiteralCount,
+            EntropyEncoder.CountBytesHistoU8(writer->DeltaLiteralStart, deltaLiteralCount, &deltaLiteralHisto);
+            int encodedLiteralBytes = EntropyEncoder.EncodeArrayU8WithHisto(destination, destinationEnd, writer->DeltaLiteralStart, deltaLiteralCount,
                 deltaLiteralHisto, entropyOpts, speedTradeoff, &literalCost, level);
             if (encodedLiteralBytes < 0 || encodedLiteralBytes > deltaLiteralCount)
                 return sourceLength;
@@ -504,17 +504,17 @@ internal static unsafe class Encoder
         else if (useLiteralEntropyCoding && literalCount >= 32)
         {
             HistoU8 literalHisto;
-            HighEntropyEncoder.CountBytesHistoU8(writer->LiteralStart, literalCount, &literalHisto);
+            EntropyEncoder.CountBytesHistoU8(writer->LiteralStart, literalCount, &literalHisto);
             int encodedBytes, encodedLiteralBytes = -1;
             if (writer->DeltaLiteralStart != null)
             {
                 HistoU8 deltaLiteralHisto;
-                HighEntropyEncoder.CountBytesHistoU8(writer->DeltaLiteralStart, literalCount, &deltaLiteralHisto);
+                EntropyEncoder.CountBytesHistoU8(writer->DeltaLiteralStart, literalCount, &deltaLiteralHisto);
                 float deltaLiteralTimeCost = CostModel.CombinePlatformCostsScaled(platforms, literalCount, 0.324f, 0.433f, 0.550f, 0.289f) * speedTradeoff;
                 if (level >= 6 || OffsetEncoder.GetHistoCostApprox(&literalHisto, literalCount) * 0.125f > OffsetEncoder.GetHistoCostApprox(&deltaLiteralHisto, literalCount) * 0.125f + deltaLiteralTimeCost)
                 {
                     *chunkTypeOutput = 0;
-                    encodedLiteralBytes = HighEntropyEncoder.EncodeArrayU8WithHisto(destination, destinationEnd, writer->DeltaLiteralStart, literalCount,
+                    encodedLiteralBytes = EntropyEncoder.EncodeArrayU8WithHisto(destination, destinationEnd, writer->DeltaLiteralStart, literalCount,
                         deltaLiteralHisto, entropyOpts, speedTradeoff, &literalCost, level);
                     literalCost += deltaLiteralTimeCost;
                     if (encodedLiteralBytes < 0 || encodedLiteralBytes >= literalCount || literalCost > rawLiteralCost)
@@ -526,7 +526,7 @@ internal static unsafe class Encoder
             }
             if (encodedLiteralBytes < 0 || level >= 6)
             {
-                encodedBytes = HighEntropyEncoder.EncodeArrayU8(destination, destinationEnd, writer->LiteralStart, literalCount,
+                encodedBytes = EntropyEncoder.EncodeArrayU8(destination, destinationEnd, writer->LiteralStart, literalCount,
                     entropyOpts, speedTradeoff, &literalCost, level, null);
                 if (encodedBytes > 0)
                 {
@@ -547,7 +547,7 @@ internal static unsafe class Encoder
             *chunkTypeOutput = 1;
             if (useLiteralEntropyCoding)
             {
-                HighEntropyEncoder.EncodeArrayU8_Memcpy(destination, destinationEnd, writer->LiteralStart, literalCount);
+                EntropyEncoder.EncodeArrayU8_Memcpy(destination, destinationEnd, writer->LiteralStart, literalCount);
             }
             else
             {
@@ -564,13 +564,13 @@ internal static unsafe class Encoder
         int encodedTokenBytes;
         if (useLiteralEntropyCoding)
         {
-            encodedTokenBytes = HighEntropyEncoder.EncodeArrayU8(destination, destinationEnd, writer->TokenStart, tokenCount,
+            encodedTokenBytes = EntropyEncoder.EncodeArrayU8(destination, destinationEnd, writer->TokenStart, tokenCount,
                 entropyOpts, speedTradeoff, &tokenCost, level, null);
         }
         else
         {
             tokenCost = tokenCount + 3;
-            encodedTokenBytes = HighEntropyEncoder.EncodeArrayU8_Memcpy(destination, destinationEnd, writer->TokenStart, tokenCount);
+            encodedTokenBytes = EntropyEncoder.EncodeArrayU8_Memcpy(destination, destinationEnd, writer->TokenStart, tokenCount);
         }
         if (encodedTokenBytes < 0)
             return sourceLength;
@@ -606,9 +606,9 @@ internal static unsafe class Encoder
             byte* offset16Destination = writer->LiteralStart + 2 * offset16Count;
             float costOffset16Low = StreamLZConstants.InvalidCost;
             float costOffset16High = StreamLZConstants.InvalidCost;
-            int highBytes = HighEntropyEncoder.EncodeArrayU8(offset16Destination, (byte*)writer->Offset16Start, highOffset16, offset16Count,
+            int highBytes = EntropyEncoder.EncodeArrayU8(offset16Destination, (byte*)writer->Offset16Start, highOffset16, offset16Count,
                 entropyOpts, speedTradeoff, &costOffset16High, level, null);
-            int lowBytes = HighEntropyEncoder.EncodeArrayU8(offset16Destination + highBytes, (byte*)writer->Offset16Start, lowOffset16, offset16Count,
+            int lowBytes = EntropyEncoder.EncodeArrayU8(offset16Destination + highBytes, (byte*)writer->Offset16Start, lowOffset16, offset16Count,
                 entropyOpts, speedTradeoff, &costOffset16Low, level, null);
             offset16Bytes = highBytes + lowBytes;
             float cost = costOffset16Low + costOffset16High + CostModel.GetDecodingTimeOffset16(platforms, offset16Count) * speedTradeoff;

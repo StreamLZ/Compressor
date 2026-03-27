@@ -52,7 +52,7 @@ internal static unsafe partial class Compressor
         CompressOptions copts, byte* srcBase, byte* srcStart)
     {
         Debug.Assert(srcBase != null && srcStart != null);
-        int hashBits = HighEntropyEncoder.GetHashBits(sourceLength, Math.Max(level, 2), copts, 16, 20, 17, 24);
+        int hashBits = EntropyEncoder.GetHashBits(sourceLength, Math.Max(level, 2), copts, 16, 20, 17, 24);
 
         coder.CodecId = (int)CodecType.High;
         coder.SubChunkSize = 0x20000;

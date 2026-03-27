@@ -553,11 +553,7 @@ internal static unsafe partial class StreamLZCompressor
         }
 
         // Append first-8-byte prefix table at the end
-        for (int i = 1; i < numChunks; i++)
-        {
-            Buffer.MemoryCopy((byte*)srcL + i * StreamLZConstants.ChunkSize, dstCur, 8, 8);
-            dstCur += 8;
-        }
+        dstCur += AppendSelfContainedPrefixTable((byte*)srcL, srcSize, dstCur);
 
         return (int)(dstCur - destinationStart);
     }
@@ -797,7 +793,7 @@ internal static unsafe partial class StreamLZCompressor
                 if (AreAllBytesEqual(src, roundBytes))
                 {
                     float msCost = StreamLZConstants.InvalidCost;
-                    int n = HighEntropyEncoder.EncodeArrayU8(dst, dstEnd, src, roundBytes,
+                    int n = EntropyEncoder.EncodeArrayU8(dst, dstEnd, src, roundBytes,
                         coder.EntropyOptions, coder.SpeedTradeoff, &msCost, 0, null);
                     src += roundBytes;
                     dst += n;
@@ -845,7 +841,7 @@ internal static unsafe partial class StreamLZCompressor
                         {
                             fixed (byte* pHuff = plainHuffBuf)
                             {
-                                plainHuffN = HighEntropyEncoder.EncodeArrayU8(pHuff, pHuff + plainHuffBuf.Length,
+                                plainHuffN = EntropyEncoder.EncodeArrayU8(pHuff, pHuff + plainHuffBuf.Length,
                                     src, roundBytes, coder.EntropyOptions, coder.SpeedTradeoff,
                                     &plainHuffCost, coder.CompressionLevel, null);
                             }
