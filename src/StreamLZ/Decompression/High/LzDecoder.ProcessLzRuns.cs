@@ -8,6 +8,50 @@ namespace StreamLZ.Decompression.High;
 
 internal static unsafe partial class LzDecoder
 {
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void CopyLiteralExact(byte* dst, byte* src, int length)
+    {
+        while (length >= 8)
+        {
+            CopyHelpers.Copy64(dst, src);
+            dst += 8;
+            src += 8;
+            length -= 8;
+        }
+
+        while (length-- > 0)
+        {
+            *dst++ = *src++;
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void CopyLiteralAddExact(byte* dst, byte* src, byte* delta, int length)
+    {
+        while (length >= 8)
+        {
+            CopyHelpers.Copy64Add(dst, src, delta);
+            dst += 8;
+            src += 8;
+            delta += 8;
+            length -= 8;
+        }
+
+        while (length-- > 0)
+        {
+            *dst++ = (byte)(*src++ + *delta++);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void CopyMatchExact(byte* dst, byte* src, int length)
+    {
+        while (length-- > 0)
+        {
+            *dst++ = *src++;
+        }
+    }
+
     // ================================================================
     //  Resolve pass — lightweight walk of cmd/offs/len streams.
     //  Resolves the offset carousel and long lengths into a flat token
@@ -129,19 +173,45 @@ internal static unsafe partial class LzDecoder
         LzToken* tokens,
         int tokenCount,
         byte* dst,
+        byte* dstEnd,
         byte* litStream)
     {
-        // SAFETY: Copy operations (Copy64, WildCopy16) may write up to 15 bytes past the
-        // logical end of each literal/match run. Callers must provide SafeSpace (64 bytes)
-        // of writable padding past the output buffer end. This padding requirement is
-        // enforced at the public API boundary (Slz.Decompress validates buffer size).
+        // Wide copy operations (Copy64, WildCopy16) may write up to 15 bytes past
+        // the logical end of each run. In the parallel self-contained decompressor,
+        // adjacent chunks share a contiguous output buffer — overshooting would
+        // corrupt the next chunk's data. To avoid this without adding a branch to
+        // every token in the hot loop, we split into two loops:
+        //   1. Fast path: wide copies, no boundary check (vast majority of tokens)
+        //   2. Slow tail: exact byte-by-byte copies (last few tokens near dstEnd)
+        //
+        // The split point is found via binary search on pre-resolved token positions.
         byte* dstBase = dst;
+        byte* dstSafeEnd = dstEnd - StreamLZDecoder.SafeSpace;
 
-        for (int i = 0; i < tokenCount; i++)
+        int safeTokenCount = tokenCount;
+        if (tokenCount > 0)
         {
-            // Prefetch match source for a future token.
-            // tokens[prefetchIndex].DstPos + LitLen gives the output position at match start.
-            // Adding Offset (negative) gives the match source address in the output buffer.
+            int lastTokenEnd = tokens[tokenCount - 1].DstPos + tokens[tokenCount - 1].LitLen + tokens[tokenCount - 1].MatchLen;
+            if (dstBase + lastTokenEnd > dstSafeEnd)
+            {
+                int lo = 0, hi = tokenCount;
+                while (lo < hi)
+                {
+                    int mid = (lo + hi) >> 1;
+                    int tokenEnd = tokens[mid].DstPos + tokens[mid].LitLen + tokens[mid].MatchLen;
+                    if (dstBase + tokenEnd <= dstSafeEnd)
+                        lo = mid + 1;
+                    else
+                        hi = mid;
+                }
+                safeTokenCount = lo;
+            }
+        }
+
+        // Fast path — no boundary checks, wide copies
+        int i;
+        for (i = 0; i < safeTokenCount; i++)
+        {
             int prefetchIndex = i + PrefetchAhead;
             if (prefetchIndex < tokenCount)
             {
@@ -188,6 +258,22 @@ internal static unsafe partial class LzDecoder
             }
             dst += matchLength;
         }
+
+        // Slow tail — exact copies, no overshoot
+        for (; i < tokenCount; i++)
+        {
+            int literalLength = tokens[i].LitLen;
+            int matchLength = tokens[i].MatchLen;
+            int offset = tokens[i].Offset;
+
+            CopyLiteralExact(dst, litStream, literalLength);
+            dst += literalLength;
+            litStream += literalLength;
+
+            byte* matchSource = dst + offset;
+            CopyMatchExact(dst, matchSource, matchLength);
+            dst += matchLength;
+        }
     }
 
     // ----------------------------------------------------------------
@@ -219,6 +305,7 @@ internal static unsafe partial class LzDecoder
         int* offsStreamEnd = lzTable->OffsStream + lzTable->OffsStreamSize;
         byte* matchSource;
         int offset;
+        byte* dstSafeEnd = dstEnd - StreamLZDecoder.SafeSpace;
 
         // recentOffsets[3..5] are the active recent offset slots.
         // Indices 0..2 are scratch space used during the rotation.
@@ -251,28 +338,7 @@ internal static unsafe partial class LzDecoder
             literalLength = (literalLength == 3) ? speculativeLongLength : literalLength;
             recentOffsets[6] = *offsStream;
 
-            // Copy literals with delta add
-            CopyHelpers.Copy64Add(dst, litStream, &dst[lastOffset]);
-            if (literalLength > 8)
-            {
-                CopyHelpers.Copy64Add(dst + 8, litStream + 8, &dst[lastOffset + 8]);
-                if (literalLength > 16)
-                {
-                    CopyHelpers.Copy64Add(dst + 16, litStream + 16, &dst[lastOffset + 16]);
-                    if (literalLength > 24)
-                    {
-                        do
-                        {
-                            CopyHelpers.Copy64Add(dst + 24, litStream + 24, &dst[lastOffset + 24]);
-                            literalLength -= 8;
-                            dst += 8;
-                            litStream += 8;
-                        } while (literalLength > 24);
-                    }
-                }
-            }
-            dst += literalLength;
-            litStream += literalLength;
+            int literalLengthInt = (int)literalLength;
 
             // Rotate recent offsets
             offset = recentOffsets[offsetIndex + 3];
@@ -286,22 +352,65 @@ internal static unsafe partial class LzDecoder
             // (offsetIndex + 1) & 4 is 4 when offsetIndex==3, else 0 — advances by one int.
             offsStream = (int*)((nint)offsStream + ((offsetIndex + 1) & 4));
 
-            matchSource = dst + offset;
+            int actualMatchLength;
             if (matchLength != 15)
             {
-                CopyHelpers.Copy64(dst, matchSource);
-                CopyHelpers.Copy64(dst + 8, matchSource + 8);
-                dst += matchLength + 2;
+                actualMatchLength = (int)matchLength + 2;
             }
             else
             {
                 // Long match: read extra length from lenStream
-                matchLength = (uint)(14 + *lenStream++);
+                actualMatchLength = 14 + *lenStream++;
+            }
+
+            // Near the end of the output buffer, wide copies (Copy64, WildCopy16)
+            // would overshoot into adjacent memory. Switch to exact byte-by-byte
+            // copies for the last few tokens. This branch is almost never taken
+            // (only the final ~64 bytes of a 256 KB chunk) so the predictor
+            // eliminates it from the fast path.
+            if (dst >= dstSafeEnd)
+            {
+                CopyLiteralAddExact(dst, litStream, &dst[lastOffset], literalLengthInt);
+                dst += literalLengthInt;
+                litStream += literalLengthInt;
+
+                matchSource = dst + offset;
+                CopyMatchExact(dst, matchSource, actualMatchLength);
+            }
+            else
+            {
+                // Copy literals with delta add
+                CopyHelpers.Copy64Add(dst, litStream, &dst[lastOffset]);
+                if (literalLength > 8)
+                {
+                    CopyHelpers.Copy64Add(dst + 8, litStream + 8, &dst[lastOffset + 8]);
+                    if (literalLength > 16)
+                    {
+                        CopyHelpers.Copy64Add(dst + 16, litStream + 16, &dst[lastOffset + 16]);
+                        if (literalLength > 24)
+                        {
+                            do
+                            {
+                                CopyHelpers.Copy64Add(dst + 24, litStream + 24, &dst[lastOffset + 24]);
+                                literalLength -= 8;
+                                dst += 8;
+                                litStream += 8;
+                            } while (literalLength > 24);
+                        }
+                    }
+                }
+                dst += literalLength;
+                litStream += literalLength;
+
+                matchSource = dst + offset;
                 CopyHelpers.Copy64(dst, matchSource);
                 CopyHelpers.Copy64(dst + 8, matchSource + 8);
-                CopyHelpers.WildCopy16(dst + 16, matchSource + 16, dst + matchLength);
-                dst += matchLength;
+                if (matchLength == 15)
+                {
+                    CopyHelpers.WildCopy16(dst + 16, matchSource + 16, dst + actualMatchLength);
+                }
             }
+            dst += actualMatchLength;
         }
 
         // Verify all streams consumed correctly
@@ -388,7 +497,7 @@ internal static unsafe partial class LzDecoder
                 }
 
                 // Phase B: Execute with match-source prefetch
-                ExecuteTokens_Type1(tokens, resolved, dst, litStream);
+                ExecuteTokens_Type1(tokens, resolved, dst, dstEnd, litStream);
 
                 // Advance pointers past all tokens
                 if (resolved > 0)
