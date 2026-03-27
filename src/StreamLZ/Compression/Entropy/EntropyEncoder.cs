@@ -32,11 +32,11 @@ internal static class EntropyEncoder
 
     /// <summary>Encode a byte array with pre-computed histogram. Tries tANS then falls back to memcpy.</summary>
     public static unsafe int EncodeArrayU8WithHisto(byte* dst, byte* dstEnd,
-        byte* src, int count, HistoU8 histo,
+        byte* src, int count, ByteHistogram histo,
         int entropyOpts, float speedTradeoff,
         float* cost, int level)
     {
-        HistoU8 histoCopy = histo;
+        ByteHistogram histoCopy = histo;
         return EncodeArrayU8Core(dst, dstEnd, src, count, &histoCopy,
             entropyOpts, speedTradeoff, cost, level);
     }
@@ -45,20 +45,20 @@ internal static class EntropyEncoder
     public static unsafe int EncodeArrayU8(byte* dst, byte* dstEnd,
         byte* src, int count,
         int entropyOpts, float speedTradeoff,
-        float* cost, int level, HistoU8* histoOut)
+        float* cost, int level, ByteHistogram* histoOut)
     {
         if (count <= 32)
         {
             if (histoOut != null)
             {
-                CountBytesHistoU8(src, count, histoOut);
+                CountBytesHistogram(src, count, histoOut);
             }
             *cost = count + 3;
             return EncodeArrayU8_Memcpy(dst, dstEnd, src, count);
         }
 
-        HistoU8 histo;
-        CountBytesHistoU8(src, count, &histo);
+        ByteHistogram histo;
+        CountBytesHistogram(src, count, &histo);
         if (histoOut != null)
         {
             *histoOut = histo;
@@ -72,7 +72,7 @@ internal static class EntropyEncoder
     public static unsafe int EncodeArrayU8CompactHeader(byte* dst, byte* dstEnd,
         byte* src, int count,
         int entropyOpts, float speedTradeoff,
-        float* cost, int level, HistoU8* histoOut)
+        float* cost, int level, ByteHistogram* histoOut)
     {
         int n = EncodeArrayU8(dst, dstEnd, src, count, entropyOpts, speedTradeoff, cost, level, histoOut);
         return n >= 0 ? MakeCompactChunkHdr(dst, n, cost) : -1;
@@ -83,7 +83,7 @@ internal static class EntropyEncoder
     /// Writes a complete chunk (header + data) to dst.
     /// </summary>
     private static unsafe int EncodeArrayU8Core(byte* dst, byte* dstEnd,
-        byte* src, int count, HistoU8* histo,
+        byte* src, int count, ByteHistogram* histo,
         int entropyOpts, float speedTradeoff,
         float* cost, int level)
     {
@@ -103,7 +103,7 @@ internal static class EntropyEncoder
             {
                 float tansCost = memcpyCost;
                 int tansN = TansEncoder.EncodeArrayU8_tANS(dst + 5, dstEnd, src, count,
-                    (HistoU8*)histo, speedTradeoff, &tansCost);
+                    (ByteHistogram*)histo, speedTradeoff, &tansCost);
 
                 if (tansN > 0 && tansN < count && tansCost < memcpyCost)
                 {
@@ -187,7 +187,7 @@ internal static class EntropyEncoder
         int entropyOpts, float speedTradeoff,
         float* cost, int minMatchLen, bool useOffsetModuloCoding,
         int* offsEncodeType, int level,
-        HistoU8* histoOut, HistoU8* histoLoOut)
+        ByteHistogram* histoOut, ByteHistogram* histoLoOut)
     {
         return OffsetEncoder.EncodeLzOffsets(dst, dstEnd, u8Offs, u32Offs, offsCount,
             entropyOpts, speedTradeoff, cost, minMatchLen, useOffsetModuloCoding,
@@ -206,7 +206,7 @@ internal static class EntropyEncoder
     }
 
     /// <summary>Count byte-value histogram.</summary>
-    public static unsafe void CountBytesHistoU8(byte* src, int count, HistoU8* histo)
+    public static unsafe void CountBytesHistogram(byte* src, int count, ByteHistogram* histo)
     {
         for (int i = 0; i < 256; i++)
         {

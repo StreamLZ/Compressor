@@ -496,8 +496,8 @@ internal static unsafe class Encoder
         {
             *chunkTypeOutput = 0;
 
-            HistoU8 deltaLiteralHisto;
-            EntropyEncoder.CountBytesHistoU8(writer->DeltaLiteralStart, deltaLiteralCount, &deltaLiteralHisto);
+            ByteHistogram deltaLiteralHisto;
+            EntropyEncoder.CountBytesHistogram(writer->DeltaLiteralStart, deltaLiteralCount, &deltaLiteralHisto);
             int encodedLiteralBytes = EntropyEncoder.EncodeArrayU8WithHisto(destination, destinationEnd, writer->DeltaLiteralStart, deltaLiteralCount,
                 deltaLiteralHisto, entropyOpts, speedTradeoff, &literalCost, level);
             if (encodedLiteralBytes < 0 || encodedLiteralBytes > deltaLiteralCount)
@@ -506,13 +506,13 @@ internal static unsafe class Encoder
         }
         else if (useLiteralEntropyCoding && literalCount >= 32)
         {
-            HistoU8 literalHisto;
-            EntropyEncoder.CountBytesHistoU8(writer->LiteralStart, literalCount, &literalHisto);
+            ByteHistogram literalHisto;
+            EntropyEncoder.CountBytesHistogram(writer->LiteralStart, literalCount, &literalHisto);
             int encodedBytes, encodedLiteralBytes = -1;
             if (writer->DeltaLiteralStart != null)
             {
-                HistoU8 deltaLiteralHisto;
-                EntropyEncoder.CountBytesHistoU8(writer->DeltaLiteralStart, literalCount, &deltaLiteralHisto);
+                ByteHistogram deltaLiteralHisto;
+                EntropyEncoder.CountBytesHistogram(writer->DeltaLiteralStart, literalCount, &deltaLiteralHisto);
                 float deltaLiteralTimeCost = CostModel.CombinePlatformCostsScaled(platforms, literalCount, 0.324f, 0.433f, 0.550f, 0.289f) * speedTradeoff;
                 if (level >= 6 || OffsetEncoder.GetHistoCostApprox(&literalHisto, literalCount) * 0.125f > OffsetEncoder.GetHistoCostApprox(&deltaLiteralHisto, literalCount) * 0.125f + deltaLiteralTimeCost)
                 {
