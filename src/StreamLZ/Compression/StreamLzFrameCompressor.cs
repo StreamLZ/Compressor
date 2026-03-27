@@ -146,7 +146,7 @@ internal static class StreamLzFrameCompressor
                 // Wait for background read to finish before returning buffers to the pool
                 if (pendingReadTask != null)
                 {
-                    try { pendingReadTask.GetAwaiter().GetResult(); } catch { /* already handling an exception */ }
+                    try { pendingReadTask.GetAwaiter().GetResult(); } catch (IOException) { /* already handling an exception */ }
                 }
                 ArrayPool<byte>.Shared.Return(srcBufs[0]);
                 ArrayPool<byte>.Shared.Return(srcBufs[1]);

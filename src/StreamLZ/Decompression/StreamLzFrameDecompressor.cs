@@ -265,7 +265,7 @@ internal static class StreamLzFrameDecompressor
             // Observe pending write task to prevent unobserved exceptions
             if (pendingWrite != null)
             {
-                try { pendingWrite.GetAwaiter().GetResult(); } catch { /* already handling an exception */ }
+                try { pendingWrite.GetAwaiter().GetResult(); } catch (IOException) { /* already handling an exception */ }
             }
             for (int i = 0; i < 2; i++)
             {

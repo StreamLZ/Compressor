@@ -77,7 +77,7 @@ public enum FrameFlags : byte
 /// <summary>
 /// Parsed frame header describing the compressed stream.
 /// </summary>
-public readonly struct FrameHeader
+public readonly struct FrameHeader : IEquatable<FrameHeader>
 {
     /// <summary>Frame format version (currently 1).</summary>
     public byte Version { get; init; }
@@ -102,6 +102,24 @@ public readonly struct FrameHeader
 
     /// <summary>Total number of header bytes (for skipping past the header on read).</summary>
     public int HeaderSize { get; init; }
+
+    /// <inheritdoc/>
+    public bool Equals(FrameHeader other) =>
+        Version == other.Version && Flags == other.Flags && Codec == other.Codec &&
+        Level == other.Level && BlockSize == other.BlockSize && ContentSize == other.ContentSize &&
+        DictionaryId == other.DictionaryId && HeaderSize == other.HeaderSize;
+
+    /// <inheritdoc/>
+    public override bool Equals(object? obj) => obj is FrameHeader other && Equals(other);
+
+    /// <inheritdoc/>
+    public override int GetHashCode() => HashCode.Combine(Version, Flags, Codec, Level, BlockSize, ContentSize, DictionaryId, HeaderSize);
+
+    /// <summary>Equality operator.</summary>
+    public static bool operator ==(FrameHeader left, FrameHeader right) => left.Equals(right);
+
+    /// <summary>Inequality operator.</summary>
+    public static bool operator !=(FrameHeader left, FrameHeader right) => !left.Equals(right);
 }
 
 /// <summary>
