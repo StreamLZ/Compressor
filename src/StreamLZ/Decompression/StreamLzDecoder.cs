@@ -262,8 +262,11 @@ internal static unsafe class StreamLZDecoder
             return true;
         }
 
-        // CRC24 checksum: parsed from the stream but intentionally not verified.
-        // No known StreamLZ implementation validates it, so we skip it for compatibility.
+        // CRC24 checksum: parsed from the stream but not verified.
+        // The compressor writes a 3-byte checksum when GenerateChunkHeaderChecksum is
+        // enabled (off by default). The original MCM codebase did not verify it either.
+        // TODO: implement CRC24 verification behind an opt-in flag once the algorithm
+        // is confirmed. The checksum value is available in chunkHeader.Checksum.
 
         if (chunkHeader.CompressedSize == (uint)dstBytesLeft)
         {
