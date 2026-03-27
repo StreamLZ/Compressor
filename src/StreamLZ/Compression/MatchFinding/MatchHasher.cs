@@ -346,6 +346,10 @@ internal abstract class MatchHasherBase
     }
 
     // ── Raw-pointer overloads for Fast compressor ──
+    //
+    // These intentionally duplicate the Span<byte> overloads above.
+    // The pointer versions avoid Span overhead on the Fast compressor's
+    // inner loop. Keep both sets of overloads in sync when making changes.
 
     /// <summary>Raw base pointer to the source window, set during SetupEncoder.</summary>
     /// <remarks>Safe because the source buffer is pinned via <c>fixed</c> in
@@ -876,6 +880,10 @@ internal sealed class MatchHasher2
     }
 
     // ── Raw-pointer overloads for Fast compressor ──
+    //
+    // These intentionally duplicate the Span<byte> overloads above.
+    // The pointer versions avoid Span overhead on the Fast compressor's
+    // inner loop. Keep both sets of overloads in sync when making changes.
 
     /// <summary>Raw base pointer to the source window, set during SetupEncoder.</summary>
     /// <remarks>Safe because the source buffer is pinned via <c>fixed</c> in
