@@ -221,7 +221,7 @@ unsafe
             // Wrap input in a progress-reporting stream
             long lastReport = 0;
             const long reportInterval = 256L * 1024 * 1024; // every 256MB
-            var progressStream = new ProgressStream(inStream, bytesRead =>
+            using var progressStream = new ProgressStream(inStream, bytesRead =>
             {
                 if (bytesRead - lastReport >= reportInterval)
                 {

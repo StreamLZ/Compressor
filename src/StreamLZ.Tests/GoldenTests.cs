@@ -159,7 +159,7 @@ public class GoldenTests
         return File.ReadAllBytes(path);
     }
 
-    private static string GetProjectDir([CallerFilePath] string? filePath = null)
+    private static string GetProjectDir([CallerFilePath] string filePath = "")
     {
         return Path.GetDirectoryName(filePath)!;
     }

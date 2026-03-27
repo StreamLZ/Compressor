@@ -10,7 +10,7 @@ namespace StreamLZ.Cli;
 
 internal static class ComparisonBenchmark
 {
-    internal record BenchResult(string Name, int CompressedSize, double CompressMBps, double DecompressMBps);
+    internal sealed record BenchResult(string Name, int CompressedSize, double CompressMBps, double DecompressMBps);
 
     internal static void Run(byte[] src, int runs)
     {
