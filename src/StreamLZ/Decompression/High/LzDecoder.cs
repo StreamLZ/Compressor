@@ -585,22 +585,22 @@ internal static unsafe partial class LzDecoder
                 StreamLZConstants.ScratchSize);
 
             // Capture pointers as nint for lambda (C# can't capture pointer locals)
-            nint pSrc2 = (nint)src2Data, pSrc2End = (nint)(src2Data + srcUsed2);
-            nint pDst2 = (nint)(dst + dstCount1), pDstStart = (nint)dstStart;
-            nint pScratch2 = (nint)scratch2, pScratch2End = (nint)(scratch2 + scratchUsage2);
-            var db = decodeBytes;
-            int m2 = mode2, dc2 = dstCount2;
+            nint capturedSrc2 = (nint)src2Data, capturedSrc2End = (nint)(src2Data + srcUsed2);
+            nint capturedDst2 = (nint)(dst + dstCount1), capturedDstStart = (nint)dstStart;
+            nint capturedScratch2 = (nint)scratch2, capturedScratch2End = (nint)(scratch2 + scratchUsage2);
+            var capturedDecodeBytes = decodeBytes;
+            int capturedMode2 = mode2, capturedDstCount2 = dstCount2;
             bool readOk = false;
 
             var readTask = Task.Run(() =>
             {
-                readOk = ReadLzTable(m2,
-                    (byte*)pSrc2, (byte*)pSrc2End,
-                    (byte*)pDst2, dc2,
-                    (int)((byte*)pDst2 - (byte*)pDstStart),
-                    (byte*)pScratch2 + sizeof(HighLzTable), (byte*)pScratch2End,
-                    (HighLzTable*)(byte*)pScratch2,
-                    db);
+                readOk = ReadLzTable(capturedMode2,
+                    (byte*)capturedSrc2, (byte*)capturedSrc2End,
+                    (byte*)capturedDst2, capturedDstCount2,
+                    (int)((byte*)capturedDst2 - (byte*)capturedDstStart),
+                    (byte*)capturedScratch2 + sizeof(HighLzTable), (byte*)capturedScratch2End,
+                    (HighLzTable*)(byte*)capturedScratch2,
+                    capturedDecodeBytes);
             });
 
             // ProcessLzRuns₁ on main thread (overlapped with ReadLzTable₂)
