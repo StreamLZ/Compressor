@@ -376,6 +376,12 @@ public static class Slz
     /// <returns>Total decompressed bytes written.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="input"/> or <paramref name="output"/> is null.</exception>
     /// <exception cref="InvalidDataException">Thrown when the frame header is invalid or data is corrupt.</exception>
+    /// <remarks>
+    /// <b>Untrusted input:</b> The content checksum (if present) is verified after all blocks
+    /// are decompressed. Data is written to <paramref name="output"/> incrementally during
+    /// decompression. When handling untrusted data, decompress to a temporary location and
+    /// move to the final destination only if no exception is thrown.
+    /// </remarks>
     public static long DecompressStream(Stream input, Stream output)
     {
         ArgumentNullException.ThrowIfNull(input);
@@ -479,6 +485,11 @@ public static class Slz
     /// <param name="inputPath">Path to the compressed input file.</param>
     /// <param name="outputPath">Path to the decompressed output file.</param>
     /// <returns>Total decompressed bytes written.</returns>
+    /// <remarks>
+    /// <b>Untrusted input:</b> The content checksum (if present) is verified after all blocks
+    /// are decompressed. The output file is written incrementally. When handling untrusted data,
+    /// decompress to a temporary path and rename only if no exception is thrown.
+    /// </remarks>
     public static long DecompressFile(string inputPath, string outputPath)
     {
         ArgumentNullException.ThrowIfNull(inputPath);
