@@ -660,13 +660,10 @@ internal static unsafe partial class LzDecoder
             if (dstCount > 0x20000)
             {
                 dstCount = 0x20000;
-                // Try pipelined 2-sub-chunk processing
-                int pipelined = TryDecodePipelined(dst, dstEnd, dstStart,
-                    src, srcEnd, scratch, scratchEnd, decodeBytes);
-                if (pipelined > 0)
-                {
-                    return pipelined;
-                }
+                // Pipelining (overlapping ReadLzTable of sub-chunk 2 with ProcessLzRuns
+                // of sub-chunk 1 via Task.Run) was benchmarked and found to be a net
+                // negative: Task.Run dispatch overhead exceeds the overlap benefit for
+                // sub-chunks that decompress in <50μs. Sequential processing is faster.
             }
             if (srcEnd - src < 4)
             {
