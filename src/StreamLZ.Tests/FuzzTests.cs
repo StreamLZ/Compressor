@@ -20,11 +20,11 @@ public class FuzzTests
     /// or reject the input with a managed exception. Any unhandled exception (AccessViolation,
     /// NullReference, etc.) or hang indicates a bounds-check gap.
     /// </summary>
-    [Theory(Skip = "Crashes process — tANS decoder needs hardening for malicious input")]
-    [InlineData(1, 500_000)]
-    [InlineData(5, 500_000)]
-    [InlineData(6, 500_000)]
-    [InlineData(9, 200_000)]
+    [Theory]
+    [InlineData(1, 2_000_000)]
+    [InlineData(5, 2_000_000)]
+    // L6 skipped — tANS entropy decoder crashes on malicious input (separate fix needed)
+    [InlineData(9, 1_000_000)]
     public unsafe void Fuzz_MutatedCompressedData(int level, int iterations)
     {
         // Generate valid source and compressed data
