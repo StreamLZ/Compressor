@@ -5,7 +5,7 @@ High-performance LZ compression library for .NET with streaming support.
 ## Features
 
 - **6.0 GB/s decompress** at level 1, **27% ratio** at level 11 (enwik8)
-- **Single level scale** (1-11) — no codec selection needed
+- **Simple level scale** (1-11) — higher = better ratio, slower
 - **Streaming** — SLZ1 frame format supports files of any size
 - **Sliding window** — cross-block match references for better ratio
 - **Parallel compression** — automatic multi-threading with configurable thread limits
@@ -191,8 +191,8 @@ Slz.WarmUp();
 | **SLZ L5** | **36.4%** | **82 MB/s** | **5,637 MB/s** |
 | **SLZ L6** | **28.2%** | **89 MB/s** | **5,798 MB/s** |
 | Zstd 9 | 27.9% | 94 MB/s | 1,586 MB/s |
-| **SLZ L11** | **24.7%** | **7.6 MB/s** | **1,750 MB/s** |
 | Zstd 19 | 24.9% | 3.5 MB/s | 1,109 MB/s |
+| **SLZ L11** | **24.7%** | **7.6 MB/s** | **1,750 MB/s** |
 
 *All benchmarks on Intel Arrow Lake-S (Ultra 9 285K), .NET 10, multi-threaded.*
 
