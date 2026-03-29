@@ -487,7 +487,9 @@ internal static unsafe class StreamLZDecoder
             }
         }
 
-        // Two-phase parallel: High non-SC with multiple chunks
+        // Two-phase parallel: High non-SC with multiple chunks.
+        // Overlaps entropy decode of chunk N+1 with match resolution of chunk N.
+        // Benchmarked at +37% on L9 enwik8 (917 → 1255 MB/s).
         if (srcLen >= 2)
         {
             StreamLZHeader peekHdr2 = default;
