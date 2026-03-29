@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.0.4]
+
+### Performance
+- Remove sub-chunk pipelining in High decoder: serial path is 53% faster
+  for L6 (3.8 → 5.6 GB/s on enwik8, 3.7 → 8.8 GB/s on silesia).
+  Two-phase parallel decode for L9-11 retained (+37% benefit there).
+
+### Changed
+- Update package description and benchmark tables.
+
 ## [1.0.3]
 
 ### Security
