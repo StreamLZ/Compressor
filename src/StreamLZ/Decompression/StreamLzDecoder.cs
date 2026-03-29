@@ -608,6 +608,10 @@ internal static unsafe class StreamLZDecoder
                     throw new InvalidDataException("StreamLZ pre-scan encountered invalid chunk header.");
                 }
                 s = qNext + (int)chunkHeader.CompressedSize;
+                if (s > src + srcLen)
+                {
+                    throw new InvalidDataException("StreamLZ pre-scan: chunk compressed size exceeds source bounds.");
+                }
             }
 
             int qSrcSize = (int)(s - sBefore);

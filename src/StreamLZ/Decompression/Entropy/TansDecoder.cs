@@ -61,6 +61,9 @@ internal static unsafe class TansDecoder
         public uint State2;
         public uint State3;
         public uint State4;
+        public byte* SrcStart;
+        public byte* SrcEnd;
+        public uint LutMask;
     }
 
     #endregion
@@ -111,6 +114,10 @@ internal static unsafe class TansDecoder
 
             int fluff = HuffmanDecoder.BitReader_ReadFluff(ref bits, numSymbols);
             int totalRiceValues = fluff + numSymbols;
+            if (totalRiceValues > 512 || totalRiceValues < 0)
+            {
+                return false;
+            }
 
             byte* rice = stackalloc byte[512 + 16];
 
@@ -123,7 +130,6 @@ internal static unsafe class TansDecoder
             {
                 return false;
             }
-
             Unsafe.InitBlockUnaligned(rice + totalRiceValues, 0, 16);
 
             // Switch back to other bitreader impl
@@ -134,6 +140,12 @@ internal static unsafe class TansDecoder
             bits.Bits <<= (int)br2.Bitpos;
             bits.Bitpos += (int)br2.Bitpos;
 
+            // fluff >> 1 is the number of ranges; Huff_ConvertToRanges writes range[numRanges] too
+            if ((fluff >> 1) >= 133)
+            {
+                return false;
+            }
+
             HuffmanDecoder.HuffRange* range = stackalloc HuffmanDecoder.HuffRange[133];
             fluff = HuffmanDecoder.Huff_ConvertToRanges(range, numSymbols, fluff, &rice[numSymbols], ref bits);
             if (fluff < 0)
@@ -141,23 +153,31 @@ internal static unsafe class TansDecoder
                 return false;
             }
 
+
             HuffmanDecoder.BitReader_Refill(ref bits);
 
             uint L = 1u << logTableBits;
             byte* curRicePtr = rice;
             int average = 6;
             int somesum = 0;
-            byte* tanstableA = tansData->A;
-            uint* tanstableB = tansData->B;
 
+            // Use local stackalloc buffers to avoid writing through tansData pointer
+            // during the decode loop — prevents stack corruption if loop has subtle OOB
+            byte* safeA = stackalloc byte[256];
+            uint* safeB = stackalloc uint[256];
+            int aCount = 0, bCount = 0;
+
+            byte* curRicePtrEnd = rice + totalRiceValues;
             for (int ri = 0; ri < fluff; ri++)
             {
                 int symbol = range[ri].Symbol;
                 int num = range[ri].Num;
+                if (num <= 0 || num > 256) return false;
                 do
                 {
                     HuffmanDecoder.BitReader_Refill(ref bits);
 
+                    if (curRicePtr >= curRicePtrEnd) return false;
                     int nextra = Q + *curRicePtr++;
                     if (nextra > 15)
                     {
@@ -179,22 +199,32 @@ internal static unsafe class TansDecoder
                     v += 1;
                     average += limit - averageDiv4;
 
-                    *tanstableA = (byte)symbol;
-                    *tanstableB = (uint)((symbol << 16) + v);
-                    tanstableA += (v == 1) ? 1 : 0;
-                    tanstableB += (v >= 2) ? 1 : 0;
+                    if (v == 1)
+                    {
+                        if (aCount >= 256) return false;
+                        safeA[aCount++] = (byte)symbol;
+                    }
+                    else
+                    {
+                        if (bCount >= 256) return false;
+                        safeB[bCount++] = (uint)((symbol << 16) + v);
+                    }
                     somesum += v;
+                    if (somesum > (int)L) return false;
                     symbol += 1;
                 } while (--num != 0);
             }
-
-            tansData->AUsed = (uint)(tanstableA - tansData->A);
-            tansData->BUsed = (uint)(tanstableB - tansData->B);
 
             if (somesum != (int)L)
             {
                 return false;
             }
+
+            // All validated — safe to write to tansData
+            tansData->AUsed = (uint)aCount;
+            tansData->BUsed = (uint)bCount;
+            for (int k = 0; k < aCount; k++) tansData->A[k] = safeA[k];
+            for (int k = 0; k < bCount; k++) tansData->B[k] = safeB[k];
 
             return true;
         }
@@ -287,13 +317,15 @@ internal static unsafe class TansDecoder
     /// decode lanes, enabling parallel state updates during the 5-state decode loop.
     /// </summary>
     [SkipLocalsInit]
-    public static void Tans_InitLut(TansData* tansData, int logTableBits, TansLutEnt* lut)
+    public static bool Tans_InitLut(TansData* tansData, int logTableBits, TansLutEnt* lut)
     {
         TansLutEnt** pointers = stackalloc TansLutEnt*[4];
 
         int L = 1 << logTableBits;
+        TansLutEnt* lutEnd = lut + L;
         int aUsed = (int)tansData->AUsed;
 
+        if ((uint)aUsed > (uint)L) return false;
         uint slotsLeftToAlloc = (uint)(L - aUsed);
 
         uint sa = slotsLeftToAlloc >> 2;
@@ -316,6 +348,7 @@ internal static unsafe class TansDecoder
 
             for (int i = 0; i < aUsed; i++)
             {
+                if (&lutSingles[i] >= lutEnd) return false;
                 lutSingles[i] = le;
                 lutSingles[i].Symbol = tansData->A[i];
             }
@@ -326,12 +359,14 @@ internal static unsafe class TansDecoder
         for (int i = 0; i < (int)tansData->BUsed; i++)
         {
             int weight = (int)(tansData->B[i] & 0xffff);
+            if (weight < 1) return false;
             int symbol = (int)(tansData->B[i] >> 16);
 
             if (weight > 4)
             {
                 uint symBits = (uint)BitOperations.Log2((uint)weight);
                 int bitsPerSymbol = logTableBits - (int)symBits;
+                if (bitsPerSymbol < 0) return false;
                 TansLutEnt le;
                 le.Symbol = (byte)symbol;
                 le.BitsX = (byte)bitsPerSymbol;
@@ -339,6 +374,7 @@ internal static unsafe class TansDecoder
                 le.W = (ushort)((L - 1) & (weight << bitsPerSymbol));
                 int whatToAdd = 1 << bitsPerSymbol;
                 int upperSlotCount = (1 << (int)(symBits + 1)) - weight;
+                if (upperSlotCount < 0) return false;
 
                 for (int j = 0; j < 4; j++)
                 {
@@ -349,6 +385,7 @@ internal static unsafe class TansDecoder
                     {
                         for (int n = quarterWeight; n != 0; n--)
                         {
+                            if (dst >= lutEnd) return false;
                             *dst++ = le;
                             le.W += (ushort)whatToAdd;
                         }
@@ -358,6 +395,7 @@ internal static unsafe class TansDecoder
                     {
                         for (int n = upperSlotCount; n != 0; n--)
                         {
+                            if (dst >= lutEnd) return false;
                             *dst++ = le;
                             le.W += (ushort)whatToAdd;
                         }
@@ -369,6 +407,7 @@ internal static unsafe class TansDecoder
                         le.X >>= 1;
                         for (int n = quarterWeight - upperSlotCount; n != 0; n--)
                         {
+                            if (dst >= lutEnd) return false;
                             *dst++ = le;
                             le.W += (ushort)whatToAdd;
                         }
@@ -387,7 +426,9 @@ internal static unsafe class TansDecoder
                 do
                 {
                     uint idx = (uint)BitOperations.TrailingZeroCount(bitsVal);
+                    if (idx > 3) return false;
                     bitsVal &= bitsVal - 1;
+                    if (pointers[idx] >= lutEnd) return false;
                     TansLutEnt* dst = pointers[idx]++;
                     dst->Symbol = (byte)symbol;
                     uint weightBits = (uint)BitOperations.Log2((uint)ww);
@@ -399,6 +440,8 @@ internal static unsafe class TansDecoder
 
             weightsSum += weight;
         }
+
+        return true;
     }
 
     #endregion
@@ -428,6 +471,11 @@ internal static unsafe class TansDecoder
         uint state3 = parms->State3;
         uint state4 = parms->State4;
 
+        // Safety bounds: absolute source buffer limits and LUT index mask
+        byte* srcStart = parms->SrcStart;
+        byte* srcEnd = parms->SrcEnd;
+        uint lutMask = parms->LutMask;
+
         if (ptrF > ptrB)
         {
             return false;
@@ -438,6 +486,7 @@ internal static unsafe class TansDecoder
             for (; ; )
             {
                 // TANS_FORWARD_BITS
+                if (ptrF > srcEnd) return false;
                 bitsF |= *(uint*)ptrF << bitposF;
                 ptrF += (31 - bitposF) >> 3;
                 bitposF |= 24;
@@ -446,7 +495,7 @@ internal static unsafe class TansDecoder
                 e = &lut[state0];
                 *dst++ = e->Symbol;
                 bitposF -= e->BitsX;
-                state0 = (bitsF & e->X) + e->W;
+                state0 = ((bitsF & e->X) + e->W) & lutMask;
                 bitsF >>= e->BitsX;
                 if (dst >= dstEnd)
                 {
@@ -457,7 +506,7 @@ internal static unsafe class TansDecoder
                 e = &lut[state1];
                 *dst++ = e->Symbol;
                 bitposF -= e->BitsX;
-                state1 = (bitsF & e->X) + e->W;
+                state1 = ((bitsF & e->X) + e->W) & lutMask;
                 bitsF >>= e->BitsX;
                 if (dst >= dstEnd)
                 {
@@ -465,6 +514,7 @@ internal static unsafe class TansDecoder
                 }
 
                 // TANS_FORWARD_BITS
+                if (ptrF > srcEnd) return false;
                 bitsF |= *(uint*)ptrF << bitposF;
                 ptrF += (31 - bitposF) >> 3;
                 bitposF |= 24;
@@ -473,7 +523,7 @@ internal static unsafe class TansDecoder
                 e = &lut[state2];
                 *dst++ = e->Symbol;
                 bitposF -= e->BitsX;
-                state2 = (bitsF & e->X) + e->W;
+                state2 = ((bitsF & e->X) + e->W) & lutMask;
                 bitsF >>= e->BitsX;
                 if (dst >= dstEnd)
                 {
@@ -484,7 +534,7 @@ internal static unsafe class TansDecoder
                 e = &lut[state3];
                 *dst++ = e->Symbol;
                 bitposF -= e->BitsX;
-                state3 = (bitsF & e->X) + e->W;
+                state3 = ((bitsF & e->X) + e->W) & lutMask;
                 bitsF >>= e->BitsX;
                 if (dst >= dstEnd)
                 {
@@ -492,6 +542,7 @@ internal static unsafe class TansDecoder
                 }
 
                 // TANS_FORWARD_BITS
+                if (ptrF > srcEnd) return false;
                 bitsF |= *(uint*)ptrF << bitposF;
                 ptrF += (31 - bitposF) >> 3;
                 bitposF |= 24;
@@ -500,7 +551,7 @@ internal static unsafe class TansDecoder
                 e = &lut[state4];
                 *dst++ = e->Symbol;
                 bitposF -= e->BitsX;
-                state4 = (bitsF & e->X) + e->W;
+                state4 = ((bitsF & e->X) + e->W) & lutMask;
                 bitsF >>= e->BitsX;
                 if (dst >= dstEnd)
                 {
@@ -508,6 +559,7 @@ internal static unsafe class TansDecoder
                 }
 
                 // TANS_BACKWARD_BITS
+                if (ptrB < srcStart) return false;
                 bitsB |= BinaryPrimitives.ReverseEndianness(((uint*)ptrB)[-1]) << bitposB;
                 ptrB -= (31 - bitposB) >> 3;
                 bitposB |= 24;
@@ -516,7 +568,7 @@ internal static unsafe class TansDecoder
                 e = &lut[state0];
                 *dst++ = e->Symbol;
                 bitposB -= e->BitsX;
-                state0 = (bitsB & e->X) + e->W;
+                state0 = ((bitsB & e->X) + e->W) & lutMask;
                 bitsB >>= e->BitsX;
                 if (dst >= dstEnd)
                 {
@@ -527,7 +579,7 @@ internal static unsafe class TansDecoder
                 e = &lut[state1];
                 *dst++ = e->Symbol;
                 bitposB -= e->BitsX;
-                state1 = (bitsB & e->X) + e->W;
+                state1 = ((bitsB & e->X) + e->W) & lutMask;
                 bitsB >>= e->BitsX;
                 if (dst >= dstEnd)
                 {
@@ -535,6 +587,7 @@ internal static unsafe class TansDecoder
                 }
 
                 // TANS_BACKWARD_BITS
+                if (ptrB < srcStart) return false;
                 bitsB |= BinaryPrimitives.ReverseEndianness(((uint*)ptrB)[-1]) << bitposB;
                 ptrB -= (31 - bitposB) >> 3;
                 bitposB |= 24;
@@ -543,7 +596,7 @@ internal static unsafe class TansDecoder
                 e = &lut[state2];
                 *dst++ = e->Symbol;
                 bitposB -= e->BitsX;
-                state2 = (bitsB & e->X) + e->W;
+                state2 = ((bitsB & e->X) + e->W) & lutMask;
                 bitsB >>= e->BitsX;
                 if (dst >= dstEnd)
                 {
@@ -554,7 +607,7 @@ internal static unsafe class TansDecoder
                 e = &lut[state3];
                 *dst++ = e->Symbol;
                 bitposB -= e->BitsX;
-                state3 = (bitsB & e->X) + e->W;
+                state3 = ((bitsB & e->X) + e->W) & lutMask;
                 bitsB >>= e->BitsX;
                 if (dst >= dstEnd)
                 {
@@ -562,6 +615,7 @@ internal static unsafe class TansDecoder
                 }
 
                 // TANS_BACKWARD_BITS
+                if (ptrB < srcStart) return false;
                 bitsB |= BinaryPrimitives.ReverseEndianness(((uint*)ptrB)[-1]) << bitposB;
                 ptrB -= (31 - bitposB) >> 3;
                 bitposB |= 24;
@@ -570,7 +624,7 @@ internal static unsafe class TansDecoder
                 e = &lut[state4];
                 *dst++ = e->Symbol;
                 bitposB -= e->BitsX;
-                state4 = (bitsB & e->X) + e->W;
+                state4 = ((bitsB & e->X) + e->W) & lutMask;
                 bitsB >>= e->BitsX;
                 if (dst >= dstEnd)
                 {
@@ -615,6 +669,8 @@ internal static unsafe class TansDecoder
             throw new InvalidDataException($"TANS source or destination too small (srcSize={srcSize}, dstSize={dstSize}; need srcSize>=8, dstSize>=5).");
         }
 
+
+
         byte* srcEnd = src + srcSize;
 
         HuffmanDecoder.BitReaderState br;
@@ -638,7 +694,6 @@ internal static unsafe class TansDecoder
         {
             throw new InvalidDataException("TANS frequency table decode failed; stream data is corrupt.");
         }
-
         src = br.P - (24 - br.Bitpos) / 8;
 
         if (src >= srcEnd || srcEnd - src < 8)
@@ -657,11 +712,54 @@ internal static unsafe class TansDecoder
         parms.DstEnd = dst + dstSize - 5;
 
         // Align scratch to 16 bytes
-        parms.Lut = (TansLutEnt*)(((nuint)scratch + 15) & ~(nuint)15);
-        Tans_InitLut(&tansData, logTableBits, parms.Lut);
+        TansLutEnt* alignedLut = (TansLutEnt*)(((nuint)scratch + 15) & ~(nuint)15);
+        parms.Lut = alignedLut;
+
+        // Validate table data before LUT construction to prevent OOB writes.
+        // AUsed singles + BUsed multi-weight entries must sum to exactly L.
+        int L_val = 1 << logTableBits;
+        int aUsedVal = (int)tansData.AUsed;
+        int bUsedVal = (int)tansData.BUsed;
+        if (aUsedVal < 0 || aUsedVal > L_val || bUsedVal < 0 || bUsedVal > 256)
+        {
+            throw new InvalidDataException("TANS table has invalid AUsed/BUsed counts.");
+        }
+
+        int weightSum = aUsedVal;
+        for (int vi = 0; vi < bUsedVal; vi++)
+        {
+            int w = (int)(tansData.B[vi] & 0xffff);
+            if (w < 2 || w > L_val)
+            {
+                throw new InvalidDataException("TANS table has invalid B-entry weight.");
+            }
+            weightSum += w;
+        }
+        if (weightSum != L_val)
+        {
+            throw new InvalidDataException("TANS table weights do not sum to L.");
+        }
+
+        // Account for alignment waste in scratch space check
+        uint alignedLutSpace = (uint)(scratchEnd - (byte*)alignedLut);
+        uint lutRequired = (uint)(sizeof(TansLutEnt) * L_val);
+        if (lutRequired > alignedLutSpace)
+        {
+            throw new InvalidDataException("TANS LUT exceeds available scratch space after alignment.");
+        }
+
+        if (!Tans_InitLut(&tansData, logTableBits, parms.Lut))
+        {
+            throw new InvalidDataException("TANS LUT construction failed; table data produces out-of-bounds entries.");
+        }
+
+        // Absolute source buffer bounds for pointer safety checks in Tans_Decode
+        parms.SrcStart = src;
+        parms.SrcEnd = srcEnd;
 
         // Read out the initial state
         uint lMask = (1u << logTableBits) - 1;
+        parms.LutMask = lMask;
         uint bitsF = *(uint*)src;
         src += 4;
         uint bitsB = BinaryPrimitives.ReverseEndianness(*(uint*)(srcEnd - 4));
