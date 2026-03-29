@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.3]
+
+### Security
+- Harden High decoder against malicious input: validate cumulative token
+  lengths in ResolveTokens, validate match offsets against buffer start
+  in both Type0 and Type1 execute paths, fix SafeSpace boundary check in
+  Type0 to account for total token footprint.
+
 ## [1.0.2]
 
 ### Security

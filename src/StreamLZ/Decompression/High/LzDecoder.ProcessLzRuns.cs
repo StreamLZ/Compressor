@@ -67,6 +67,7 @@ internal static unsafe partial class LzDecoder
     private static int ResolveTokens(
         HighLzTable* lzTable,
         LzToken* tokens,
+        int dstSize,
         out int* offsStreamFinal,
         out int* lenStreamFinal)
     {
@@ -144,6 +145,15 @@ internal static unsafe partial class LzDecoder
             tokenIndex++;
 
             dstPos += (int)literalLength + actualMatchLen;
+
+            // Reject if cumulative output exceeds declared chunk size.
+            // Catches malicious length values before the execute pass copies bytes.
+            if (dstPos > dstSize)
+            {
+                offsStreamFinal = offsStream;
+                lenStreamFinal = lenStream;
+                return -1;
+            }
         }
 
         offsStreamFinal = offsStream;
@@ -174,6 +184,7 @@ internal static unsafe partial class LzDecoder
         int tokenCount,
         byte* dst,
         byte* dstEnd,
+        byte* dstStart,
         byte* litStream)
     {
         // Wide copy operations (Copy64, WildCopy16) may write up to 15 bytes past
@@ -250,6 +261,7 @@ internal static unsafe partial class LzDecoder
 
             // Copy match — offset is negative, matchSource points back into output
             byte* matchSource = dst + offset;
+            if (matchSource < dstStart) return;
             CopyHelpers.Copy64(dst, matchSource);
             CopyHelpers.Copy64(dst + 8, matchSource + 8);
             if (matchLength > 16)
@@ -270,8 +282,9 @@ internal static unsafe partial class LzDecoder
             dst += literalLength;
             litStream += literalLength;
 
-            byte* matchSource = dst + offset;
-            CopyMatchExact(dst, matchSource, matchLength);
+            byte* slowMatch = dst + offset;
+            if (slowMatch < dstStart) return;
+            CopyMatchExact(dst, slowMatch, matchLength);
             dst += matchLength;
         }
     }
@@ -374,18 +387,27 @@ internal static unsafe partial class LzDecoder
             // copies for the last few tokens. This branch is almost never taken
             // (only the final ~64 bytes of a 256 KB chunk) so the predictor
             // eliminates it from the fast path.
-            if (dst >= dstSafeEnd)
+            if (dst + literalLengthInt + actualMatchLength >= dstSafeEnd)
             {
+                // Slow path: exact copies near the buffer boundary.
+                if (dst + literalLengthInt + actualMatchLength > dstEnd)
+                {
+                    return LzError();
+                }
                 CopyLiteralAddExact(dst, litStream, &dst[litDeltaOffset], literalLengthInt);
                 dst += literalLengthInt;
                 litStream += literalLengthInt;
 
                 matchSource = dst + offset;
+                if (matchSource < dstStart) return LzError();
                 CopyMatchExact(dst, matchSource, actualMatchLength);
             }
             else
             {
-                // Copy literals with delta add (using PREVIOUS token's offset)
+                // Fast path: wide copies (using PREVIOUS token's offset for delta)
+                matchSource = dst + literalLengthInt + offset;
+                if (matchSource < dstStart) return LzError();
+
                 CopyHelpers.Copy64Add(dst, litStream, &dst[litDeltaOffset]);
                 if (literalLength > 8)
                 {
@@ -490,7 +512,7 @@ internal static unsafe partial class LzDecoder
             try
             {
                 // Phase A: Resolve all tokens (carousel, lengths) — all L1 hits
-                int resolved = ResolveTokens(lzTable, tokens, out int* offsStreamFinal, out int* lenStreamFinal);
+                int resolved = ResolveTokens(lzTable, tokens, (int)(dstEnd - dst), out int* offsStreamFinal, out int* lenStreamFinal);
                 if (resolved < 0)
                 {
                     return LzError();
@@ -503,7 +525,7 @@ internal static unsafe partial class LzDecoder
                 }
 
                 // Phase B: Execute with match-source prefetch
-                ExecuteTokens_Type1(tokens, resolved, dst, dstEnd, litStream);
+                ExecuteTokens_Type1(tokens, resolved, dst, dstEnd, dstStart, litStream);
 
                 // Advance pointers past all tokens
                 if (resolved > 0)

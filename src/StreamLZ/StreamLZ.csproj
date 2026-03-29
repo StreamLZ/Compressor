@@ -9,15 +9,15 @@
     <AnalysisLevel>latest-all</AnalysisLevel>
     <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <Version>1.0.2</Version>
-    <AssemblyVersion>1.0.2.0</AssemblyVersion>
-    <FileVersion>1.0.2.0</FileVersion>
+    <Version>1.0.3</Version>
+    <AssemblyVersion>1.0.3.0</AssemblyVersion>
+    <FileVersion>1.0.3.0</FileVersion>
 
     <!-- NuGet package metadata -->
     <PackageId>StreamLZ</PackageId>
     <Authors>StreamLZ Contributors</Authors>
     <Copyright>Copyright (c) 2026 StreamLZ Contributors</Copyright>
-    <Description>High-performance LZ compression library for .NET. Two codecs — Fast (up to 378 MB/s compress, 6.0 GB/s decompress) and High (27% ratio on enwik8). Streaming SLZ1 frame format with sliding window, parallel compression, async API, and zero hot-path allocations.</Description>
+    <Description>High-performance LZ compression library for .NET. Up to 6.0 GB/s decompress and 27% ratio on enwik8. Levels 1-11 scale from fastest to maximum ratio. Streaming SLZ1 frame format with sliding window, parallel compression, async API, and zero hot-path allocations.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageTags>compression;lz;lz77;fast;streaming;high-performance;parallel;async</PackageTags>
