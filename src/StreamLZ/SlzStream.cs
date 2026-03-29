@@ -684,8 +684,8 @@ public class SlzStreamOptions
     }
 
     /// <summary>Maximum compression threads. 0 = auto (one per core, limited by available memory). Default: 0.
-    /// This property is used by <see cref="Slz.CompressStream(Stream, Stream, int, long, bool)"/>,
-    /// <see cref="Slz.CompressFile(string, string, int, bool)"/>, and their async variants.
+    /// This property is used by <see cref="Slz.CompressStream(Stream, Stream, int, long, bool, int)"/>,
+    /// <see cref="Slz.CompressFile(string, string, int, bool, int)"/>, and their async variants.
     /// <see cref="SlzStream"/> compresses one block at a time and does not use this value.</summary>
     public int MaxThreads { get; set; }
 
