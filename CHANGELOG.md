@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.0.5]
+
+### Security
+- Fix process-killing crash when decompressing corrupt tANS-coded data.
+  Corrupt chunk headers in self-contained streams could produce source
+  pointers past the allocation, crashing the process via AccessViolation.
+- Harden tANS entropy decoder: mask LUT state indices, bounds-check
+  bitstream refill pointers, validate frequency table construction,
+  and prevent stack buffer overflows in table decode.
+- Fix integer overflow in High decoder scratch allocation
+  (OffsStreamSize * 4 could wrap int32).
+- Add decompression bomb protection: `DecompressFramed` now accepts
+  `maxDecompressedSize` (default 1 GB) to reject frames claiming
+  unreasonably large content sizes.
+
+### Added
+- Crash-resilient fuzz harness with file-based watermarking for
+  precise crash localization.
+- SECURITY.md: document safety guarantees and fuzz testing posture.
+
+### Testing
+- Fuzz-verified: 405 million mutations across L1/L5/L6/L9 and the
+  framed API with zero crashes. No performance regression on enwik8.
+
 ## [1.0.4]
 
 ### Performance
