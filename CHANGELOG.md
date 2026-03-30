@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.6]
+
+### Added
+- `IProgress<long>` support on all stream and file APIs for progress
+  reporting. Reports bytes consumed (compress) or produced (decompress)
+  at block boundaries with zero hot-path overhead.
+- `CancellationToken` support on synchronous `CompressStream`,
+  `DecompressStream`, `CompressFile`, and `DecompressFile` methods
+  (async methods already had it).
+- Fuzz regression tests for known-bad inputs that previously crashed
+  the decoder.
+
 ## [1.0.5]
 
 ### Security
