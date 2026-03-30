@@ -598,6 +598,10 @@ internal static unsafe class StreamLZDecoder
             if (blkHdr.Uncompressed)
             {
                 s += dstBytes;
+                if (s > src + srcLen)
+                {
+                    throw new InvalidDataException("StreamLZ pre-scan: uncompressed chunk size exceeds source bounds.");
+                }
             }
             else
             {

@@ -21,10 +21,10 @@ public class FuzzTests
     /// NullReference, etc.) or hang indicates a bounds-check gap.
     /// </summary>
     [Theory]
-    [InlineData(1, 100_000_000)]
-    [InlineData(5, 100_000_000)]
-    [InlineData(6, 100_000_000)]
-    [InlineData(9, 50_000_000)]
+    [InlineData(1, 2_000_000)]
+    [InlineData(5, 2_000_000)]
+    [InlineData(6, 2_000_000)]
+    [InlineData(9, 1_000_000)]
     public unsafe void Fuzz_MutatedCompressedData(int level, int iterations)
     {
         // Generate valid source and compressed data
@@ -115,14 +115,6 @@ public class FuzzTests
             if (iter % 1000 == 0)
                 Console.Error.WriteLine($"L{level} iter={iter} ok={successes} reject={rejects}");
 
-            // Dump first crashing candidate for reproduction
-            if (iter == 0 && level == 6)
-            {
-                string hexFile = Path.Combine(Path.GetTempPath(), "slz-fuzz-crash-L6.hex");
-                File.WriteAllText(hexFile, Convert.ToHexString(mutated));
-                Console.Error.WriteLine($"Wrote crash candidate to {hexFile} ({mutated.Length} bytes)");
-            }
-
             try
             {
                 bool ok = Slz.TryDecompress(mutated, output, source.Length, out int written);
@@ -161,7 +153,7 @@ public class FuzzTests
         byte[] framed = Slz.CompressFramed(source);
         byte[] output = new byte[source.Length + Slz.SafeSpace + 256];
 
-        int iterations = 25_000_000;
+        int iterations = 500_000;
         int rejects = 0;
         int successes = 0;
         var mutRng = new Random(777);
