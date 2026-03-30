@@ -21,7 +21,7 @@ namespace StreamLZ;
 /// clamped: values &lt;= 1 map to level 1, values &gt;= 11 map to level 11.</para>
 /// <para>
 /// For the simplest round-trip experience, use <see cref="CompressFramed(ReadOnlySpan{byte}, int)"/> and
-/// <see cref="DecompressFramed(ReadOnlySpan{byte})"/>. These use the SLZ1 frame format and are self-describing
+/// <see cref="DecompressFramed(ReadOnlySpan{byte}, int)"/>. These use the SLZ1 frame format and are self-describing
 /// — no external metadata is needed to decompress.
 /// </para>
 /// <para>
@@ -167,7 +167,7 @@ public static class Slz
 
     /// <summary>
     /// Compresses <paramref name="source"/> using the SLZ1 frame format and returns the
-    /// compressed bytes. The output is self-describing: <see cref="DecompressFramed(ReadOnlySpan{byte})"/>
+    /// compressed bytes. The output is self-describing: <see cref="DecompressFramed(ReadOnlySpan{byte}, int)"/>
     /// can decompress it without knowing the original size.
     /// </summary>
     /// <param name="source">The data to compress.</param>
@@ -198,10 +198,13 @@ public static class Slz
     /// No external metadata (original size) is needed — the frame header contains it.
     /// </summary>
     /// <param name="compressed">SLZ1-framed compressed data.</param>
+    /// <param name="maxDecompressedSize">Maximum allowed decompressed size in bytes.
+    /// Protects against decompression bombs where a small malicious frame claims a
+    /// huge content size. Default is 1 GB. Pass -1 to disable the limit.</param>
     /// <returns>Decompressed byte array.</returns>
-    /// <exception cref="InvalidDataException">Thrown when the data is not a valid SLZ1 frame
-    /// or is corrupt.</exception>
-    public static byte[] DecompressFramed(ReadOnlySpan<byte> compressed)
+    /// <exception cref="InvalidDataException">Thrown when the data is not a valid SLZ1 frame,
+    /// is corrupt, or exceeds <paramref name="maxDecompressedSize"/>.</exception>
+    public static byte[] DecompressFramed(ReadOnlySpan<byte> compressed, int maxDecompressedSize = 1 << 30)
     {
         if (compressed.Length == 0)
             return [];
@@ -209,6 +212,11 @@ public static class Slz
         // Parse the frame header to get the content size for a single allocation
         if (FrameSerializer.TryReadHeader(compressed, out FrameHeader header) && header.ContentSize >= 0)
         {
+            if (maxDecompressedSize >= 0 && header.ContentSize > maxDecompressedSize)
+                throw new InvalidDataException(
+                    $"SLZ1 frame claims {header.ContentSize} bytes decompressed, which exceeds the limit of {maxDecompressedSize} bytes. " +
+                    "Pass a larger maxDecompressedSize if this is expected.");
+
             byte[] result = new byte[header.ContentSize];
             using var input = new MemoryStream(compressed.ToArray(), writable: false);
             using var output = new MemoryStream(result, writable: true);
@@ -222,6 +230,9 @@ public static class Slz
         using var inputStream = new MemoryStream(compressed.ToArray(), writable: false);
         using var outputStream = new MemoryStream();
         StreamLzFrameDecompressor.Decompress(inputStream, outputStream);
+        if (maxDecompressedSize >= 0 && outputStream.Length > maxDecompressedSize)
+            throw new InvalidDataException(
+                $"Decompressed size ({outputStream.Length} bytes) exceeds the limit of {maxDecompressedSize} bytes.");
         return outputStream.ToArray();
     }
 

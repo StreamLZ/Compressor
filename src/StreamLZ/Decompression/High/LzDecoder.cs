@@ -416,12 +416,18 @@ internal static unsafe partial class LzDecoder
             // Reserve memory for final dist stream (16-byte aligned)
             scratch = CopyHelpers.AlignPointer(scratch, 16);
             lztable->OffsStream = (int*)scratch;
-            scratch += lztable->OffsStreamSize * 4;
+            long offsBytes = (long)lztable->OffsStreamSize * 4;
+            long lenBytes = (long)lztable->LenStreamSize * 4;
+            if (offsBytes > scratchEnd - scratch || lenBytes > scratchEnd - scratch)
+            {
+                return false;
+            }
+            scratch += offsBytes;
 
             // Reserve memory for final len stream (16-byte aligned)
             scratch = CopyHelpers.AlignPointer(scratch, 16);
             lztable->LenStream = (int*)scratch;
-            scratch += lztable->LenStreamSize * 4;
+            scratch += lenBytes;
 
             if (scratch + 64 > scratchEnd)
             {
@@ -454,12 +460,18 @@ internal static unsafe partial class LzDecoder
             // Reserve memory for final dist stream (16-byte aligned)
             scratch = CopyHelpers.AlignPointer(scratch, 16);
             lztable->OffsStream = (int*)scratch;
-            scratch += lztable->OffsStreamSize * 4;
+            long offsBytes2 = (long)lztable->OffsStreamSize * 4;
+            long lenBytes2 = (long)lztable->LenStreamSize * 4;
+            if (offsBytes2 > scratchEnd - scratch || lenBytes2 > scratchEnd - scratch)
+            {
+                return false;
+            }
+            scratch += offsBytes2;
 
             // Reserve memory for final len stream (16-byte aligned)
             scratch = CopyHelpers.AlignPointer(scratch, 16);
             lztable->LenStream = (int*)scratch;
-            scratch += lztable->LenStreamSize * 4;
+            scratch += lenBytes2;
 
             if (scratch + 64 > scratchEnd)
             {
