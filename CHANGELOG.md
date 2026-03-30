@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.8]
+
+### Security
+- Bounds-check `ParseHeader` and `ParseChunkHeader` before any pointer
+  dereference. Truncated streams (e.g. incomplete network reads) no
+  longer cause blind reads past the source buffer.
+- Clamp self-contained prefix restoration to the actual chunk size,
+  preventing writes past a chunk's logical boundary.
+
 ## [1.0.7]
 
 ### Security
