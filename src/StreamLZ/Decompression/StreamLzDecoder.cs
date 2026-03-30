@@ -32,8 +32,10 @@ internal static unsafe class StreamLZDecoder
     /// <param name="p">Pointer to the start of the header bytes.</param>
     /// <returns>Pointer advanced past the header, or <c>null</c> if the header is invalid.</returns>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static byte* ParseHeader(ref StreamLZHeader hdr, byte* p)
+    private static byte* ParseHeader(ref StreamLZHeader hdr, byte* p, int bytesRemaining = int.MaxValue)
     {
+        if (bytesRemaining < 2) return null;
+
         // Block header byte 0 bit layout:
         //   [3:0]  magic nibble (must be 0x5)
         //   [4]    SelfContained flag
@@ -83,8 +85,11 @@ internal static unsafe class StreamLZDecoder
     /// <param name="useChecksum">Whether a 3-byte checksum follows the header.</param>
     /// <returns>Pointer advanced past the header, or <c>null</c> if the header is invalid.</returns>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static byte* ParseChunkHeader(ref ChunkHeader hdr, byte* p, bool useChecksum)
+    private static byte* ParseChunkHeader(ref ChunkHeader hdr, byte* p, bool useChecksum, int bytesRemaining = int.MaxValue)
     {
+        int minBytes = useChecksum ? 7 : StreamLZConstants.ChunkHeaderSize;
+        if (bytesRemaining < minBytes) return null;
+
         // 4-byte little-endian chunk header:
         //   bits [ChunkSizeBits-1 : 0]  = compressed size minus 1
         //   bits [ChunkSizeBits+1 : ChunkSizeBits] = type (0=normal, 1=memset)
@@ -192,7 +197,7 @@ internal static unsafe class StreamLZDecoder
         // Parse header at every 256KB boundary
         if ((offset & (StreamLZConstants.ChunkSize - 1)) == 0)
         {
-            byte* next = ParseHeader(ref hdr, src);
+            byte* next = ParseHeader(ref hdr, src, (int)(srcEnd - src));
             if (next == null)
             {
                 return false;
@@ -217,7 +222,7 @@ internal static unsafe class StreamLZDecoder
         }
 
         {
-            byte* next = ParseChunkHeader(ref chunkHeader, src, hdr.UseChecksums);
+            byte* next = ParseChunkHeader(ref chunkHeader, src, hdr.UseChecksums, (int)(srcEnd - src));
             if (next == null)
             {
                 return false;
@@ -480,7 +485,7 @@ internal static unsafe class StreamLZDecoder
         if (srcLen >= 2)
         {
             StreamLZHeader peekHdr = default;
-            byte* parseResult = ParseHeader(ref peekHdr, src);
+            byte* parseResult = ParseHeader(ref peekHdr, src, srcLen);
             if (parseResult != null && peekHdr.SelfContained)
             {
                 return DecompressCoreParallel(src, srcLen, dst, dstLen);
@@ -493,7 +498,7 @@ internal static unsafe class StreamLZDecoder
         if (srcLen >= 2)
         {
             StreamLZHeader peekHdr2 = default;
-            byte* pr2 = ParseHeader(ref peekHdr2, src);
+            byte* pr2 = ParseHeader(ref peekHdr2, src, srcLen);
             if (pr2 != null && peekHdr2.DecoderType == CodecType.High && dstLen > StreamLZConstants.ChunkSize)
             {
                 return DecompressCoreTwoPhase(src, srcLen, dst, dstLen);
@@ -560,7 +565,7 @@ internal static unsafe class StreamLZDecoder
             byte* sBefore = s;
 
             StreamLZHeader blkHdr = default;
-            byte* next = ParseHeader(ref blkHdr, s);
+            byte* next = ParseHeader(ref blkHdr, s, (int)(src + srcLen - s));
             if (next == null)
             {
                 throw new InvalidDataException("StreamLZ pre-scan encountered invalid block header.");
@@ -606,7 +611,7 @@ internal static unsafe class StreamLZDecoder
             else
             {
                 ChunkHeader chunkHeader = default;
-                byte* qNext = ParseChunkHeader(ref chunkHeader, s, blkHdr.UseChecksums);
+                byte* qNext = ParseChunkHeader(ref chunkHeader, s, blkHdr.UseChecksums, (int)(src + srcLen - s));
                 if (qNext == null)
                 {
                     throw new InvalidDataException("StreamLZ pre-scan encountered invalid chunk header.");
@@ -695,7 +700,8 @@ internal static unsafe class StreamLZDecoder
         for (int i = 0; i < numChunks - 1; i++)
         {
             var q = chunks[i + 1];
-            Buffer.MemoryCopy(prefixBase + i * 8, dst + q.DstOffset, 8, 8);
+            int copySize = Math.Min(8, q.DstSize);
+            Buffer.MemoryCopy(prefixBase + i * 8, dst + q.DstOffset, copySize, copySize);
         }
 
         return dstLen;
@@ -742,7 +748,7 @@ internal static unsafe class StreamLZDecoder
                 byte* localScratch = (byte*)scratchPtrs[j];
 
                 StreamLZHeader hdr = default;
-                byte* headerEnd = ParseHeader(ref hdr, localSrc);
+                byte* headerEnd = ParseHeader(ref hdr, localSrc, q.SrcSize);
                 if (headerEnd == null) throw new InvalidDataException("StreamLZ two-phase parallel decode: invalid block header.");
                 byte* payloadSrc = headerEnd;
 
@@ -755,7 +761,7 @@ internal static unsafe class StreamLZDecoder
                 }
 
                 ChunkHeader chunkHeader = default;
-                byte* qSrc = ParseChunkHeader(ref chunkHeader, payloadSrc, hdr.UseChecksums);
+                byte* qSrc = ParseChunkHeader(ref chunkHeader, payloadSrc, hdr.UseChecksums, q.SrcSize - (int)(payloadSrc - localSrc));
                 if (qSrc == null) throw new InvalidDataException("StreamLZ two-phase parallel decode: invalid chunk header.");
 
                 if (chunkHeader.CompressedSize == 0)
