@@ -179,7 +179,7 @@ internal static unsafe partial class LzDecoder
     /// </summary>
     [SkipLocalsInit]
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
-    private static void ExecuteTokens_Type1(
+    private static bool ExecuteTokens_Type1(
         LzToken* tokens,
         int tokenCount,
         byte* dst,
@@ -261,7 +261,7 @@ internal static unsafe partial class LzDecoder
 
             // Copy match — offset is negative, matchSource points back into output
             byte* matchSource = dst + offset;
-            if (matchSource < dstStart) return;
+            if (matchSource < dstStart) return false;
             CopyHelpers.Copy64(dst, matchSource);
             CopyHelpers.Copy64(dst + 8, matchSource + 8);
             if (matchLength > 16)
@@ -283,10 +283,12 @@ internal static unsafe partial class LzDecoder
             litStream += literalLength;
 
             byte* slowMatch = dst + offset;
-            if (slowMatch < dstStart) return;
+            if (slowMatch < dstStart) return false;
             CopyMatchExact(dst, slowMatch, matchLength);
             dst += matchLength;
         }
+
+        return true;
     }
 
     // ----------------------------------------------------------------
@@ -525,7 +527,10 @@ internal static unsafe partial class LzDecoder
                 }
 
                 // Phase B: Execute with match-source prefetch
-                ExecuteTokens_Type1(tokens, resolved, dst, dstEnd, dstStart, litStream);
+                if (!ExecuteTokens_Type1(tokens, resolved, dst, dstEnd, dstStart, litStream))
+                {
+                    return LzError();
+                }
 
                 // Advance pointers past all tokens
                 if (resolved > 0)

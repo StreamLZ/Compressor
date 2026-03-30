@@ -402,12 +402,13 @@ public static class Slz
     /// move to the final destination only if no exception is thrown.
     /// </remarks>
     public static long DecompressStream(Stream input, Stream output,
-        IProgress<long>? progress = null, CancellationToken cancellationToken = default)
+        IProgress<long>? progress = null, CancellationToken cancellationToken = default,
+        long maxDecompressedSize = -1)
     {
         ArgumentNullException.ThrowIfNull(input);
         ArgumentNullException.ThrowIfNull(output);
         return StreamLzFrameDecompressor.Decompress(input, output, progress: progress,
-            cancellationToken: cancellationToken);
+            cancellationToken: cancellationToken, maxDecompressedSize: maxDecompressedSize);
     }
 
     // ────────────────────────────────────────────────────────────────
@@ -466,12 +467,13 @@ public static class Slz
     /// <exception cref="InvalidDataException">Thrown when the frame header is invalid or data is corrupt.</exception>
     public static async Task<long> DecompressStreamAsync(Stream input, Stream output,
         IProgress<long>? progress = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        long maxDecompressedSize = -1)
     {
         ArgumentNullException.ThrowIfNull(input);
         ArgumentNullException.ThrowIfNull(output);
         return await StreamLzFrameDecompressor.DecompressAsync(input, output,
-            progress: progress,
+            progress: progress, maxDecompressedSize: maxDecompressedSize,
             cancellationToken: cancellationToken).ConfigureAwait(false);
     }
 
@@ -528,7 +530,8 @@ public static class Slz
     /// decompress to a temporary path and rename only if no exception is thrown.
     /// </remarks>
     public static long DecompressFile(string inputPath, string outputPath,
-        IProgress<long>? progress = null, CancellationToken cancellationToken = default)
+        IProgress<long>? progress = null, CancellationToken cancellationToken = default,
+        long maxDecompressedSize = -1)
     {
         ArgumentNullException.ThrowIfNull(inputPath);
         ArgumentNullException.ThrowIfNull(outputPath);
@@ -536,7 +539,7 @@ public static class Slz
         using var input = new FileStream(inputPath, FileMode.Open, FileAccess.Read, FileShare.Read, ioBufSize, FileOptions.SequentialScan);
         using var output = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None, ioBufSize, FileOptions.SequentialScan);
         return StreamLzFrameDecompressor.Decompress(input, output, progress: progress,
-            cancellationToken: cancellationToken);
+            cancellationToken: cancellationToken, maxDecompressedSize: maxDecompressedSize);
     }
 
     // ────────────────────────────────────────────────────────────────
@@ -592,7 +595,8 @@ public static class Slz
     /// <returns>Total decompressed bytes written.</returns>
     public static async Task<long> DecompressFileAsync(string inputPath, string outputPath,
         IProgress<long>? progress = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        long maxDecompressedSize = -1)
     {
         ArgumentNullException.ThrowIfNull(inputPath);
         ArgumentNullException.ThrowIfNull(outputPath);
@@ -602,7 +606,7 @@ public static class Slz
         await using var output = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None, ioBufSize, FileOptions.Asynchronous | FileOptions.SequentialScan);
 #pragma warning restore CA2007
         return await StreamLzFrameDecompressor.DecompressAsync(input, output,
-            progress: progress,
+            progress: progress, maxDecompressedSize: maxDecompressedSize,
             cancellationToken: cancellationToken).ConfigureAwait(false);
     }
 
