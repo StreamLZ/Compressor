@@ -28,12 +28,15 @@ internal static class StreamLzFrameCompressor
     /// improve ratio but use more memory. Both compressor and decompressor need this much memory.</param>
     /// <param name="selfContained">When true, each chunk is independently decompressible (enables parallel decompression).</param>
     /// <param name="maxThreads">Maximum compression threads. 0 = auto (one per core, limited by available memory).</param>
+    /// <param name="progress">Optional progress reporter. Reports total input bytes consumed after each block.</param>
+    /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>Total number of compressed bytes written to <paramref name="output"/>.</returns>
     public static long Compress(Stream input, Stream output,
         CodecType codec = CodecType.High, int level = 4,
         long contentSize = -1, bool useContentChecksum = false,
         int windowSize = FrameConstants.DefaultWindowSize,
-        bool selfContained = false, int maxThreads = 0)
+        bool selfContained = false, int maxThreads = 0,
+        IProgress<long>? progress = null, CancellationToken cancellationToken = default)
     {
         int blockSize = FrameConstants.DefaultBlockSize;
         windowSize = Math.Clamp(windowSize, blockSize, FrameConstants.MaxWindowSize);
@@ -77,8 +80,12 @@ internal static class StreamLzFrameCompressor
                 // Kick off first read
                 int bytesRead = ReadFully(input, srcBufs[0], 0, chunkSize);
 
+                long totalInput = 0;
+
                 while (bytesRead > 0)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
+
                     int currentBytes = bytesRead;
                     int compressBuf = currentBuf;
                     int nextBuf = 1 - currentBuf;
@@ -119,6 +126,9 @@ internal static class StreamLzFrameCompressor
                         output.Write(srcBufs[compressBuf], 0, currentBytes);
                         totalWritten += 8 + currentBytes;
                     }
+
+                    totalInput += currentBytes;
+                    progress?.Report(totalInput);
 
                     // Wait for the background read to complete
                     bytesRead = pendingReadTask.GetAwaiter().GetResult();
@@ -167,9 +177,12 @@ internal static class StreamLzFrameCompressor
             try
             {
                 int dictBytes = 0;
+                long totalInput = 0;
 
                 while (true)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
+
                     int blockBytes = ReadFully(input, windowBuf, dictBytes, blockSize);
                     if (blockBytes == 0)
                         break;
@@ -203,6 +216,9 @@ internal static class StreamLzFrameCompressor
                         output.Write(windowBuf, dictBytes, blockBytes);
                         totalWritten += 8 + blockBytes;
                     }
+
+                    totalInput += blockBytes;
+                    progress?.Report(totalInput);
 
                     int totalUsed = dictBytes + blockBytes;
                     if (totalUsed > windowSize)
@@ -257,6 +273,7 @@ internal static class StreamLzFrameCompressor
     /// <param name="windowSize">Sliding window size in bytes (default 4MB, max 1GB). Larger values
     /// improve ratio but use more memory. Both compressor and decompressor need this much memory.</param>
     /// <param name="selfContained">When true, each chunk is independently decompressible (enables parallel decompression).</param>
+    /// <param name="progress">Optional progress reporter. Reports total input bytes consumed after each block.</param>
     /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>Total number of compressed bytes written to <paramref name="output"/>.</returns>
     public static async Task<long> CompressAsync(Stream input, Stream output,
@@ -264,6 +281,7 @@ internal static class StreamLzFrameCompressor
         long contentSize = -1, bool useContentChecksum = false,
         int windowSize = FrameConstants.DefaultWindowSize,
         bool selfContained = false,
+        IProgress<long>? progress = null,
         CancellationToken cancellationToken = default)
     {
         int blockSize = FrameConstants.DefaultBlockSize;
@@ -288,6 +306,7 @@ internal static class StreamLzFrameCompressor
         try
         {
             int dictBytes = 0;
+            long totalInput = 0;
 
             while (true)
             {
@@ -331,6 +350,9 @@ internal static class StreamLzFrameCompressor
                     await output.WriteAsync(windowBuf.AsMemory(dictBytes, blockBytes), cancellationToken).ConfigureAwait(false);
                     totalWritten += 8 + blockBytes;
                 }
+
+                totalInput += blockBytes;
+                progress?.Report(totalInput);
 
                 int totalUsed = dictBytes + blockBytes;
                 if (totalUsed > windowSize)

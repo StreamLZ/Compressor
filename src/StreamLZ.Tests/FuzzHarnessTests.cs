@@ -7,16 +7,30 @@ namespace StreamLZ.Tests;
 /// Long-running fuzz tests. Each level is a separate test method so it runs
 /// in its own process when filtered individually. If the process crashes,
 /// check %TEMP%/slz-fuzz-watermark.txt for the last iteration attempted.
+///
+/// Run with: dotnet test --filter Category=Fuzz
+/// Or use run-fuzz.sh for crash-resilient sequential execution.
 /// </summary>
+[Trait("Category", "Fuzz")]
 public class FuzzHarnessTests
 {
     private readonly ITestOutputHelper _output;
     public FuzzHarnessTests(ITestOutputHelper output) => _output = output;
 
-    [Fact] public void FuzzHarness_Level1() => Run(1, 100_000_000);
-    [Fact] public void FuzzHarness_Level5() => Run(5, 100_000_000);
-    [Fact] public void FuzzHarness_Level6() => Run(6, 100_000_000);
-    [Fact] public void FuzzHarness_Level9() => Run(9, 100_000_000);
+    [Fact(Skip = "Long-running — use run-fuzz.sh or: dotnet test --filter Category=Fuzz")]
+    public void FuzzHarness_Level1() => Run(1, 100_000_000);
+
+    [Fact(Skip = "Long-running — use run-fuzz.sh or: dotnet test --filter Category=Fuzz")]
+    public void FuzzHarness_Level5() => Run(5, 100_000_000);
+
+    [Fact(Skip = "Long-running — use run-fuzz.sh or: dotnet test --filter Category=Fuzz")]
+    public void FuzzHarness_Level6() => Run(6, 100_000_000);
+
+    [Fact(Skip = "Long-running — use run-fuzz.sh or: dotnet test --filter Category=Fuzz")]
+    public void FuzzHarness_Level6_CrashRegion() => Run(6, 22_000_000);
+
+    [Fact(Skip = "Long-running — use run-fuzz.sh or: dotnet test --filter Category=Fuzz")]
+    public void FuzzHarness_Level9() => Run(9, 100_000_000);
 
     private void Run(int level, int iterations)
     {

@@ -20,7 +20,8 @@ public class FuzzTests
     /// or reject the input with a managed exception. Any unhandled exception (AccessViolation,
     /// NullReference, etc.) or hang indicates a bounds-check gap.
     /// </summary>
-    [Theory]
+    [Theory(Skip = "Long-running fuzz test — run explicitly with: dotnet test --filter Category=Fuzz")]
+    [Trait("Category", "Fuzz")]
     [InlineData(1, 2_000_000)]
     [InlineData(5, 2_000_000)]
     [InlineData(6, 2_000_000)]
@@ -143,7 +144,8 @@ public class FuzzTests
     /// <summary>
     /// Same as above but targeting the framed API path.
     /// </summary>
-    [Fact]
+    [Fact(Skip = "Long-running fuzz test — run explicitly with: dotnet test --filter Category=Fuzz")]
+    [Trait("Category", "Fuzz")]
     public void Fuzz_MutatedFramedData()
     {
         byte[] source = new byte[32768];

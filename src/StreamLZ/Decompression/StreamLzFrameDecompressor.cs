@@ -20,10 +20,13 @@ internal static class StreamLzFrameDecompressor
     /// <param name="input">Source stream containing SLZ1-framed compressed data.</param>
     /// <param name="output">Destination stream to write decompressed data to.</param>
     /// <param name="windowSize">Sliding window size for back-references (default 4MB, must match compressor).</param>
+    /// <param name="progress">Optional progress reporter. Reports total decompressed bytes written after each block.</param>
+    /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>Total number of decompressed bytes written to <paramref name="output"/>.</returns>
     /// <exception cref="InvalidDataException">Thrown if the frame header is invalid or data is corrupt.</exception>
     public static long Decompress(Stream input, Stream output,
-        int windowSize = FrameConstants.DefaultWindowSize)
+        int windowSize = FrameConstants.DefaultWindowSize,
+        IProgress<long>? progress = null, CancellationToken cancellationToken = default)
     {
         // Read and parse frame header
         byte[] headerBuf = new byte[FrameConstants.MaxHeaderSize];
@@ -82,6 +85,8 @@ internal static class StreamLzFrameDecompressor
 
             while (true)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+
                 headerRead = ReadWithOverRead(ref overReadMem, input, blockHeaderBuf, 0, 8);
                 if (headerRead >= 4 && BinaryPrimitives.ReadUInt32LittleEndian(blockHeaderBuf) == 0)
                     break;
@@ -168,11 +173,12 @@ internal static class StreamLzFrameDecompressor
                             output.Write(decompBufs[writeBufIdx], offset, chunk);
                             offset += chunk;
                         }
-                    });
+                    }, cancellationToken);
                     pendingWriteSize = writeSize;
                     pendingWriteBuf = writeBufIdx;
 
                     totalDecompressed += decompressedSize;
+                    progress?.Report(totalDecompressed);
                     dictBytes = 0;
                     currentBuf = 1 - currentBuf; // swap to other buffer
                 }
@@ -216,6 +222,7 @@ internal static class StreamLzFrameDecompressor
 
                     output.Write(windowBuf, dictBytes, decompressedSize);
                     totalDecompressed += decompressedSize;
+                    progress?.Report(totalDecompressed);
 
                     // Slide the window
                     int totalUsed = dictBytes + decompressedSize;
@@ -282,11 +289,13 @@ internal static class StreamLzFrameDecompressor
     /// <param name="input">Source stream containing SLZ1-framed compressed data.</param>
     /// <param name="output">Destination stream to write decompressed data to.</param>
     /// <param name="windowSize">Sliding window size for back-references (default 4MB, must match compressor).</param>
+    /// <param name="progress">Optional progress reporter. Reports total decompressed bytes written after each block.</param>
     /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>Total number of decompressed bytes written to <paramref name="output"/>.</returns>
     /// <exception cref="InvalidDataException">Thrown if the frame header is invalid or data is corrupt.</exception>
     public static async Task<long> DecompressAsync(Stream input, Stream output,
         int windowSize = FrameConstants.DefaultWindowSize,
+        IProgress<long>? progress = null,
         CancellationToken cancellationToken = default)
     {
         byte[] headerBuf = new byte[FrameConstants.MaxHeaderSize];
@@ -418,6 +427,7 @@ internal static class StreamLzFrameDecompressor
 
                 await output.WriteAsync(windowBuf.AsMemory(dictBytes, decompressedSize), cancellationToken).ConfigureAwait(false);
                 totalDecompressed += decompressedSize;
+                progress?.Report(totalDecompressed);
 
                 // Slide the window
                 int totalUsed = dictBytes + decompressedSize;

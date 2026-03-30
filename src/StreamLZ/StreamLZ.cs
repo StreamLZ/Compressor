@@ -31,8 +31,8 @@ namespace StreamLZ;
 /// and require the caller to track the original size.
 /// </para>
 /// <para>
-/// For files of any size or stream-based I/O, use <see cref="CompressStream(Stream, Stream, int, long, bool, int)"/>,
-/// <see cref="DecompressStream"/>, <see cref="CompressFile(string, string, int, bool, int)"/>, or <see cref="DecompressFile"/>.
+/// For files of any size or stream-based I/O, use <see cref="CompressStream(Stream, Stream, int, long, bool, int, IProgress{long}, CancellationToken)"/>,
+/// <see cref="DecompressStream"/>, <see cref="CompressFile(string, string, int, bool, int, IProgress{long}, CancellationToken)"/>, or <see cref="DecompressFile"/>.
 /// These use the SLZ1 frame format with a sliding window for cross-block match references.
 /// </para>
 /// <para><b>Thread safety:</b> All static methods on this class are thread-safe.
@@ -362,28 +362,36 @@ public static class Slz
     /// <param name="useContentChecksum">When true, appends an XXH32 checksum of the uncompressed content
     /// after the end mark. The decompressor will verify this on read.</param>
     /// <param name="maxThreads">Maximum compression threads. 0 = auto (default).</param>
+    /// <param name="progress">Optional progress reporter. Reports total input bytes consumed after each block.</param>
+    /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>Total compressed bytes written.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="input"/> or <paramref name="output"/> is null.</exception>
     public static long CompressStream(Stream input, Stream output, int level = DefaultLevel,
-        long contentSize = -1, bool useContentChecksum = false, int maxThreads = 0)
+        long contentSize = -1, bool useContentChecksum = false, int maxThreads = 0,
+        IProgress<long>? progress = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(input);
         ArgumentNullException.ThrowIfNull(output);
         var mapped = MapLevel(level);
         return StreamLzFrameCompressor.Compress(input, output, mapped.Codec, mapped.CodecLevel, contentSize,
-            useContentChecksum: useContentChecksum, selfContained: mapped.SelfContained, maxThreads: maxThreads);
+            useContentChecksum: useContentChecksum, selfContained: mapped.SelfContained, maxThreads: maxThreads,
+            progress: progress, cancellationToken: cancellationToken);
     }
 
-    /// <inheritdoc cref="CompressStream(Stream, Stream, int, long, bool, int)"/>
+    /// <inheritdoc cref="CompressStream(Stream, Stream, int, long, bool, int, IProgress{long}, CancellationToken)"/>
     public static long CompressStream(Stream input, Stream output, SlzCompressionLevel level,
-        long contentSize = -1, bool useContentChecksum = false, int maxThreads = 0)
-        => CompressStream(input, output, (int)level, contentSize, useContentChecksum, maxThreads);
+        long contentSize = -1, bool useContentChecksum = false, int maxThreads = 0,
+        IProgress<long>? progress = null, CancellationToken cancellationToken = default)
+        => CompressStream(input, output, (int)level, contentSize, useContentChecksum, maxThreads,
+            progress, cancellationToken);
 
     /// <summary>
     /// Decompresses SLZ1-framed data from <paramref name="input"/> to <paramref name="output"/>.
     /// </summary>
     /// <param name="input">Source stream containing SLZ1-framed compressed data.</param>
     /// <param name="output">Destination stream for decompressed output.</param>
+    /// <param name="progress">Optional progress reporter. Reports total decompressed bytes written after each block.</param>
+    /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>Total decompressed bytes written.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="input"/> or <paramref name="output"/> is null.</exception>
     /// <exception cref="InvalidDataException">Thrown when the frame header is invalid or data is corrupt.</exception>
@@ -393,11 +401,13 @@ public static class Slz
     /// decompression. When handling untrusted data, decompress to a temporary location and
     /// move to the final destination only if no exception is thrown.
     /// </remarks>
-    public static long DecompressStream(Stream input, Stream output)
+    public static long DecompressStream(Stream input, Stream output,
+        IProgress<long>? progress = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(input);
         ArgumentNullException.ThrowIfNull(output);
-        return StreamLzFrameDecompressor.Decompress(input, output);
+        return StreamLzFrameDecompressor.Decompress(input, output, progress: progress,
+            cancellationToken: cancellationToken);
     }
 
     // ────────────────────────────────────────────────────────────────
@@ -414,6 +424,7 @@ public static class Slz
     /// <param name="contentSize">Known content size for the header, or -1 if unknown.</param>
     /// <param name="useContentChecksum">When true, appends an XXH32 checksum of the uncompressed content
     /// after the end mark. The decompressor will verify this on read.</param>
+    /// <param name="progress">Optional progress reporter. Reports total input bytes consumed after each block.</param>
     /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>Total compressed bytes written.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="input"/> or <paramref name="output"/> is null.</exception>
@@ -421,6 +432,7 @@ public static class Slz
     public static async Task<long> CompressStreamAsync(Stream input, Stream output,
         int level = DefaultLevel, long contentSize = -1,
         bool useContentChecksum = false,
+        IProgress<long>? progress = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(input);
@@ -429,31 +441,37 @@ public static class Slz
         return await StreamLzFrameCompressor.CompressAsync(input, output, mapped.Codec, mapped.CodecLevel,
             contentSize, useContentChecksum: useContentChecksum,
             selfContained: mapped.SelfContained,
+            progress: progress,
             cancellationToken: cancellationToken).ConfigureAwait(false);
     }
 
-    /// <inheritdoc cref="CompressStreamAsync(Stream, Stream, int, long, bool, CancellationToken)"/>
+    /// <inheritdoc cref="CompressStreamAsync(Stream, Stream, int, long, bool, IProgress{long}, CancellationToken)"/>
     public static Task<long> CompressStreamAsync(Stream input, Stream output, SlzCompressionLevel level,
         long contentSize = -1, bool useContentChecksum = false,
+        IProgress<long>? progress = null,
         CancellationToken cancellationToken = default)
-        => CompressStreamAsync(input, output, (int)level, contentSize, useContentChecksum, cancellationToken);
+        => CompressStreamAsync(input, output, (int)level, contentSize, useContentChecksum,
+            progress, cancellationToken);
 
     /// <summary>
     /// Asynchronously decompresses SLZ1-framed data from <paramref name="input"/> to <paramref name="output"/>.
     /// </summary>
     /// <param name="input">Source stream containing SLZ1-framed compressed data.</param>
     /// <param name="output">Destination stream for decompressed output.</param>
+    /// <param name="progress">Optional progress reporter. Reports total decompressed bytes written after each block.</param>
     /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>Total decompressed bytes written.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="input"/> or <paramref name="output"/> is null.</exception>
     /// <exception cref="OperationCanceledException">Thrown when cancellation is requested.</exception>
     /// <exception cref="InvalidDataException">Thrown when the frame header is invalid or data is corrupt.</exception>
     public static async Task<long> DecompressStreamAsync(Stream input, Stream output,
+        IProgress<long>? progress = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(input);
         ArgumentNullException.ThrowIfNull(output);
         return await StreamLzFrameDecompressor.DecompressAsync(input, output,
+            progress: progress,
             cancellationToken: cancellationToken).ConfigureAwait(false);
     }
 
@@ -470,9 +488,12 @@ public static class Slz
     /// <param name="useContentChecksum">When true, appends an XXH32 checksum of the
     /// uncompressed content after the end mark for integrity verification.</param>
     /// <param name="maxThreads">Maximum compression threads. 0 = auto (default).</param>
+    /// <param name="progress">Optional progress reporter. Reports total input bytes consumed after each block.</param>
+    /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>Total compressed bytes written.</returns>
     public static long CompressFile(string inputPath, string outputPath,
-        int level = DefaultLevel, bool useContentChecksum = false, int maxThreads = 0)
+        int level = DefaultLevel, bool useContentChecksum = false, int maxThreads = 0,
+        IProgress<long>? progress = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(inputPath);
         ArgumentNullException.ThrowIfNull(outputPath);
@@ -482,30 +503,40 @@ public static class Slz
         using var output = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None, ioBufSize, FileOptions.SequentialScan);
         return StreamLzFrameCompressor.Compress(input, output, mapped.Codec, mapped.CodecLevel,
             contentSize: input.Length, useContentChecksum: useContentChecksum,
-            selfContained: mapped.SelfContained, maxThreads: maxThreads);
+            selfContained: mapped.SelfContained, maxThreads: maxThreads,
+            progress: progress, cancellationToken: cancellationToken);
     }
 
-    /// <inheritdoc cref="CompressFile(string, string, int, bool, int)"/>
+    /// <inheritdoc cref="CompressFile(string, string, int, bool, int, IProgress{long}, CancellationToken)"/>
     public static long CompressFile(string inputPath, string outputPath, SlzCompressionLevel level,
-        bool useContentChecksum = false, int maxThreads = 0)
-        => CompressFile(inputPath, outputPath, (int)level, useContentChecksum, maxThreads);
+        bool useContentChecksum = false, int maxThreads = 0,
+        IProgress<long>? progress = null, CancellationToken cancellationToken = default)
+        => CompressFile(inputPath, outputPath, (int)level, useContentChecksum, maxThreads,
+            progress, cancellationToken);
 
     /// <summary>
     /// Decompresses an SLZ1-framed file.
     /// </summary>
     /// <param name="inputPath">Path to the compressed input file.</param>
     /// <param name="outputPath">Path to the decompressed output file.</param>
+    /// <param name="progress">Optional progress reporter. Reports total decompressed bytes written after each block.</param>
+    /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>Total decompressed bytes written.</returns>
     /// <remarks>
     /// <b>Untrusted input:</b> The content checksum (if present) is verified after all blocks
     /// are decompressed. The output file is written incrementally. When handling untrusted data,
     /// decompress to a temporary path and rename only if no exception is thrown.
     /// </remarks>
-    public static long DecompressFile(string inputPath, string outputPath)
+    public static long DecompressFile(string inputPath, string outputPath,
+        IProgress<long>? progress = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(inputPath);
         ArgumentNullException.ThrowIfNull(outputPath);
-        return StreamLzFrameDecompressor.DecompressFile(inputPath, outputPath);
+        const int ioBufSize = 1024 * 1024;
+        using var input = new FileStream(inputPath, FileMode.Open, FileAccess.Read, FileShare.Read, ioBufSize, FileOptions.SequentialScan);
+        using var output = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None, ioBufSize, FileOptions.SequentialScan);
+        return StreamLzFrameDecompressor.Decompress(input, output, progress: progress,
+            cancellationToken: cancellationToken);
     }
 
     // ────────────────────────────────────────────────────────────────
@@ -519,14 +550,17 @@ public static class Slz
     /// <param name="outputPath">Path to the compressed output file.</param>
     /// <param name="level">Compression level 1-11 (default: 6).</param>
     /// <param name="useContentChecksum">When true, appends an XXH32 content checksum.</param>
+    /// <param name="progress">Optional progress reporter. Reports total input bytes consumed after each block.</param>
     /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>Total compressed bytes written.</returns>
     public static async Task<long> CompressFileAsync(string inputPath, string outputPath,
         int level = DefaultLevel, bool useContentChecksum = false,
+        IProgress<long>? progress = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(inputPath);
         ArgumentNullException.ThrowIfNull(outputPath);
+        cancellationToken.ThrowIfCancellationRequested();
         var mapped = MapLevel(level);
         const int ioBufSize = 1024 * 1024;
 #pragma warning disable CA2007 // await using on FileStream — disposal is synchronous
@@ -536,22 +570,28 @@ public static class Slz
         return await StreamLzFrameCompressor.CompressAsync(input, output, mapped.Codec, mapped.CodecLevel,
             contentSize: input.Length, useContentChecksum: useContentChecksum,
             selfContained: mapped.SelfContained,
+            progress: progress,
             cancellationToken: cancellationToken).ConfigureAwait(false);
     }
 
-    /// <inheritdoc cref="CompressFileAsync(string, string, int, bool, CancellationToken)"/>
+    /// <inheritdoc cref="CompressFileAsync(string, string, int, bool, IProgress{long}, CancellationToken)"/>
     public static Task<long> CompressFileAsync(string inputPath, string outputPath, SlzCompressionLevel level,
-        bool useContentChecksum = false, CancellationToken cancellationToken = default)
-        => CompressFileAsync(inputPath, outputPath, (int)level, useContentChecksum, cancellationToken);
+        bool useContentChecksum = false,
+        IProgress<long>? progress = null,
+        CancellationToken cancellationToken = default)
+        => CompressFileAsync(inputPath, outputPath, (int)level, useContentChecksum,
+            progress, cancellationToken);
 
     /// <summary>
     /// Asynchronously decompresses an SLZ1-framed file.
     /// </summary>
     /// <param name="inputPath">Path to the compressed input file.</param>
     /// <param name="outputPath">Path to the decompressed output file.</param>
+    /// <param name="progress">Optional progress reporter. Reports total decompressed bytes written after each block.</param>
     /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>Total decompressed bytes written.</returns>
     public static async Task<long> DecompressFileAsync(string inputPath, string outputPath,
+        IProgress<long>? progress = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(inputPath);
@@ -562,6 +602,7 @@ public static class Slz
         await using var output = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None, ioBufSize, FileOptions.Asynchronous | FileOptions.SequentialScan);
 #pragma warning restore CA2007
         return await StreamLzFrameDecompressor.DecompressAsync(input, output,
+            progress: progress,
             cancellationToken: cancellationToken).ConfigureAwait(false);
     }
 
