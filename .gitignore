@@ -5,3 +5,4 @@ obj/
 .vs/
 *.DotSettings.user
 assets/enwik8.txt
+.nuget-key
