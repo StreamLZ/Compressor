@@ -254,77 +254,15 @@ unsafe
                     }
                 }
 
-                // Parse frame header to get content size
-                if (!FrameSerializer.TryReadHeader(compData, out var fh))
-                    throw new InvalidDataException("Invalid SLZ1 frame header.");
-
-                // Find total decompressed size by scanning block headers
-                long totalDecomp = 0;
-                int pos = fh.HeaderSize;
-                while (pos + 8 <= compData.Length)
-                {
-                    if (!FrameSerializer.TryReadBlockHeader(compData.AsSpan(pos), out int cs, out int ds, out bool unc))
-                        break;
-                    if (cs == 0) break; // end mark
-                    totalDecomp += ds;
-                    int payloadSize = unc ? ds : cs;
-                    pos += 8 + payloadSize;
-                }
-
-                byte[] output2 = new byte[totalDecomp + Slz.SafeSpace];
-                long decompWritten = 0;
-                pos = fh.HeaderSize;
-                while (pos + 8 <= compData.Length)
-                {
-                    if (!FrameSerializer.TryReadBlockHeader(compData.AsSpan(pos), out int cs, out int ds, out bool unc))
-                        break;
-                    if (cs == 0) break;
-                    pos += 8;
-                    if (unc)
-                    {
-                        compData.AsSpan(pos, ds).CopyTo(output2.AsSpan((int)decompWritten));
-                    }
-                    else
-                    {
-                        unsafe
-                        {
-                            fixed (byte* pComp = &compData[pos])
-                            fixed (byte* pOut = &output2[decompWritten])
-                            {
-                                StreamLZDecoder.Decompress(pComp, cs, pOut, ds);
-                            }
-                        }
-                    }
-                    decompWritten += ds;
-                    pos += unc ? ds : cs;
-                }
-
                 sw.Stop();
-                double mbps2 = (double)decompWritten / sw.Elapsed.TotalSeconds / (1024 * 1024);
-                Console.WriteLine($"Decompressed: {decompWritten:N0} bytes, {sw.ElapsedMilliseconds}ms, {mbps2:F1} MB/s");
 
-                // Write output in 1MB chunks (2x faster than single large write on NVMe)
-                var writeSw = System.Diagnostics.Stopwatch.StartNew();
-                using (var outFs = new FileStream(outputFile, FileMode.Create, FileAccess.Write, FileShare.None, 0, FileOptions.SequentialScan))
-                {
-                    int off = 0;
-                    while (off < (int)decompWritten)
-                    {
-                        int chunk = Math.Min(1024 * 1024, (int)decompWritten - off);
-                        outFs.Write(output2, off, chunk);
-                        off += chunk;
-                    }
-                }
-                writeSw.Stop();
-                Console.WriteLine($"Write: {writeSw.ElapsedMilliseconds}ms");
-            }
-            else
-            {
-                // Large file: streaming decompress
-                long decompSize = StreamLzFrameDecompressor.DecompressFile(inputFile, outputFile);
-                sw.Stop();
-                double mbps = (double)decompSize / sw.Elapsed.TotalSeconds / (1024 * 1024);
-                Console.WriteLine($"Decompressed: {decompSize:N0} bytes, {sw.ElapsedMilliseconds}ms, {mbps:F1} MB/s");
+                // Decompress using the proper framed API (handles sliding window, checksums, etc.)
+                var decompSw = System.Diagnostics.Stopwatch.StartNew();
+                long decompWritten = Slz.DecompressFile(inputFile, outputFile);
+                decompSw.Stop();
+                double mbps2 = (double)decompWritten / decompSw.Elapsed.TotalSeconds / (1024 * 1024);
+                Console.WriteLine($"Decompressed: {decompWritten:N0} bytes, {decompSw.ElapsedMilliseconds:N0}ms, {mbps2:F1} MB/s");
+
             }
         }
         Console.WriteLine($"Written to {outputFile}");
@@ -337,11 +275,29 @@ unsafe
         return;
     }
 
+    // In-memory benchmark needs source + compressed + decompressed buffers.
+    // Check available memory upfront and cap threads to stay within 70% of system RAM.
+    long availableBytes = (long)GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+    long memoryBudget = (long)(availableBytes * 0.70);
+    long benchmarkOverhead = inputSize + StreamLZCompressor.GetCompressBound((int)Math.Min(inputSize, int.MaxValue))
+                             + inputSize + StreamLZDecoder.SafeSpace;
+    if (benchmarkOverhead > memoryBudget)
+    {
+        Console.Error.WriteLine($"File requires ~{benchmarkOverhead / (1024 * 1024):N0} MB for in-memory benchmark, but only {memoryBudget / (1024 * 1024):N0} MB (70% of {availableBytes / (1024 * 1024):N0} MB) is available.");
+        Console.Error.WriteLine("Use -c/-d for stream-based compression of large files.");
+        return;
+    }
+
     byte[] src = File.ReadAllBytes(inputFile);
 
-    // Resolve auto thread count
+    // Cap threads so total memory (benchmark buffers + per-thread scratch) stays under 70% RAM
     if (threads <= 0)
-        threads = StreamLZCompressor.CalculateMaxThreads(src.Length, level);
+    {
+        long remainingBudget = memoryBudget - benchmarkOverhead;
+        int maxByMemory = (int)Math.Max(1, remainingBudget / StreamLZConstants.PerThreadMemoryEstimate);
+        int maxByCores = Environment.ProcessorCount;
+        threads = Math.Min(maxByMemory, maxByCores);
+    }
 
     if (threads > 1)
         Console.WriteLine($"Threads: {threads}");
@@ -375,13 +331,13 @@ unsafe
             sw.Stop();
             compTimes[r] = sw.ElapsedMilliseconds;
             double mbps = (double)src.Length / sw.Elapsed.TotalSeconds / (1024 * 1024);
-            Console.WriteLine($"  Compress run {r + 1}: {sw.ElapsedMilliseconds}ms ({mbps:F1} MB/s)");
+            Console.WriteLine($"  Compress run {r + 1}: {sw.ElapsedMilliseconds:N0}ms ({mbps:F1} MB/s)");
         }
 
         Array.Sort(compTimes);
         long compMedian = compTimes[runs / 2];
         double compMbps = (double)src.Length / (compMedian / 1000.0) / (1024 * 1024);
-        Console.WriteLine($"  Compress median: {compMedian}ms ({compMbps:F1} MB/s)");
+        Console.WriteLine($"  Compress median: {compMedian:N0}ms ({compMbps:F1} MB/s)");
         Console.WriteLine();
 
         // Decompress benchmark
@@ -401,13 +357,13 @@ unsafe
             if (decompSize < 0) Console.Error.WriteLine($"[CLI] Decompress FAILED: returned {decompSize}");
             decompTimes[r] = sw.ElapsedMilliseconds;
             double mbps = (double)src.Length / sw.Elapsed.TotalSeconds / (1024 * 1024);
-            Console.WriteLine($"  Decompress run {r + 1}: {decompTimes[r]}ms ({mbps:F1} MB/s)");
+            Console.WriteLine($"  Decompress run {r + 1}: {decompTimes[r]:N0}ms ({mbps:F1} MB/s)");
         }
 
         Array.Sort(decompTimes);
         long decompMedian = decompTimes[runs / 2];
         double decompMbps = (double)src.Length / (decompMedian / 1000.0) / (1024 * 1024);
-        Console.WriteLine($"  Decompress median: {decompMedian}ms ({decompMbps:F1} MB/s)");
+        Console.WriteLine($"  Decompress median: {decompMedian:N0}ms ({decompMbps:F1} MB/s)");
         Console.WriteLine();
 
         // Verify
@@ -471,13 +427,13 @@ unsafe
             sw.Stop();
             decompTimes[r] = sw.ElapsedMilliseconds;
             double mbps = (double)origSize / sw.Elapsed.TotalSeconds / (1024 * 1024);
-            Console.WriteLine($"  Decompress run {r + 1}: {decompTimes[r]}ms ({mbps:F1} MB/s)");
+            Console.WriteLine($"  Decompress run {r + 1}: {decompTimes[r]:N0}ms ({mbps:F1} MB/s)");
         }
 
         Array.Sort(decompTimes);
         long decompMedian = decompTimes[runs / 2];
         double decompMbps = (double)origSize / (decompMedian / 1000.0) / (1024 * 1024);
-        Console.WriteLine($"  Decompress median: {decompMedian}ms ({decompMbps:F1} MB/s)");
+        Console.WriteLine($"  Decompress median: {decompMedian:N0}ms ({decompMbps:F1} MB/s)");
     }
     // -c and -d modes are handled above via stream API (no file size limit).
 }

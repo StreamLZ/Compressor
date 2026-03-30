@@ -94,8 +94,57 @@ internal static unsafe partial class StreamLZCompressor
             opts.TwoPhase = true;
         }
 
-        return CompressBlock((int)codec, src, dst, srcLen, level,
-            compressOpts: opts, srcWindowBase: null, numThreads: numThreads);
+        // Try compressing the full input. If the compressor's internal allocations
+        // exceed available memory (common with L9+ optimal parser on large inputs),
+        // automatically split into smaller pieces. Each piece is a multiple of the
+        // internal chunk size (256KB) so the outputs concatenate into a valid stream.
+        int pieceSize = srcLen;
+        const int MinPiece = 16 * 1024 * 1024; // 16MB minimum
+
+        while (true)
+        {
+            try
+            {
+                if (pieceSize >= srcLen)
+                {
+                    // Single-shot: compress the whole input
+                    return CompressBlock((int)codec, src, dst, srcLen, level,
+                        compressOpts: opts, srcWindowBase: null, numThreads: numThreads);
+                }
+                else
+                {
+                    // Multi-piece: compress in pieceSize chunks, concatenate output.
+                    // Each piece must be self-contained so the decompressor can
+                    // handle the concatenated output as independent blocks.
+                    var pieceOpts = GetDefaultCompressOpts(level);
+                    pieceOpts.SelfContained = true;
+
+                    int totalWritten = 0;
+                    for (int off = 0; off < srcLen; off += pieceSize)
+                    {
+                        int len = Math.Min(pieceSize, srcLen - off);
+                        int written = CompressBlock((int)codec, src + off, dst + totalWritten,
+                            len, level, compressOpts: pieceOpts, srcWindowBase: null, numThreads: numThreads);
+                        totalWritten += written;
+                    }
+                    return totalWritten;
+                }
+            }
+            catch (Exception ex) when (ex is OutOfMemoryException or OverflowException)
+            {
+                // Step down through standard sizes (must be multiples of ChunkSize = 256KB)
+                int[] fallbacks = { 1024 * 1024 * 1024, 512 * 1024 * 1024, 256 * 1024 * 1024,
+                                    128 * 1024 * 1024, 64 * 1024 * 1024, 32 * 1024 * 1024, MinPiece };
+                int next = 0;
+                for (int i = 0; i < fallbacks.Length; i++)
+                {
+                    if (fallbacks[i] < pieceSize) { next = fallbacks[i]; break; }
+                }
+                if (next == 0)
+                    throw; // even 16MB OOMs — give up
+                pieceSize = next;
+            }
+        }
     }
 
     /// <summary>
