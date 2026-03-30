@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.0.7]
+
+### Security
+- Fix silent failure in `ExecuteTokens_Type1`: corrupt match offsets
+  now abort decompression instead of returning uninitialized pool
+  memory in the output buffer.
+- Add `maxDecompressedSize` to `DecompressStream`, `DecompressFile`,
+  and async variants. Prevents multi-block decompression bombs that
+  expand without limit (the framed byte[] API already had this).
+
 ## [1.0.6]
 
 ### Added
