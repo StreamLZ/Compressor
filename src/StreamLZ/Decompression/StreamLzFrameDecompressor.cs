@@ -26,7 +26,8 @@ internal static class StreamLzFrameDecompressor
     /// <exception cref="InvalidDataException">Thrown if the frame header is invalid or data is corrupt.</exception>
     public static long Decompress(Stream input, Stream output,
         int windowSize = FrameConstants.DefaultWindowSize,
-        IProgress<long>? progress = null, CancellationToken cancellationToken = default)
+        IProgress<long>? progress = null, CancellationToken cancellationToken = default,
+        long maxDecompressedSize = -1)
     {
         // Read and parse frame header
         byte[] headerBuf = new byte[FrameConstants.MaxHeaderSize];
@@ -178,6 +179,8 @@ internal static class StreamLzFrameDecompressor
                     pendingWriteBuf = writeBufIdx;
 
                     totalDecompressed += decompressedSize;
+                    if (maxDecompressedSize >= 0 && totalDecompressed > maxDecompressedSize)
+                        throw new InvalidDataException($"Decompressed output ({totalDecompressed} bytes) exceeds limit of {maxDecompressedSize} bytes.");
                     progress?.Report(totalDecompressed);
                     dictBytes = 0;
                     currentBuf = 1 - currentBuf; // swap to other buffer
@@ -222,6 +225,8 @@ internal static class StreamLzFrameDecompressor
 
                     output.Write(windowBuf, dictBytes, decompressedSize);
                     totalDecompressed += decompressedSize;
+                    if (maxDecompressedSize >= 0 && totalDecompressed > maxDecompressedSize)
+                        throw new InvalidDataException($"Decompressed output ({totalDecompressed} bytes) exceeds limit of {maxDecompressedSize} bytes.");
                     progress?.Report(totalDecompressed);
 
                     // Slide the window
@@ -296,6 +301,7 @@ internal static class StreamLzFrameDecompressor
     public static async Task<long> DecompressAsync(Stream input, Stream output,
         int windowSize = FrameConstants.DefaultWindowSize,
         IProgress<long>? progress = null,
+        long maxDecompressedSize = -1,
         CancellationToken cancellationToken = default)
     {
         byte[] headerBuf = new byte[FrameConstants.MaxHeaderSize];
@@ -427,6 +433,8 @@ internal static class StreamLzFrameDecompressor
 
                 await output.WriteAsync(windowBuf.AsMemory(dictBytes, decompressedSize), cancellationToken).ConfigureAwait(false);
                 totalDecompressed += decompressedSize;
+                if (maxDecompressedSize >= 0 && totalDecompressed > maxDecompressedSize)
+                    throw new InvalidDataException($"Decompressed output ({totalDecompressed} bytes) exceeds limit of {maxDecompressedSize} bytes.");
                 progress?.Report(totalDecompressed);
 
                 // Slide the window

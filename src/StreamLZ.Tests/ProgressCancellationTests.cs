@@ -136,4 +136,60 @@ public class ProgressCancellationTests
             File.Delete(outputPath);
         }
     }
+
+    [Fact]
+    public void DecompressFramed_MaxSizeRejectsOversizedFrame()
+    {
+        byte[] source = new byte[64 * 1024]; // 64KB
+        new Random(42).NextBytes(source);
+        byte[] compressed = Slz.CompressFramed(source);
+
+        // Set limit to 1KB — decompression of 64KB should throw
+        Assert.Throws<InvalidDataException>(() =>
+            Slz.DecompressFramed(compressed, maxDecompressedSize: 1024));
+    }
+
+    [Fact]
+    public void DecompressStream_MaxSizeRejectsOversizedOutput()
+    {
+        byte[] source = new byte[64 * 1024];
+        new Random(42).NextBytes(source);
+        byte[] compressed = Slz.CompressFramed(source);
+
+        using var input = new MemoryStream(compressed);
+        using var output = new MemoryStream();
+
+        Assert.Throws<InvalidDataException>(() =>
+            Slz.DecompressStream(input, output, maxDecompressedSize: 1024));
+    }
+
+    [Fact]
+    public void DecompressStream_MaxSizeAllowsWithinLimit()
+    {
+        byte[] source = new byte[64 * 1024];
+        new Random(42).NextBytes(source);
+        byte[] compressed = Slz.CompressFramed(source);
+
+        using var input = new MemoryStream(compressed);
+        using var output = new MemoryStream();
+
+        // 1MB limit — 64KB decompression should succeed
+        long written = Slz.DecompressStream(input, output, maxDecompressedSize: 1024 * 1024);
+        Assert.Equal(source.Length, written);
+    }
+
+    [Fact]
+    public void DecompressStream_NoLimitByDefault()
+    {
+        byte[] source = new byte[64 * 1024];
+        new Random(42).NextBytes(source);
+        byte[] compressed = Slz.CompressFramed(source);
+
+        using var input = new MemoryStream(compressed);
+        using var output = new MemoryStream();
+
+        // Default (-1) means no limit
+        long written = Slz.DecompressStream(input, output);
+        Assert.Equal(source.Length, written);
+    }
 }
