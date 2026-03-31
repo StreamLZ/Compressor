@@ -400,6 +400,8 @@ async function main() {
   await testDecompressVector('text');
   await testDecompressVector('boundary');
   await testDecompressVector('web');
+  await testDecompressVector('enwik8');
+  await testDecompressVector('silesia100m');
 
   console.log('\nAll tests passed.');
 }

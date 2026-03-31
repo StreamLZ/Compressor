@@ -6,15 +6,15 @@
   ;;
   ;; Memory layout (64 KB pages):
   ;;   0x00000000 .. 0x000000FF  —  Scratch / parsed header (256 B)
-  ;;   0x00000100 .. 0x001000FF  —  Input buffer  (up to 16 MB)
-  ;;   0x01000100 .. 0x020000FF  —  Output buffer (up to 16 MB)
-  ;;   0x02000100 .. 0x020010FF  —  Huffman LUT   (2048 * 2 = 4 KB)
-  ;;   0x02001100 .. 0x020810FF  —  Decode scratch (512 KB)
+  ;;   0x00000100 .. 0x03FFFFFF  —  Input buffer  (up to 64 MB)
+  ;;   0x04000100 .. 0x0BFFFFFF  —  Output buffer (up to 128 MB)
+  ;;   0x0C000100 .. 0x0C0010FF  —  Huffman LUT   (2048 * 2 = 4 KB)
+  ;;   0x0C001100 .. 0x0C0810FF  —  Decode scratch (512 KB)
   ;;
   ;; All offsets are byte addresses in linear memory.
   ;; ============================================================
 
-  (memory (export "memory") 640)  ;; 640 pages = 40 MB
+  (memory (export "memory") 3200)  ;; 3200 pages = 200 MB
 
   ;; ── Constants ──────────────────────────────────────────────
   ;; Frame magic: 'S','L','Z','1' = 0x534C5A31 written as LE bytes 31 5A 4C 53
@@ -24,9 +24,9 @@
 
   ;; Memory region base addresses
   (global $INPUT_BASE  i32 (i32.const 0x00000100))
-  (global $OUTPUT_BASE i32 (i32.const 0x01000100))
-  (global $LUT_BASE    i32 (i32.const 0x02000100))
-  (global $SCRATCH_BASE i32 (i32.const 0x02001100))
+  (global $OUTPUT_BASE i32 (i32.const 0x04000100))
+  (global $LUT_BASE    i32 (i32.const 0x0C000100))
+  (global $SCRATCH_BASE i32 (i32.const 0x0C001100))
 
   ;; Parsed header fields (stored at address 0x00..0xFF)
   ;; Offsets within the scratch/header region:
@@ -672,7 +672,18 @@
       )
     )
 
-    ;; Types 1 (tANS), 2 (Huffman 2-way), 3 (RLE), 4 (Huffman 4-way): not yet implemented
+    ;; Type 3: RLE
+    (if (i32.eq (local.get $chunkType) (i32.const 3))
+      (then
+        (return
+          (call $high_decode_rle
+            (local.get $src) (local.get $srcSize)
+            (local.get $dst) (local.get $dstSize)
+            (local.get $srcStart)))
+      )
+    )
+
+    ;; Types 1 (tANS), 2 (Huffman 2-way), 4 (Huffman 4-way): not yet implemented
     (return (i32.const -1))
   )
 
@@ -743,6 +754,190 @@
 
     ;; Return total consumed from srcStart
     (i32.sub (local.get $src) (local.get $srcStart))
+  )
+
+  ;; ── high_decode_rle ────────────────────────────────────────
+  ;; RLE decoder (entropy type 3).
+  ;; Commands read backwards from end, literals forward from front.
+  ;; Returns total source bytes consumed from srcStart, or -1 on error.
+  (func $high_decode_rle
+    (param $src i32) (param $srcSize i32)
+    (param $dst i32) (param $dstSize i32)
+    (param $srcStart i32)
+    (result i32)
+    (local $dstEnd i32)
+    (local $cmdPtr i32)
+    (local $cmdPtrEnd i32)
+    (local $rleByte i32)
+    (local $cmd i32)
+    (local $bytesToCopy i32)
+    (local $bytesToRle i32)
+    (local $data i32)
+
+    ;; Special case: srcSize == 1 → fill entire output with src[0]
+    (if (i32.le_s (local.get $srcSize) (i32.const 1))
+      (then
+        (if (i32.ne (local.get $srcSize) (i32.const 1))
+          (then (return (i32.const -1)))
+        )
+        (memory.fill (local.get $dst)
+          (i32.load8_u (local.get $src))
+          (local.get $dstSize))
+        (i32.store (global.get $ENT_DECODED_SIZE) (local.get $dstSize))
+        (return (i32.sub
+          (i32.add (local.get $src) (i32.const 1))
+          (local.get $srcStart)))
+      )
+    )
+
+    (local.set $dstEnd (i32.add (local.get $dst) (local.get $dstSize)))
+
+    ;; Check if command buffer is entropy-coded (src[0] != 0)
+    (if (i32.ne (i32.load8_u (local.get $src)) (i32.const 0))
+      (then
+        ;; Decode the entropy-coded prefix into a scratch buffer
+        ;; Use a scratch area past DECODE_SCRATCH + 256KB = 0x0C041100
+        (local.set $cmdPtr (i32.const 0x0C081100))
+        (local.set $data  ;; reuse $data as temp for decoded count
+          (call $high_decode_bytes
+            (local.get $src)
+            (i32.add (local.get $src) (local.get $srcSize))
+            (local.get $cmdPtr)
+            (i32.const 0x40000)))  ;; max 256KB
+        (if (i32.lt_s (local.get $data) (i32.const 0))
+          (then (return (i32.const -1)))
+        )
+        ;; Decoded prefix is at $cmdPtr, decSize bytes long
+        ;; Remaining raw bytes: src + $data .. src + srcSize
+        ;; Concatenate: [decoded prefix][remaining raw] into one buffer
+        (local.set $bytesToCopy (i32.load (global.get $ENT_DECODED_SIZE)))
+        (local.set $bytesToRle (i32.sub (local.get $srcSize) (local.get $data)))
+        ;; Copy remaining raw bytes after decoded prefix
+        (memory.copy
+          (i32.add (local.get $cmdPtr) (local.get $bytesToCopy))
+          (i32.add (local.get $src) (local.get $data))
+          (local.get $bytesToRle))
+        ;; cmdPtrEnd = cmdPtr + decoded + remaining
+        (local.set $cmdPtrEnd
+          (i32.add (local.get $cmdPtr)
+            (i32.add (local.get $bytesToCopy) (local.get $bytesToRle))))
+      )
+      (else
+        ;; Raw command buffer: cmdPtr = src+1, cmdPtrEnd = src+srcSize
+        (local.set $cmdPtr (i32.add (local.get $src) (i32.const 1)))
+        (local.set $cmdPtrEnd (i32.add (local.get $src) (local.get $srcSize)))
+      )
+    )
+    (local.set $rleByte (i32.const 0))
+
+    ;; Command loop: read commands from end, literals from front
+    (block $done
+      (loop $loop
+        (br_if $done (i32.ge_u (local.get $cmdPtr) (local.get $cmdPtrEnd)))
+
+        ;; cmd = cmdPtrEnd[-1]
+        (local.set $cmd
+          (i32.load8_u (i32.sub (local.get $cmdPtrEnd) (i32.const 1))))
+
+        ;; if (cmd - 1) >= 0x2F → short copy+RLE command
+        (if (i32.ge_u (i32.sub (local.get $cmd) (i32.const 1)) (i32.const 0x2F))
+          (then
+            (local.set $cmdPtrEnd (i32.sub (local.get $cmdPtrEnd) (i32.const 1)))
+            (local.set $bytesToCopy (i32.and (i32.xor (local.get $cmd) (i32.const 0xFF)) (i32.const 0xF)))
+            (local.set $bytesToRle (i32.shr_u (local.get $cmd) (i32.const 4)))
+
+            ;; Copy literals
+            (memory.copy (local.get $dst) (local.get $cmdPtr) (local.get $bytesToCopy))
+            (local.set $cmdPtr (i32.add (local.get $cmdPtr) (local.get $bytesToCopy)))
+            (local.set $dst (i32.add (local.get $dst) (local.get $bytesToCopy)))
+
+            ;; Fill RLE bytes
+            (memory.fill (local.get $dst) (local.get $rleByte) (local.get $bytesToRle))
+            (local.set $dst (i32.add (local.get $dst) (local.get $bytesToRle)))
+
+            (br $loop)
+          )
+        )
+
+        ;; cmd >= 0x10 → extended copy+RLE (2-byte command)
+        (if (i32.ge_u (local.get $cmd) (i32.const 0x10))
+          (then
+            ;; data = LE16(cmdPtrEnd-2) - 4096
+            (local.set $data
+              (i32.sub
+                (i32.load16_u (i32.sub (local.get $cmdPtrEnd) (i32.const 2)))
+                (i32.const 4096)))
+            (local.set $cmdPtrEnd (i32.sub (local.get $cmdPtrEnd) (i32.const 2)))
+            (local.set $bytesToCopy (i32.and (local.get $data) (i32.const 0x3F)))
+            (local.set $bytesToRle (i32.shr_u (local.get $data) (i32.const 6)))
+
+            (memory.copy (local.get $dst) (local.get $cmdPtr) (local.get $bytesToCopy))
+            (local.set $cmdPtr (i32.add (local.get $cmdPtr) (local.get $bytesToCopy)))
+            (local.set $dst (i32.add (local.get $dst) (local.get $bytesToCopy)))
+
+            (memory.fill (local.get $dst) (local.get $rleByte) (local.get $bytesToRle))
+            (local.set $dst (i32.add (local.get $dst) (local.get $bytesToRle)))
+
+            (br $loop)
+          )
+        )
+
+        ;; cmd == 1 → set RLE byte
+        (if (i32.eq (local.get $cmd) (i32.const 1))
+          (then
+            (local.set $rleByte (i32.load8_u (local.get $cmdPtr)))
+            (local.set $cmdPtr (i32.add (local.get $cmdPtr) (i32.const 1)))
+            (local.set $cmdPtrEnd (i32.sub (local.get $cmdPtrEnd) (i32.const 1)))
+            (br $loop)
+          )
+        )
+
+        ;; cmd >= 9 → large RLE run (2-byte command)
+        (if (i32.ge_u (local.get $cmd) (i32.const 9))
+          (then
+            (local.set $bytesToRle
+              (i32.mul
+                (i32.sub
+                  (i32.load16_u (i32.sub (local.get $cmdPtrEnd) (i32.const 2)))
+                  (i32.const 0x8FF))
+                (i32.const 128)))
+            (local.set $cmdPtrEnd (i32.sub (local.get $cmdPtrEnd) (i32.const 2)))
+
+            (memory.fill (local.get $dst) (local.get $rleByte) (local.get $bytesToRle))
+            (local.set $dst (i32.add (local.get $dst) (local.get $bytesToRle)))
+            (br $loop)
+          )
+        )
+
+        ;; cmd 2..8 → large literal copy (2-byte command)
+        (local.set $bytesToCopy
+          (i32.mul
+            (i32.sub
+              (i32.load16_u (i32.sub (local.get $cmdPtrEnd) (i32.const 2)))
+              (i32.const 511))
+            (i32.const 64)))
+        (local.set $cmdPtrEnd (i32.sub (local.get $cmdPtrEnd) (i32.const 2)))
+
+        (memory.copy (local.get $dst) (local.get $cmdPtr) (local.get $bytesToCopy))
+        (local.set $dst (i32.add (local.get $dst) (local.get $bytesToCopy)))
+        (local.set $cmdPtr (i32.add (local.get $cmdPtr) (local.get $bytesToCopy)))
+
+        (br $loop)
+      )
+    )
+
+    ;; Verify convergence
+    (if (i32.ne (local.get $cmdPtrEnd) (local.get $cmdPtr))
+      (then (return (i32.const -1)))
+    )
+    (if (i32.ne (local.get $dst) (local.get $dstEnd))
+      (then (return (i32.const -1)))
+    )
+
+    (i32.store (global.get $ENT_DECODED_SIZE) (local.get $dstSize))
+    (i32.sub
+      (i32.add (local.get $src) (local.get $srcSize))
+      (local.get $srcStart))
   )
 
   ;; ============================================================
@@ -1178,13 +1373,13 @@
   (global $LZ_CMD2_END    i32 (i32.const 0x98))
 
   ;; Scratch memory for decoded sub-streams.
-  ;; SCRATCH_BASE (0x02001100) is used:
+  ;; SCRATCH_BASE (0x0C001100) is used:
   ;;   +0x0000 .. +0x3FFFF: decoded literal/command streams (256KB)
   ;;   +0x40000 .. +0x5FFFF: off32 backing stores (128KB)
   ;; This is enough for chunks up to 128KB decompressed.
 
-  (global $DECODE_SCRATCH i32 (i32.const 0x02001100))
-  (global $OFF32_SCRATCH  i32 (i32.const 0x02041100))
+  (global $DECODE_SCRATCH i32 (i32.const 0x0C001100))
+  (global $OFF32_SCRATCH  i32 (i32.const 0x0C041100))
 
   ;; ── fast_decode_chunk ──────────────────────────────────────
   ;; Decode one Fast LZ chunk: ReadLzTable + ProcessLzRuns.
