@@ -944,7 +944,9 @@
   )
 
   ;; ── decode_block ───────────────────────────────────────────
-  ;; Decode one compressed block (contains StreamLZ header + chunks).
+  ;; Decode one compressed frame-level block.
+  ;; A block contains multiple 256KB StreamLZ chunks, each with its own
+  ;; 2-byte StreamLZ header + 4-byte chunk header + sub-chunk data.
   ;; Returns 0 on success, -1 on error.
   (func $decode_block
     (param $src i32) (param $srcEnd i32)
@@ -963,77 +965,96 @@
     (local $srcUsed i32)
     (local $mode i32)
     (local $subHdr i32)
+    (local $offset i32)
+    (local $chunkBytesLeft i32)
 
-    ;; Need at least 2 bytes for StreamLZ header
-    (if (i32.lt_s (i32.sub (local.get $srcEnd) (local.get $src)) (i32.const 2))
-      (then (return (i32.const -1)))
-    )
-
-    ;; Parse StreamLZ header
-    (local.set $b0 (i32.load8_u (local.get $src)))
-    (local.set $b1 (i32.load8_u (i32.add (local.get $src) (i32.const 1))))
-
-    ;; Verify magic nibble = 0x5
-    (if (i32.ne (i32.and (local.get $b0) (i32.const 0xF)) (i32.const 5))
-      (then (return (i32.const -1)))
-    )
-
-    (local.set $decoderType (i32.and (local.get $b1) (i32.const 0x7F)))
-    (local.set $isUncompChunk (i32.and (i32.shr_u (local.get $b0) (i32.const 7)) (i32.const 1)))
-    (local.set $src (i32.add (local.get $src) (i32.const 2)))
-
-    ;; Verify decoder type == 1 (Fast)
-    (if (i32.ne (local.get $decoderType) (i32.const 1))
-      (then (return (i32.const -1)))
-    )
-
-    ;; If uncompressed chunk flag, just copy the rest
-    (if (local.get $isUncompChunk)
-      (then
-        (if (i32.lt_s (i32.sub (local.get $srcEnd) (local.get $src)) (local.get $dstSize))
-          (then (return (i32.const -1)))
-        )
-        (memory.copy (local.get $dst) (local.get $src) (local.get $dstSize))
-        (return (i32.const 0))
-      )
-    )
-
-    ;; Read chunk header (4 bytes LE) — one per 256KB chunk
-    (if (i32.lt_s (i32.sub (local.get $srcEnd) (local.get $src)) (i32.const 4))
-      (then (return (i32.const -1)))
-    )
-    (local.set $chunkHdr (i32.load (local.get $src)))
-    (local.set $chunkCompSize (i32.and (local.get $chunkHdr) (i32.const 0x3FFFF)))
-    (local.set $chunkType (i32.and (i32.shr_u (local.get $chunkHdr) (i32.const 18)) (i32.const 3)))
-
-    ;; Memset chunk (type 1): fill entire output with one byte
-    (if (i32.eq (local.get $chunkType) (i32.const 1))
-      (then
-        (if (i32.lt_s (i32.sub (local.get $srcEnd) (local.get $src)) (i32.const 5))
-          (then (return (i32.const -1)))
-        )
-        (memory.fill (local.get $dst)
-          (i32.load8_u (i32.add (local.get $src) (i32.const 4)))
-          (local.get $dstSize))
-        (return (i32.const 0))
-      )
-    )
-
-    ;; Skip past 4-byte chunk header
-    (local.set $src (i32.add (local.get $src) (i32.const 4)))
-
-    ;; Sub-chunk loop — process up to 128KB sub-chunks
     (local.set $dstEnd (i32.add (local.get $dst) (local.get $dstSize)))
     (local.set $dstCur (local.get $dst))
+    (local.set $offset (i32.const 0))
 
-    (block $chunkDone
-      (loop $chunkLoop
-        (br_if $chunkDone (i32.ge_u (local.get $dstCur) (local.get $dstEnd)))
+    ;; Outer loop: one iteration per 256KB StreamLZ chunk
+    (block $blockDone
+      (loop $chunkOuterLoop
+        (br_if $blockDone (i32.ge_u (local.get $dstCur) (local.get $dstEnd)))
 
-        (local.set $dstCount (i32.sub (local.get $dstEnd) (local.get $dstCur)))
-        (if (i32.gt_s (local.get $dstCount) (i32.const 0x20000))
-          (then (local.set $dstCount (i32.const 0x20000)))
+        ;; Parse StreamLZ header at every 256KB boundary
+        (if (i32.eqz (i32.and (local.get $offset) (i32.const 0x3FFFF)))
+          (then
+            (if (i32.lt_s (i32.sub (local.get $srcEnd) (local.get $src)) (i32.const 2))
+              (then (return (i32.const -1)))
+            )
+            (local.set $b0 (i32.load8_u (local.get $src)))
+            (local.set $b1 (i32.load8_u (i32.add (local.get $src) (i32.const 1))))
+            (if (i32.ne (i32.and (local.get $b0) (i32.const 0xF)) (i32.const 5))
+              (then (return (i32.const -1)))
+            )
+            (local.set $decoderType (i32.and (local.get $b1) (i32.const 0x7F)))
+            (local.set $isUncompChunk (i32.and (i32.shr_u (local.get $b0) (i32.const 7)) (i32.const 1)))
+            (local.set $src (i32.add (local.get $src) (i32.const 2)))
+            (if (i32.ne (local.get $decoderType) (i32.const 1))
+              (then (return (i32.const -1)))
+            )
+          )
         )
+
+        ;; Bytes left for this 256KB chunk
+        (local.set $chunkBytesLeft
+          (i32.sub (local.get $dstEnd) (local.get $dstCur)))
+        (if (i32.gt_s (local.get $chunkBytesLeft) (i32.const 0x40000))
+          (then (local.set $chunkBytesLeft (i32.const 0x40000)))
+        )
+
+        ;; If uncompressed chunk, just copy
+        (if (local.get $isUncompChunk)
+          (then
+            (if (i32.lt_s (i32.sub (local.get $srcEnd) (local.get $src)) (local.get $chunkBytesLeft))
+              (then (return (i32.const -1)))
+            )
+            (memory.copy (local.get $dstCur) (local.get $src) (local.get $chunkBytesLeft))
+            (local.set $src (i32.add (local.get $src) (local.get $chunkBytesLeft)))
+            (local.set $dstCur (i32.add (local.get $dstCur) (local.get $chunkBytesLeft)))
+            (local.set $offset (i32.add (local.get $offset) (local.get $chunkBytesLeft)))
+            (br $chunkOuterLoop)
+          )
+        )
+
+        ;; Read 4-byte LE chunk header
+        (if (i32.lt_s (i32.sub (local.get $srcEnd) (local.get $src)) (i32.const 4))
+          (then (return (i32.const -1)))
+        )
+        (local.set $chunkHdr (i32.load (local.get $src)))
+        (local.set $chunkCompSize (i32.and (local.get $chunkHdr) (i32.const 0x3FFFF)))
+        (local.set $chunkType (i32.and (i32.shr_u (local.get $chunkHdr) (i32.const 18)) (i32.const 3)))
+
+        ;; Memset chunk (type 1)
+        (if (i32.eq (local.get $chunkType) (i32.const 1))
+          (then
+            (if (i32.lt_s (i32.sub (local.get $srcEnd) (local.get $src)) (i32.const 5))
+              (then (return (i32.const -1)))
+            )
+            (memory.fill (local.get $dstCur)
+              (i32.load8_u (i32.add (local.get $src) (i32.const 4)))
+              (local.get $chunkBytesLeft))
+            (local.set $src (i32.add (local.get $src) (i32.const 5)))
+            (local.set $dstCur (i32.add (local.get $dstCur) (local.get $chunkBytesLeft)))
+            (local.set $offset (i32.add (local.get $offset) (local.get $chunkBytesLeft)))
+            (br $chunkOuterLoop)
+          )
+        )
+
+        ;; Skip 4-byte chunk header
+        (local.set $src (i32.add (local.get $src) (i32.const 4)))
+
+        ;; Inner sub-chunk loop — process up to 128KB sub-chunks within this 256KB chunk
+        (local.set $chunkBytesLeft (local.get $chunkBytesLeft)) ;; already set above
+        (block $chunkDone
+          (loop $chunkLoop
+            (br_if $chunkDone (i32.le_s (local.get $chunkBytesLeft) (i32.const 0)))
+
+            (local.set $dstCount (local.get $chunkBytesLeft))
+            (if (i32.gt_s (local.get $dstCount) (i32.const 0x20000))
+              (then (local.set $dstCount (i32.const 0x20000)))
+            )
 
         ;; Read 3-byte big-endian sub-chunk header
         (if (i32.lt_s (i32.sub (local.get $srcEnd) (local.get $src)) (i32.const 3))
@@ -1108,9 +1129,15 @@
         )
         (local.set $src (i32.add (local.get $src) (local.get $srcUsed)))
         (local.set $dstCur (i32.add (local.get $dstCur) (local.get $dstCount)))
+        (local.set $chunkBytesLeft (i32.sub (local.get $chunkBytesLeft) (local.get $dstCount)))
+        (local.set $offset (i32.add (local.get $offset) (local.get $dstCount)))
         (br $chunkLoop)
       )
-    )
+    )  ;; end sub-chunk loop
+
+    (br $chunkOuterLoop)
+      )
+    )  ;; end outer 256KB chunk loop
 
     (i32.const 0)
   )
@@ -1419,6 +1446,8 @@
     )
 
     (local.set $savedDist (i32.const -8))  ;; InitialRecentOffset
+    ;; Store savedDist at 0x9C for process_mode to read/write
+    (i32.store (i32.const 0x9C) (local.get $savedDist))
     (local.set $cmdStartBase (i32.load (global.get $LZ_CMD_START)))
 
     ;; Two iterations (two 64KB sub-chunks)
@@ -1538,7 +1567,8 @@
     (local.set $off16StreamEnd (i32.load (global.get $LZ_OFF16_END)))
     (local.set $off32Stream (i32.load (global.get $LZ_OFF32_START)))
     (local.set $off32StreamEnd (i32.load (global.get $LZ_OFF32_END)))
-    (local.set $recentOffs (i32.const -8))
+    ;; Read savedDist from shared address (set by process_lz_runs)
+    (local.set $recentOffs (i32.load (i32.const 0x9C)))
     (local.set $isDelta (i32.eqz (local.get $mode)))
 
     (local.set $dstCur (i32.add (local.get $dst) (local.get $startOff)))
@@ -1871,6 +1901,8 @@
     (i32.store (global.get $LZ_LEN_STREAM) (local.get $lengthStream))
     (i32.store (global.get $LZ_OFF16_START) (local.get $off16Stream))
     (i32.store (global.get $LZ_LIT_START) (local.get $litStream))
+    ;; Write back savedDist for next iteration
+    (i32.store (i32.const 0x9C) (local.get $recentOffs))
 
     (i32.const 0)
   )
