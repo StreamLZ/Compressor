@@ -58,18 +58,12 @@ internal static class StreamLzFrameDecompressor
         windowSize = Math.Clamp(windowSize, blockSize, FrameConstants.MaxWindowSize);
 
         int initialCompBufSize = StreamLZCompressor.GetCompressBound(blockSize) + StreamLZConstants.CompressBufferPadding;
-        // Double-buffered I/O for large blocks: read block N+1 while decompressing N,
-        // write block N-1 while decompressing N. Two sets of compressed+decompressed buffers.
-        byte[][] compBufs = [
-            ArrayPool<byte>.Shared.Rent(initialCompBufSize),
-            ArrayPool<byte>.Shared.Rent(initialCompBufSize)
-        ];
-        byte[][] decompBufs = [null!, null!]; // rented on first large block
-        // Window buffer for small serial blocks (L9-L11 with cross-block references).
+        byte[] compBuf = ArrayPool<byte>.Shared.Rent(initialCompBufSize);
+        // Window buffer for sliding-window dictionary context across blocks.
+        // Grows dynamically if a block is larger than the initial allocation.
         int windowBufSize = windowSize + blockSize + StreamLZDecoder.SafeSpace * 2;
         byte[] windowBuf = ArrayPool<byte>.Shared.Rent(windowBufSize);
         byte[] blockHeaderBuf = new byte[8];
-        Task? pendingWrite = null;
 
         // Incremental XXH32 checksum over all decompressed data (if frame has checksum flag)
         bool verifyChecksum = (header.Flags & FrameFlags.ContentChecksum) != 0;
@@ -79,9 +73,6 @@ internal static class StreamLzFrameDecompressor
         {
             long totalDecompressed = 0;
             int dictBytes = 0;
-            int currentBuf = 0;
-            int pendingWriteSize = 0;
-            int pendingWriteBuf = -1;
             int headerRead = 0;
 
             while (true)
@@ -99,102 +90,31 @@ internal static class StreamLzFrameDecompressor
 
                 if (compressedSize == 0)
                     break;
-
                 // Guard against malicious streams claiming enormous block sizes.
                 if (decompressedSize > FrameConstants.MaxDecompressedBlockSize)
                     throw new InvalidDataException($"Block decompressed size {decompressedSize} exceeds maximum {FrameConstants.MaxDecompressedBlockSize}.");
                 if (compressedSize > FrameConstants.MaxDecompressedBlockSize)
                     throw new InvalidDataException($"Block compressed size {compressedSize} exceeds maximum {FrameConstants.MaxDecompressedBlockSize}.");
 
-                bool isLargeBlock = decompressedSize > blockSize;
-
-                if (isLargeBlock)
                 {
-                    // Ensure buffers are large enough for this block
+
+                    // Grow buffers if this block is larger than initial allocation
+                    int neededWindow = dictBytes + decompressedSize + StreamLZDecoder.SafeSpace * 2;
+                    if (neededWindow > windowBuf.Length)
+                    {
+                        byte[] newWindow = ArrayPool<byte>.Shared.Rent(neededWindow);
+                        Buffer.BlockCopy(windowBuf, 0, newWindow, 0, dictBytes);
+                        ArrayPool<byte>.Shared.Return(windowBuf);
+                        windowBuf = newWindow;
+                    }
                     int neededComp = compressedSize + StreamLZConstants.CompressBufferPadding;
-                    if (neededComp > compBufs[currentBuf].Length)
+                    if (neededComp > compBuf.Length)
                     {
-                        ArrayPool<byte>.Shared.Return(compBufs[currentBuf]);
-                        compBufs[currentBuf] = ArrayPool<byte>.Shared.Rent(neededComp);
-                    }
-                    int neededDecomp = decompressedSize + StreamLZDecoder.SafeSpace * 2;
-                    if (decompBufs[currentBuf] == null || neededDecomp > decompBufs[currentBuf].Length)
-                    {
-                        if (decompBufs[currentBuf] != null) ArrayPool<byte>.Shared.Return(decompBufs[currentBuf]);
-                        decompBufs[currentBuf] = ArrayPool<byte>.Shared.Rent(neededDecomp);
+                        ArrayPool<byte>.Shared.Return(compBuf);
+                        compBuf = ArrayPool<byte>.Shared.Rent(neededComp);
                     }
 
-                    // Read compressed data into current buffer
-                    if (isUncompressed)
-                    {
-                        if (ReadWithOverRead(ref overReadMem, input, decompBufs[currentBuf], 0, decompressedSize) < decompressedSize)
-                            throw new InvalidDataException("Unexpected end of stream in uncompressed block.");
-                    }
-                    else
-                    {
-                        if (ReadWithOverRead(ref overReadMem, input, compBufs[currentBuf], 0, compressedSize) < compressedSize)
-                            throw new InvalidDataException("Unexpected end of stream in compressed block.");
-
-                        // Decompress while previous write completes in background
-                        unsafe
-                        {
-                            fixed (byte* pDecomp = decompBufs[currentBuf])
-                            fixed (byte* pCompressed = compBufs[currentBuf])
-                            {
-                                int result = StreamLZDecoder.Decompress(
-                                    pCompressed, compressedSize,
-                                    pDecomp, decompressedSize, dstOffset: 0);
-                                if (result < 0)
-                                    throw new InvalidDataException("Block decompression failed.");
-                                decompressedSize = result;
-                            }
-                        }
-                    }
-
-                    // Wait for previous write to finish before starting a new one
-                    if (pendingWrite != null)
-                    {
-                        pendingWrite.GetAwaiter().GetResult();
-                        pendingWrite = null;
-                    }
-
-                    // Hash decompressed data before writing
-                    contentHasher?.Append(decompBufs[currentBuf].AsSpan(0, decompressedSize));
-
-                    // Start async write of current decompressed data
-                    int writeSize = decompressedSize;
-                    int writeBufIdx = currentBuf;
-                    pendingWrite = Task.Run(() =>
-                    {
-                        // Write in 1MB chunks for optimal NVMe throughput
-                        int offset = 0;
-                        while (offset < writeSize)
-                        {
-                            int chunk = Math.Min(1024 * 1024, writeSize - offset);
-                            output.Write(decompBufs[writeBufIdx], offset, chunk);
-                            offset += chunk;
-                        }
-                    }, cancellationToken);
-                    pendingWriteSize = writeSize;
-                    pendingWriteBuf = writeBufIdx;
-
-                    totalDecompressed += decompressedSize;
-                    if (maxDecompressedSize >= 0 && totalDecompressed > maxDecompressedSize)
-                        throw new InvalidDataException($"Decompressed output ({totalDecompressed} bytes) exceeds limit of {maxDecompressedSize} bytes.");
-                    progress?.Report(totalDecompressed);
-                    dictBytes = 0;
-                    currentBuf = 1 - currentBuf; // swap to other buffer
-                }
-                else
-                {
-                    // Flush any pending large-block write before processing a serial block
-                    if (pendingWrite != null)
-                    {
-                        pendingWrite.GetAwaiter().GetResult();
-                        pendingWrite = null;
-                    }
-
-                    // Small serial block: decompress with sliding window dictionary context
+                    // Serial block: decompress with sliding window dictionary context
                     if (isUncompressed)
                     {
                         if (ReadWithOverRead(ref overReadMem, input, windowBuf, dictBytes, decompressedSize) < decompressedSize)
@@ -202,13 +122,13 @@ internal static class StreamLzFrameDecompressor
                     }
                     else
                     {
-                        if (ReadWithOverRead(ref overReadMem, input, compBufs[0], 0, compressedSize) < compressedSize)
+                        if (ReadWithOverRead(ref overReadMem, input, compBuf, 0, compressedSize) < compressedSize)
                             throw new InvalidDataException("Unexpected end of stream in compressed block.");
 
                         unsafe
                         {
                             fixed (byte* pWindow = windowBuf)
-                            fixed (byte* pCompressed = compBufs[0])
+                            fixed (byte* pCompressed = compBuf)
                             {
                                 int result = StreamLZDecoder.Decompress(
                                     pCompressed, compressedSize,
@@ -245,12 +165,6 @@ internal static class StreamLzFrameDecompressor
                 }
             }
 
-            // Flush any pending background write
-            if (pendingWrite != null)
-            {
-                pendingWrite.GetAwaiter().GetResult();
-            }
-
             // Verify XXH32 content checksum if present.
             // The checksum follows the 4-byte end mark. We read 8 bytes for the block header,
             // so the checksum may already be in blockHeaderBuf[4..8]. If not, read it now.
@@ -274,16 +188,7 @@ internal static class StreamLzFrameDecompressor
         }
         finally
         {
-            // Observe pending write task to prevent unobserved exceptions
-            if (pendingWrite != null)
-            {
-                try { pendingWrite.GetAwaiter().GetResult(); } catch (IOException) { /* already handling an exception */ }
-            }
-            for (int i = 0; i < 2; i++)
-            {
-                ArrayPool<byte>.Shared.Return(compBufs[i]);
-                if (decompBufs[i] != null) ArrayPool<byte>.Shared.Return(decompBufs[i]);
-            }
+            ArrayPool<byte>.Shared.Return(compBuf);
             ArrayPool<byte>.Shared.Return(windowBuf);
         }
     }

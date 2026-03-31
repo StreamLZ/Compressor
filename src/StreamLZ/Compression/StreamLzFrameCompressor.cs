@@ -51,8 +51,17 @@ internal static class StreamLzFrameCompressor
         // Incremental XXH32 checksum over all uncompressed data (if enabled)
         System.IO.Hashing.XxHash32? contentHasher = useContentChecksum ? new() : null;
 
-        int numThreads = maxThreads > 0 ? maxThreads : StreamLZCompressor.CalculateMaxThreads(
-            contentSize > 0 ? (int)Math.Min(contentSize, int.MaxValue) : 100_000_000, level);
+        // Use all cores. Determine data per thread from memory budget.
+        int numThreads = maxThreads > 0 ? maxThreads : Environment.ProcessorCount;
+        long totalMemory = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+        long memoryBudget = (totalMemory * 60) / 100;
+        long perThreadOverhead = StreamLZConstants.PerThreadMemoryEstimate;
+        long availableForData = memoryBudget - numThreads * perThreadOverhead;
+        // Double-buffered I/O needs 2x the data allocation (read + compress simultaneously)
+        long dataPerThread = Math.Max(StreamLZConstants.ChunkSize,
+            availableForData / numThreads / 2);
+        // Round down to chunk boundary
+        dataPerThread = (dataPerThread / StreamLZConstants.ChunkSize) * StreamLZConstants.ChunkSize;
 
         // Large-chunk path: read many chunks, compress as one block using the
         // parallel in-memory API. Each block is independently decompressible.
@@ -63,7 +72,7 @@ internal static class StreamLzFrameCompressor
 
         if (useLargeChunks)
         {
-            int chunkSize = Math.Min(numThreads * StreamLZConstants.ChunkSize * 4, 256 * 1024 * 1024);
+            int chunkSize = (int)Math.Min(numThreads * dataPerThread, int.MaxValue - 1024);
             // Double-buffered: read next chunk while compressing current one.
             byte[][] srcBufs = [
                 ArrayPool<byte>.Shared.Rent(chunkSize),
@@ -165,12 +174,18 @@ internal static class StreamLzFrameCompressor
             }
         }
 
-        // Serial path for non-SC High levels (L9-L11): one block at a time with
-        // sliding window for cross-block dictionary references.
+        // Serial path for non-SC High levels (L9-L11): read as much as possible
+        // per iteration so CompressBlock gets maximum context for match finding.
+        // Read size is capped by memory budget (window + read + compressed buffers).
         {
-            int windowBufSize = windowSize + blockSize;
+            long serialBudget = memoryBudget - numThreads * perThreadOverhead;
+            // Need: windowSize + readSize + compressBound(readSize) ≈ windowSize + 2*readSize
+            long maxRead = (serialBudget - windowSize) / 2;
+            maxRead = (maxRead / StreamLZConstants.ChunkSize) * StreamLZConstants.ChunkSize;
+            int readSize = (int)Math.Clamp(maxRead, StreamLZConstants.ChunkSize, windowSize);
+            int windowBufSize = windowSize + readSize;
             byte[] windowBuf = ArrayPool<byte>.Shared.Rent(windowBufSize);
-            int compressBound = StreamLZCompressor.GetCompressBound(blockSize);
+            int compressBound = StreamLZCompressor.GetCompressBound(readSize);
             byte[] compressedBuf = ArrayPool<byte>.Shared.Rent(compressBound + StreamLZConstants.CompressBufferPadding);
             byte[] blockHeaderBuf = new byte[8];
 
@@ -183,7 +198,7 @@ internal static class StreamLzFrameCompressor
                 {
                     cancellationToken.ThrowIfCancellationRequested();
 
-                    int blockBytes = ReadFully(input, windowBuf, dictBytes, blockSize);
+                    int blockBytes = ReadFully(input, windowBuf, dictBytes, readSize);
                     if (blockBytes == 0)
                         break;
 
@@ -198,7 +213,7 @@ internal static class StreamLzFrameCompressor
                         {
                             compressedSize = StreamLZCompressor.CompressBlock(
                                 (int)codec, pWindow + dictBytes, pCompressed, blockBytes, level,
-                                compressOpts: null, srcWindowBase: pWindow);
+                                compressOpts: null, srcWindowBase: pWindow, numThreads: numThreads);
                         }
                     }
 
