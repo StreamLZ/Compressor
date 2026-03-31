@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.0.9]
+
+### Fixed
+- Stream compressor now matches raw API speed and ratio. L9 stream
+  was 3x slower with 6% worse ratio due to 256KB read size (now uses
+  full window) and missing thread count (now uses all cores).
+- Memory-budget-based sizing: data per thread scales to fill 60% of
+  system RAM while keeping all cores busy. Handles files of any size
+  without manual tuning.
+- Frame decompressor supports blocks of any size (removed dead
+  large-block code path that broke cross-block dictionary references).
+- CLI `-d` decompress now handles L9+ sliding-window streams correctly.
+
 ## [1.0.8]
 
 ### Security
