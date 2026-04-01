@@ -1106,8 +1106,8 @@
       (then (return (i32.const -1)))
     )
 
-    ;; Verify codec == 1 (Fast)
-    (if (i32.ne (i32.load8_u (global.get $HDR_CODEC)) (i32.const 1))
+    ;; Verify codec: 0 (High) or 1 (Fast)
+    (if (i32.gt_u (i32.load8_u (global.get $HDR_CODEC)) (i32.const 1))
       (then (return (i32.const -1)))
     )
 
@@ -1216,7 +1216,8 @@
             (local.set $decoderType (i32.and (local.get $b1) (i32.const 0x7F)))
             (local.set $isUncompChunk (i32.and (i32.shr_u (local.get $b0) (i32.const 7)) (i32.const 1)))
             (local.set $src (i32.add (local.get $src) (i32.const 2)))
-            (if (i32.ne (local.get $decoderType) (i32.const 1))
+            ;; Accept decoder type 0 (High) or 1 (Fast)
+            (if (i32.gt_u (local.get $decoderType) (i32.const 1))
               (then (return (i32.const -1)))
             )
           )
@@ -1347,17 +1348,36 @@
           )
         )
 
-        ;; LZ compressed — call fast_decode_chunk
-        (if (i32.lt_s
-              (call $fast_decode_chunk
-                (local.get $src)
-                (i32.add (local.get $src) (local.get $srcUsed))
-                (local.get $dstCur)
-                (local.get $dstCount)
-                (local.get $mode)
-                (local.get $dst))  ;; dstStart for offset validation
-              (i32.const 0))
-          (then (global.set $TRACE (i32.const -2030)) (return (i32.const -1)))
+        ;; LZ compressed — route to High or Fast decoder
+        (if (i32.eqz (local.get $decoderType))
+          (then
+            ;; High codec (decoder type 0)
+            (if (i32.lt_s
+                  (call $high_decode_chunk_lz
+                    (local.get $src)
+                    (i32.add (local.get $src) (local.get $srcUsed))
+                    (local.get $dstCur)
+                    (local.get $dstCount)
+                    (local.get $mode)
+                    (local.get $dst))
+                  (i32.const 0))
+              (then (global.set $TRACE (i32.const -2031)) (return (i32.const -1)))
+            )
+          )
+          (else
+            ;; Fast codec (decoder type 1)
+            (if (i32.lt_s
+                  (call $fast_decode_chunk
+                    (local.get $src)
+                    (i32.add (local.get $src) (local.get $srcUsed))
+                    (local.get $dstCur)
+                    (local.get $dstCount)
+                    (local.get $mode)
+                    (local.get $dst))
+                  (i32.const 0))
+              (then (global.set $TRACE (i32.const -2030)) (return (i32.const -1)))
+            )
+          )
         )
         (local.set $src (i32.add (local.get $src) (local.get $srcUsed)))
         (local.set $dstCur (i32.add (local.get $dstCur) (local.get $dstCount)))
@@ -2376,6 +2396,131 @@
     (local.get $numSymbols)
   )
 
+  ;; Scratch for Huffman NEW path
+  (global $HUFF_NEW_CODELEN i32 (i32.const 0x0C104000))  ;; 528 bytes
+  (global $HUFF_NEW_RANGE   i32 (i32.const 0x0C104210))  ;; 532 bytes
+
+  ;; ── huff_read_code_lengths_new ─────────────────────────────
+  ;; Read Huffman code lengths using NEW (Golomb-Rice) format.
+  ;; Uses BR at 0x30. Returns numSymbols on success, -1 on error.
+  (func $huff_read_code_lengths_new (result i32)
+    (local $forcedBits i32) (local $numSymbols i32) (local $fluff i32) (local $totalRice i32)
+    (local $i i32) (local $v i32) (local $runningSum i32)
+    (local $ranges i32) (local $sym i32) (local $num i32) (local $cp i32)
+    (local $codelen i32) (local $pfxIdx i32)
+
+    (local.set $forcedBits (call $br_read_bits_no_refill (i32.const 2)))
+    (local.set $numSymbols (i32.add (call $br_read_bits_no_refill (i32.const 8)) (i32.const 1)))
+    (local.set $fluff (call $br_read_fluff (local.get $numSymbols)))
+
+    (if (i32.or (i32.lt_s (local.get $fluff) (i32.const 0))
+                (i32.gt_s (i32.add (local.get $numSymbols) (local.get $fluff)) (i32.const 512)))
+      (then (return (i32.const -1)))
+    )
+
+    (local.set $totalRice (i32.add (local.get $numSymbols) (local.get $fluff)))
+
+    ;; Initialize GR BitReader2 from BR state
+    (i32.store (global.get $GR_BITPOS)
+      (i32.and (i32.sub (i32.load (global.get $BR_BITPOS)) (i32.const 24)) (i32.const 7)))
+    (i32.store (global.get $GR_PEND) (i32.load (global.get $BR_PEND)))
+    (i32.store (global.get $GR_P)
+      (i32.sub (i32.load (global.get $BR_P))
+        (i32.shr_u
+          (i32.add (i32.sub (i32.const 24) (i32.load (global.get $BR_BITPOS))) (i32.const 7))
+          (i32.const 3))))
+
+    ;; Decode Golomb-Rice lengths
+    (if (i32.eqz (call $decode_golomb_rice_lengths (global.get $HUFF_NEW_CODELEN) (local.get $totalRice)))
+      (then (return (i32.const -1)))
+    )
+    ;; Zero padding
+    (memory.fill (i32.add (global.get $HUFF_NEW_CODELEN) (local.get $totalRice)) (i32.const 0) (i32.const 16))
+
+    ;; Decode precision bits
+    (if (i32.eqz (call $decode_golomb_rice_bits (global.get $HUFF_NEW_CODELEN) (local.get $numSymbols) (local.get $forcedBits)))
+      (then (return (i32.const -1)))
+    )
+
+    ;; Reset BR from GR state
+    (i32.store (global.get $BR_BITPOS) (i32.const 24))
+    (i32.store (global.get $BR_P) (i32.load (global.get $GR_P)))
+    (i32.store (global.get $BR_BITS) (i32.const 0))
+    (call $br_refill)
+    (i32.store (global.get $BR_BITS)
+      (i32.shl (i32.load (global.get $BR_BITS)) (i32.load (global.get $GR_BITPOS))))
+    (i32.store (global.get $BR_BITPOS)
+      (i32.add (i32.load (global.get $BR_BITPOS)) (i32.load (global.get $GR_BITPOS))))
+
+    ;; Apply zigzag filter
+    (local.set $runningSum (i32.const 0x1E))
+    (local.set $i (i32.const 0))
+    (block $filterDone
+      (loop $filterLoop
+        (br_if $filterDone (i32.ge_u (local.get $i) (local.get $numSymbols)))
+        (local.set $v (i32.load8_u (i32.add (global.get $HUFF_NEW_CODELEN) (local.get $i))))
+        (local.set $v (i32.xor
+          (i32.sub (i32.const 0) (i32.and (local.get $v) (i32.const 1)))
+          (i32.shr_u (local.get $v) (i32.const 1))))
+        (local.set $codelen
+          (i32.add (local.get $v)
+            (i32.add (i32.shr_u (local.get $runningSum) (i32.const 2)) (i32.const 1))))
+        (if (i32.or (i32.lt_s (local.get $codelen) (i32.const 1))
+                    (i32.gt_s (local.get $codelen) (i32.const 11)))
+          (then (return (i32.const -1)))
+        )
+        (i32.store8 (i32.add (global.get $HUFF_NEW_CODELEN) (local.get $i)) (local.get $codelen))
+        (local.set $runningSum (i32.add (local.get $runningSum) (local.get $v)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $filterLoop)
+      )
+    )
+
+    ;; ConvertToRanges
+    (local.set $ranges
+      (call $huff_convert_to_ranges
+        (global.get $HUFF_NEW_RANGE)
+        (local.get $numSymbols)
+        (local.get $fluff)
+        (i32.add (global.get $HUFF_NEW_CODELEN) (local.get $numSymbols))))
+    (if (i32.le_s (local.get $ranges) (i32.const 0))
+      (then (return (i32.const -1)))
+    )
+
+    ;; Build syms from ranges and code lengths
+    (local.set $cp (global.get $HUFF_NEW_CODELEN))
+    (local.set $i (i32.const 0))
+    (block $buildDone
+      (loop $buildLoop
+        (br_if $buildDone (i32.ge_u (local.get $i) (local.get $ranges)))
+        (local.set $sym
+          (i32.load16_u (i32.add (global.get $HUFF_NEW_RANGE) (i32.shl (local.get $i) (i32.const 2)))))
+        (local.set $num
+          (i32.load16_u (i32.add (i32.add (global.get $HUFF_NEW_RANGE) (i32.shl (local.get $i) (i32.const 2))) (i32.const 2))))
+        (block $symDone
+          (loop $symLoop
+            (br_if $symDone (i32.le_s (local.get $num) (i32.const 0)))
+            ;; syms[codePrefixCur[*cp]++] = sym
+            (local.set $codelen (i32.load8_u (local.get $cp)))
+            (local.set $cp (i32.add (local.get $cp) (i32.const 1)))
+            (local.set $pfxIdx
+              (i32.load (i32.add (global.get $HUFF_PFXCUR) (i32.shl (local.get $codelen) (i32.const 2)))))
+            (i32.store8 (i32.add (global.get $HUFF_SYMS) (local.get $pfxIdx)) (local.get $sym))
+            (i32.store (i32.add (global.get $HUFF_PFXCUR) (i32.shl (local.get $codelen) (i32.const 2)))
+              (i32.add (local.get $pfxIdx) (i32.const 1)))
+            (local.set $sym (i32.add (local.get $sym) (i32.const 1)))
+            (local.set $num (i32.sub (local.get $num) (i32.const 1)))
+            (br $symLoop)
+          )
+        )
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $buildLoop)
+      )
+    )
+
+    (local.get $numSymbols)
+  )
+
   ;; ── huff_make_lut ──────────────────────────────────────────
   ;; Build forward Huffman LUT (2048 entries) from code prefix arrays.
   ;; Returns 1 on success, 0 on failure.
@@ -2826,11 +2971,10 @@
         (local.set $numSyms (call $huff_read_code_lengths_old))
       )
       (else
-        ;; bit1: 0 = new (Golomb-Rice) path — not implemented for now
+        ;; bit1: 0 = new (Golomb-Rice) path
         (if (i32.eqz (call $br_read_bits_no_refill (i32.const 1)))
           (then
-            ;; NEW path — TODO: implement Golomb-Rice code-length reader
-            (return (i32.const -1))
+            (local.set $numSyms (call $huff_read_code_lengths_new))
           )
           (else
             (return (i32.const -1))  ;; error: bit pattern 11
@@ -3655,24 +3799,18 @@
     (call $br_refill)
     (if (call $br_read_bits_no_refill (i32.const 1))
       (then
-        ;; Golomb-Rice path — not implemented
-        ;; TRACE:
-    (global.set $TRACE (i32.const 0x31))
-        (return (i32.const -1))
+        ;; Golomb-Rice path
+        (if (i32.eqz (call $tans_decode_table_gr (local.get $logTableBits)))
+          (then (return (i32.const -1)))
+        )
+      )
+      (else
+        ;; Sparse path
+        (if (i32.eqz (call $tans_decode_table_sparse (local.get $logTableBits)))
+          (then (return (i32.const -1)))
+        )
       )
     )
-
-    ;; Sparse path
-    ;; TRACE:
-    (global.set $TRACE (i32.const 0x40))
-    (if (i32.eqz (call $tans_decode_table_sparse (local.get $logTableBits)))
-      (then
-        ;; TRACE:
-    (global.set $TRACE (i32.const 0x41))
-        (return (i32.const -1)))
-    )
-    ;; TRACE:
-    (global.set $TRACE (i32.const 0x50))
 
     ;; Recover src from bit reader
     (local.set $src
@@ -4002,5 +4140,338 @@
     (i32.store (global.get $BR_BITPOS)
       (i32.add (i32.load (global.get $BR_BITPOS)) (i32.sub (local.get $y) (i32.const 1))))
     (i32.shr_u (local.get $v) (i32.const 1))
+  )
+
+  ;; ============================================================
+  ;; Huff_ConvertToRanges
+  ;; ============================================================
+  ;; Converts symbol ranges from fluff+rice data.
+  ;; rangeAddr = base address for HuffRange array (4 bytes each: symbol u16 + num u16)
+  ;; symlen = pointer to range descriptor bytes
+  ;; Uses BR at 0x30.
+  ;; Returns number of ranges on success, -1 on error.
+
+  (func $huff_convert_to_ranges
+    (param $rangeAddr i32) (param $numSymbols i32) (param $P i32) (param $symlen i32)
+    (result i32)
+    (local $numRanges i32) (local $symIdx i32) (local $symsUsed i32)
+    (local $i i32) (local $v i32) (local $num i32) (local $space i32)
+
+    (local.set $numRanges (i32.shr_u (local.get $P) (i32.const 1)))
+    (local.set $symIdx (i32.const 0))
+
+    ;; Start with space?
+    (if (i32.and (local.get $P) (i32.const 1))
+      (then
+        (call $br_refill)
+        (local.set $v (i32.load8_u (local.get $symlen)))
+        (local.set $symlen (i32.add (local.get $symlen) (i32.const 1)))
+        (if (i32.ge_u (local.get $v) (i32.const 8))
+          (then (return (i32.const -1)))
+        )
+        (local.set $symIdx
+          (i32.sub
+            (i32.add
+              (call $br_read_bits_no_refill (i32.add (local.get $v) (i32.const 1)))
+              (i32.shl (i32.const 1) (i32.add (local.get $v) (i32.const 1))))
+            (i32.const 1)))
+      )
+    )
+
+    (local.set $symsUsed (i32.const 0))
+    (local.set $i (i32.const 0))
+    (block $done
+      (loop $loop
+        (br_if $done (i32.ge_u (local.get $i) (local.get $numRanges)))
+        (call $br_refill)
+
+        ;; num = ReadBitsNoRefillZero(symlen[0]) + (1 << symlen[0])
+        (local.set $v (i32.load8_u (local.get $symlen)))
+        (if (i32.ge_u (local.get $v) (i32.const 9))
+          (then (return (i32.const -1)))
+        )
+        (local.set $num
+          (i32.add
+            (call $br_read_bits_no_refill_zero (local.get $v))
+            (i32.shl (i32.const 1) (local.get $v))))
+
+        ;; space = ReadBitsNoRefill(symlen[1]+1) + (1 << (symlen[1]+1)) - 1
+        (local.set $v (i32.load8_u (i32.add (local.get $symlen) (i32.const 1))))
+        (if (i32.ge_u (local.get $v) (i32.const 8))
+          (then (return (i32.const -1)))
+        )
+        (local.set $space
+          (i32.sub
+            (i32.add
+              (call $br_read_bits_no_refill (i32.add (local.get $v) (i32.const 1)))
+              (i32.shl (i32.const 1) (i32.add (local.get $v) (i32.const 1))))
+            (i32.const 1)))
+
+        ;; range[i] = {symIdx, num}
+        (i32.store16 (i32.add (local.get $rangeAddr) (i32.shl (local.get $i) (i32.const 2)))
+          (local.get $symIdx))
+        (i32.store16 (i32.add (i32.add (local.get $rangeAddr) (i32.shl (local.get $i) (i32.const 2))) (i32.const 2))
+          (local.get $num))
+
+        (local.set $symsUsed (i32.add (local.get $symsUsed) (local.get $num)))
+        (local.set $symIdx (i32.add (local.get $symIdx) (i32.add (local.get $num) (local.get $space))))
+        (local.set $symlen (i32.add (local.get $symlen) (i32.const 2)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $loop)
+      )
+    )
+
+    ;; Validate
+    (if (i32.or
+          (i32.ge_u (local.get $symIdx) (i32.const 256))
+          (i32.or
+            (i32.ge_u (local.get $symsUsed) (local.get $numSymbols))
+            (i32.gt_u
+              (i32.add (local.get $symIdx) (i32.sub (local.get $numSymbols) (local.get $symsUsed)))
+              (i32.const 256))))
+      (then (return (i32.const -1)))
+    )
+
+    ;; Final range entry
+    (i32.store16 (i32.add (local.get $rangeAddr) (i32.shl (local.get $numRanges) (i32.const 2)))
+      (local.get $symIdx))
+    (i32.store16 (i32.add (i32.add (local.get $rangeAddr) (i32.shl (local.get $numRanges) (i32.const 2))) (i32.const 2))
+      (i32.sub (local.get $numSymbols) (local.get $symsUsed)))
+
+    (i32.add (local.get $numRanges) (i32.const 1))
+  )
+
+  ;; ============================================================
+  ;; tANS Golomb-Rice table path
+  ;; ============================================================
+  ;; Extends tans_decode_table_sparse to handle format bit=1 (Golomb-Rice)
+
+  ;; Scratch for tANS GR: rice buffer at 0x0C120000 (528 bytes), range at 0x0C120210 (532 bytes)
+  (global $TANS_GR_RICE  i32 (i32.const 0x0C120000))
+  (global $TANS_GR_RANGE i32 (i32.const 0x0C120210))
+
+  (func $tans_decode_table_gr (param $logTableBits i32) (result i32)
+    (local $Q i32) (local $numSymbols i32) (local $fluff i32) (local $totalRice i32)
+    (local $L i32) (local $curRice i32) (local $curRiceEnd i32)
+    (local $average i32) (local $somesum i32) (local $aCount i32) (local $bCount i32)
+    (local $ri i32) (local $symbol i32) (local $num i32)
+    (local $nextra i32) (local $v i32) (local $avgDiv4 i32) (local $limit i32)
+    (local $ranges i32)
+
+    (local.set $Q (call $br_read_bits_no_refill (i32.const 3)))
+    (local.set $numSymbols (i32.add (call $br_read_bits_no_refill (i32.const 8)) (i32.const 1)))
+    (if (i32.lt_s (local.get $numSymbols) (i32.const 2))
+      (then (return (i32.const 0)))
+    )
+
+    (local.set $fluff (call $br_read_fluff (local.get $numSymbols)))
+    (local.set $totalRice (i32.add (local.get $fluff) (local.get $numSymbols)))
+    (if (i32.or (i32.gt_s (local.get $totalRice) (i32.const 512))
+                (i32.lt_s (local.get $totalRice) (i32.const 0)))
+      (then (return (i32.const 0)))
+    )
+
+    ;; Initialize GR BitReader2 from BR state
+    (i32.store (global.get $GR_BITPOS)
+      (i32.and (i32.sub (i32.load (global.get $BR_BITPOS)) (i32.const 24)) (i32.const 7)))
+    (i32.store (global.get $GR_PEND) (i32.load (global.get $BR_PEND)))
+    (i32.store (global.get $GR_P)
+      (i32.sub (i32.load (global.get $BR_P))
+        (i32.shr_u
+          (i32.add (i32.sub (i32.const 24) (i32.load (global.get $BR_BITPOS))) (i32.const 7))
+          (i32.const 3))))
+
+    ;; Decode Golomb-Rice lengths
+    (if (i32.eqz (call $decode_golomb_rice_lengths (global.get $TANS_GR_RICE) (local.get $totalRice)))
+      (then (return (i32.const 0)))
+    )
+    ;; Zero padding
+    (memory.fill (i32.add (global.get $TANS_GR_RICE) (local.get $totalRice)) (i32.const 0) (i32.const 16))
+
+    ;; Reset BR from GR state
+    (i32.store (global.get $BR_BITPOS) (i32.const 24))
+    (i32.store (global.get $BR_P) (i32.load (global.get $GR_P)))
+    (i32.store (global.get $BR_BITS) (i32.const 0))
+    (call $br_refill)
+    ;; Adjust for remaining GR bits
+    (i32.store (global.get $BR_BITS)
+      (i32.shl (i32.load (global.get $BR_BITS)) (i32.load (global.get $GR_BITPOS))))
+    (i32.store (global.get $BR_BITPOS)
+      (i32.add (i32.load (global.get $BR_BITPOS)) (i32.load (global.get $GR_BITPOS))))
+
+    ;; ConvertToRanges
+    (if (i32.ge_s (i32.shr_u (local.get $fluff) (i32.const 1)) (i32.const 133))
+      (then (return (i32.const 0)))
+    )
+    (local.set $ranges
+      (call $huff_convert_to_ranges
+        (global.get $TANS_GR_RANGE)
+        (local.get $numSymbols)
+        (local.get $fluff)
+        (i32.add (global.get $TANS_GR_RICE) (local.get $numSymbols))))
+    (if (i32.le_s (local.get $ranges) (i32.const 0))
+      (then (return (i32.const 0)))
+    )
+
+    (call $br_refill)
+
+    ;; Build TansData from ranges + rice values
+    (local.set $L (i32.shl (i32.const 1) (local.get $logTableBits)))
+    (local.set $curRice (global.get $TANS_GR_RICE))
+    (local.set $curRiceEnd (i32.add (global.get $TANS_GR_RICE) (local.get $totalRice)))
+    (local.set $average (i32.const 6))
+    (local.set $somesum (i32.const 0))
+    (local.set $aCount (i32.const 0))
+    (local.set $bCount (i32.const 0))
+
+    (local.set $ri (i32.const 0))
+    (block $riDone
+      (loop $riLoop
+        (br_if $riDone (i32.ge_u (local.get $ri) (local.get $ranges)))
+
+        (local.set $symbol
+          (i32.load16_u (i32.add (global.get $TANS_GR_RANGE) (i32.shl (local.get $ri) (i32.const 2)))))
+        (local.set $num
+          (i32.load16_u (i32.add (i32.add (global.get $TANS_GR_RANGE) (i32.shl (local.get $ri) (i32.const 2))) (i32.const 2))))
+
+        (if (i32.or (i32.le_s (local.get $num) (i32.const 0)) (i32.gt_s (local.get $num) (i32.const 256)))
+          (then (return (i32.const 0)))
+        )
+
+        (block $numDone
+          (loop $numLoop
+            (br_if $numDone (i32.le_s (local.get $num) (i32.const 0)))
+            (call $br_refill)
+
+            (if (i32.ge_u (local.get $curRice) (local.get $curRiceEnd))
+              (then (return (i32.const 0)))
+            )
+            (local.set $nextra (i32.add (local.get $Q) (i32.load8_u (local.get $curRice))))
+            (local.set $curRice (i32.add (local.get $curRice) (i32.const 1)))
+            (if (i32.gt_s (local.get $nextra) (i32.const 15))
+              (then (return (i32.const 0)))
+            )
+
+            ;; v = ReadBitsNoRefillZero(nextra) + (1 << nextra) - (1 << Q)
+            (local.set $v
+              (i32.sub
+                (i32.add
+                  (call $br_read_bits_no_refill_zero (local.get $nextra))
+                  (i32.shl (i32.const 1) (local.get $nextra)))
+                (i32.shl (i32.const 1) (local.get $Q))))
+
+            ;; Zigzag decode with average prediction
+            (local.set $avgDiv4 (i32.shr_u (local.get $average) (i32.const 2)))
+            (local.set $limit (i32.shl (local.get $avgDiv4) (i32.const 1)))
+            (if (i32.le_s (local.get $v) (local.get $limit))
+              (then
+                (local.set $v
+                  (i32.add (local.get $avgDiv4)
+                    (i32.xor
+                      (i32.sub (i32.const 0) (i32.and (local.get $v) (i32.const 1)))
+                      (i32.shr_u (local.get $v) (i32.const 1)))))
+              )
+            )
+            (if (i32.gt_s (local.get $limit) (local.get $v))
+              (then (local.set $limit (local.get $v)))
+            )
+            (local.set $v (i32.add (local.get $v) (i32.const 1)))
+            (local.set $average (i32.add (local.get $average)
+              (i32.sub (local.get $limit) (local.get $avgDiv4))))
+
+            ;; Store in TansData
+            (if (i32.eq (local.get $v) (i32.const 1))
+              (then
+                (if (i32.ge_u (local.get $aCount) (i32.const 256))
+                  (then (return (i32.const 0)))
+                )
+                (i32.store8 (i32.add (global.get $TANS_A) (local.get $aCount)) (local.get $symbol))
+                (local.set $aCount (i32.add (local.get $aCount) (i32.const 1)))
+              )
+              (else
+                (if (i32.ge_u (local.get $bCount) (i32.const 256))
+                  (then (return (i32.const 0)))
+                )
+                (i32.store (i32.add (global.get $TANS_B) (i32.shl (local.get $bCount) (i32.const 2)))
+                  (i32.add (i32.shl (local.get $symbol) (i32.const 16)) (local.get $v)))
+                (local.set $bCount (i32.add (local.get $bCount) (i32.const 1)))
+              )
+            )
+            (local.set $somesum (i32.add (local.get $somesum) (local.get $v)))
+            (if (i32.gt_s (local.get $somesum) (local.get $L))
+              (then (return (i32.const 0)))
+            )
+            (local.set $symbol (i32.add (local.get $symbol) (i32.const 1)))
+            (local.set $num (i32.sub (local.get $num) (i32.const 1)))
+            (br $numLoop)
+          )
+        )
+
+        (local.set $ri (i32.add (local.get $ri) (i32.const 1)))
+        (br $riLoop)
+      )
+    )
+
+    (if (i32.ne (local.get $somesum) (local.get $L))
+      (then (return (i32.const 0)))
+    )
+
+    (i32.store (global.get $TANS_AUSED) (local.get $aCount))
+    (i32.store (global.get $TANS_BUSED) (local.get $bCount))
+
+    ;; Sort A and B
+    (call $sort_bytes (global.get $TANS_A) (i32.add (global.get $TANS_A) (local.get $aCount)))
+    (call $sort_u32s (global.get $TANS_B) (i32.add (global.get $TANS_B) (i32.shl (local.get $bCount) (i32.const 2))))
+
+    (i32.const 1)
+  )
+
+  ;; ============================================================
+  ;; Update high_decode_tans for Golomb-Rice path
+  ;; ============================================================
+  ;; The existing $high_decode_tans has a check for format bit.
+  ;; We need to wire in $tans_decode_table_gr when format=1.
+  ;; This is handled by modifying the existing function — see the
+  ;; Golomb-Rice path return below.
+
+  ;; ============================================================
+  ;; High LZ Decoder — stub for L6 support
+  ;; ============================================================
+  ;;
+  ;; Memory layout for High LZ working space (at 0x0C130000):
+  ;;   HighLzTable: CmdStream(4), CmdStreamSize(4), OffsStream(4), OffsStreamSize(4),
+  ;;                LitStream(4), LitStreamSize(4), LenStream(4), LenStreamSize(4) = 32 bytes
+  ;;   Token array: up to 128KB / 4 = 32K tokens * 16 bytes = 512KB
+  ;;   Offset/Length unpacked arrays: up to 128KB entries * 4 = 512KB each
+
+  (global $HIGH_LZ_TABLE i32 (i32.const 0x0C130000))
+  ;; HighLzTable fields (32 bytes)
+  (global $HLZ_CMD       i32 (i32.const 0x0C130000))  ;; CmdStream ptr
+  (global $HLZ_CMD_SIZE  i32 (i32.const 0x0C130004))  ;; CmdStreamSize
+  (global $HLZ_OFFS      i32 (i32.const 0x0C130008))  ;; OffsStream ptr (int*)
+  (global $HLZ_OFFS_SIZE i32 (i32.const 0x0C13000C))  ;; OffsStreamSize
+  (global $HLZ_LIT       i32 (i32.const 0x0C130010))  ;; LitStream ptr
+  (global $HLZ_LIT_SIZE  i32 (i32.const 0x0C130014))  ;; LitStreamSize
+  (global $HLZ_LEN       i32 (i32.const 0x0C130018))  ;; LenStream ptr (int*)
+  (global $HLZ_LEN_SIZE  i32 (i32.const 0x0C13001C))  ;; LenStreamSize
+
+  ;; Scratch areas
+  (global $HLZ_SCRATCH    i32 (i32.const 0x0C130020))  ;; entropy decode scratch (256KB)
+  (global $HLZ_OFFS_BUF   i32 (i32.const 0x0C170020))  ;; unpacked offsets (128K * 4 = 512KB)
+  (global $HLZ_LEN_BUF    i32 (i32.const 0x0C1F0020))  ;; unpacked lengths (128K * 4 = 512KB)
+  (global $HLZ_TOKEN_BUF  i32 (i32.const 0x0C270020))  ;; token array (32K * 16 = 512KB)
+
+  ;; ── high_decode_chunk_lz ───────────────────────────────────
+  ;; Placeholder for High LZ decoder.
+  ;; Returns 0 on success, -1 on error.
+  (func $high_decode_chunk_lz
+    (param $src i32) (param $srcEnd i32)
+    (param $dst i32) (param $dstCount i32)
+    (param $mode i32) (param $dstStart i32)
+    (result i32)
+
+    ;; TODO: implement High LZ decoder
+    ;; For now, return error
+    (i32.const -1)
   )
 )
