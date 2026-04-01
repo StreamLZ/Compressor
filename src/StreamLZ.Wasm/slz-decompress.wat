@@ -1191,10 +1191,12 @@
     (local $subHdr i32)
     (local $offset i32)
     (local $chunkBytesLeft i32)
+    (local $isSC i32)
 
     (local.set $dstEnd (i32.add (local.get $dst) (local.get $dstSize)))
     (local.set $dstCur (local.get $dst))
     (local.set $offset (i32.const 0))
+    (local.set $isSC (i32.const 0))
 
     ;; Outer loop: one iteration per 256KB StreamLZ chunk
     (block $blockDone
@@ -1215,6 +1217,7 @@
             )
             (local.set $decoderType (i32.and (local.get $b1) (i32.const 0x7F)))
             (local.set $isUncompChunk (i32.and (i32.shr_u (local.get $b0) (i32.const 7)) (i32.const 1)))
+            (local.set $isSC (i32.and (i32.shr_u (local.get $b0) (i32.const 4)) (i32.const 1)))
             (local.set $src (i32.add (local.get $src) (i32.const 2)))
             ;; Accept decoder type 0 (High) or 1 (Fast)
             (if (i32.gt_u (local.get $decoderType) (i32.const 1))
@@ -1223,8 +1226,13 @@
           )
         )
 
-        ;; Store chunk dstStart for SC High codec (at 0xD0)
-        (i32.store (i32.const 0xD0) (local.get $dstCur))
+        ;; Store chunk dstStart (at 0xD0):
+        ;; SC mode: per-chunk (each chunk independent)
+        ;; Non-SC mode: block start (cross-chunk references)
+        (if (local.get $isSC)
+          (then (i32.store (i32.const 0xD0) (local.get $dstCur)))
+          (else (i32.store (i32.const 0xD0) (local.get $dst)))
+        )
 
         ;; Bytes left for this 256KB chunk
         (local.set $chunkBytesLeft
@@ -5134,6 +5142,9 @@
     (local.set $recent3 (i32.const -8))
     (local.set $recent4 (i32.const -8))
     (local.set $recent5 (i32.const -8))
+    ;; For delta mode: track the PREVIOUS token's offset for literal delta
+    ;; (stored at 0xD4 as "lastOffset")
+    (i32.store (i32.const 0xD4) (i32.const -8))
 
     (local.set $dstPos (i32.const 0))
     (local.set $tokenCount (i32.const 0))
@@ -5243,7 +5254,7 @@
             )
           )
           (else
-            ;; Delta literals (mode 0) — add previous match byte
+            ;; Delta literals (mode 0) — add byte at PREVIOUS match offset
             (local.set $i (i32.const 0))
             (block $litDDone
               (loop $litDLoop
@@ -5251,7 +5262,8 @@
                 (i32.store8 (i32.add (local.get $dst) (local.get $i))
                   (i32.add
                     (i32.load8_u (i32.add (local.get $litStream) (local.get $i)))
-                    (i32.load8_u (i32.add (i32.add (local.get $dst) (local.get $i)) (local.get $tokOffset)))))
+                    (i32.load8_u (i32.add (i32.add (local.get $dst) (local.get $i))
+                      (i32.load (i32.const 0xD4))))))  ;; lastOffset from PREVIOUS token
                 (local.set $i (i32.add (local.get $i) (i32.const 1)))
                 (br $litDLoop)
               )
@@ -5275,22 +5287,46 @@
         )
         (local.set $dst (i32.add (local.get $dst) (local.get $matchLen)))
 
+        ;; Save current offset as lastOffset for delta mode's next literal
+        (i32.store (i32.const 0xD4) (local.get $tokOffset))
+
         (br $execLoop)
       )
     )
 
-    ;; Copy trailing literals
+    ;; Copy trailing literals (raw for mode 1, delta for mode 0)
     (local.set $remaining (i32.sub
       (i32.add (local.get $dstStart) (i32.add (local.get $offset) (local.get $dstCount)))
       (local.get $dst)))
-    (block $trailDone
-      (loop $trailLoop
-        (br_if $trailDone (i32.le_s (local.get $remaining) (i32.const 0)))
-        (i32.store8 (local.get $dst) (i32.load8_u (local.get $litStream)))
-        (local.set $dst (i32.add (local.get $dst) (i32.const 1)))
-        (local.set $litStream (i32.add (local.get $litStream) (i32.const 1)))
-        (local.set $remaining (i32.sub (local.get $remaining) (i32.const 1)))
-        (br $trailLoop)
+    (if (i32.eq (local.get $mode) (i32.const 1))
+      (then
+        ;; Raw trailing literals
+        (block $trailDone
+          (loop $trailLoop
+            (br_if $trailDone (i32.le_s (local.get $remaining) (i32.const 0)))
+            (i32.store8 (local.get $dst) (i32.load8_u (local.get $litStream)))
+            (local.set $dst (i32.add (local.get $dst) (i32.const 1)))
+            (local.set $litStream (i32.add (local.get $litStream) (i32.const 1)))
+            (local.set $remaining (i32.sub (local.get $remaining) (i32.const 1)))
+            (br $trailLoop)
+          )
+        )
+      )
+      (else
+        ;; Delta trailing literals
+        (block $trailDDone
+          (loop $trailDLoop
+            (br_if $trailDDone (i32.le_s (local.get $remaining) (i32.const 0)))
+            (i32.store8 (local.get $dst)
+              (i32.add
+                (i32.load8_u (local.get $litStream))
+                (i32.load8_u (i32.add (local.get $dst) (i32.load (i32.const 0xD4))))))
+            (local.set $dst (i32.add (local.get $dst) (i32.const 1)))
+            (local.set $litStream (i32.add (local.get $litStream) (i32.const 1)))
+            (local.set $remaining (i32.sub (local.get $remaining) (i32.const 1)))
+            (br $trailDLoop)
+          )
+        )
       )
     )
 
