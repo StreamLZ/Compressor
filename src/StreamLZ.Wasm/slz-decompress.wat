@@ -3765,4 +3765,242 @@
     (i32.store (global.get $ENT_DECODED_SIZE) (local.get $dstSize))
     (local.get $srcSize)
   )
+
+  ;; ============================================================
+  ;; Golomb-Rice Decoder
+  ;; ============================================================
+  ;; Uses BitReader2 state at addresses 0xC0..0xCB:
+  ;;   0xC0: P (i32), 0xC4: PEnd (i32), 0xC8: Bitpos (i32)
+
+  (global $GR_P      i32 (i32.const 0xC0))
+  (global $GR_PEND   i32 (i32.const 0xC4))
+  (global $GR_BITPOS i32 (i32.const 0xC8))
+
+  ;; ── decode_golomb_rice_lengths ──────────────────────────────
+  ;; Decodes Golomb-Rice run-lengths using LUT byte-at-a-time.
+  ;; GR BitReader2 state must be initialized before calling.
+  ;; Parameters: dst, size (number of symbols to decode)
+  ;; Returns 1 on success, 0 on failure.
+  ;; Updates GR_P and GR_BITPOS.
+  (func $decode_golomb_rice_lengths (param $dst i32) (param $size i32) (result i32)
+    (local $p i32) (local $pEnd i32) (local $dstEnd i32)
+    (local $count i32) (local $v i32) (local $x i32) (local $n i32)
+    (local $bitpos i32)
+
+    (local.set $p (i32.load (global.get $GR_P)))
+    (local.set $pEnd (i32.load (global.get $GR_PEND)))
+    (local.set $dstEnd (i32.add (local.get $dst) (local.get $size)))
+
+    (if (i32.ge_u (local.get $p) (local.get $pEnd))
+      (then (return (i32.const 0)))
+    )
+
+    ;; count = -(int)bitpos; v = *p++ & (255 >> bitpos)
+    (local.set $bitpos (i32.load (global.get $GR_BITPOS)))
+    (local.set $count (i32.sub (i32.const 0) (local.get $bitpos)))
+    (local.set $v
+      (i32.and
+        (i32.load8_u (local.get $p))
+        (i32.shr_u (i32.const 255) (local.get $bitpos))))
+    (local.set $p (i32.add (local.get $p) (i32.const 1)))
+
+    ;; Main loop
+    (block $done
+      (loop $loop
+        (if (i32.eqz (local.get $v))
+          (then
+            ;; Zero byte: accumulate count
+            (local.set $count (i32.add (local.get $count) (i32.const 8)))
+          )
+          (else
+            ;; Non-zero: decode symbols using LUT
+            (local.set $x (i32.load (i32.add (global.get $RICE_VALUE)
+              (i32.shl (local.get $v) (i32.const 2)))))
+            ;; Write 4 low symbols: dst[0..3] = count + (x & 0x0F0F0F0F)
+            (i32.store (local.get $dst)
+              (i32.add (local.get $count)
+                (i32.and (local.get $x) (i32.const 0x0F0F0F0F))))
+            ;; Write 4 high symbols: dst[4..7] = (x >> 4) & 0x0F0F0F0F
+            (i32.store (i32.add (local.get $dst) (i32.const 4))
+              (i32.and (i32.shr_u (local.get $x) (i32.const 4)) (i32.const 0x0F0F0F0F)))
+            ;; Advance dst by number of decoded symbols
+            (local.set $dst (i32.add (local.get $dst)
+              (i32.load8_u (i32.add (global.get $RICE_LEN) (local.get $v)))))
+            ;; Check if done
+            (br_if $done (i32.ge_u (local.get $dst) (local.get $dstEnd)))
+            ;; Carry count from top nibble
+            (local.set $count (i32.shr_u (local.get $x) (i32.const 28)))
+          )
+        )
+        ;; Read next byte
+        (if (i32.ge_u (local.get $p) (local.get $pEnd))
+          (then (return (i32.const 0)))
+        )
+        (local.set $v (i32.load8_u (local.get $p)))
+        (local.set $p (i32.add (local.get $p) (i32.const 1)))
+        (br $loop)
+      )
+    )
+
+    ;; Step back if we overshot
+    (if (i32.gt_u (local.get $dst) (local.get $dstEnd))
+      (then
+        (local.set $n (i32.sub (local.get $dst) (local.get $dstEnd)))
+        (block $stepDone
+          (loop $stepLoop
+            (br_if $stepDone (i32.le_s (local.get $n) (i32.const 0)))
+            ;; v &= v - 1 (clear lowest set bit)
+            (local.set $v (i32.and (local.get $v) (i32.sub (local.get $v) (i32.const 1))))
+            (local.set $n (i32.sub (local.get $n) (i32.const 1)))
+            (br $stepLoop)
+          )
+        )
+      )
+    )
+
+    ;; Step back if byte not fully consumed
+    (local.set $bitpos (i32.const 0))
+    (if (i32.eqz (i32.and (local.get $v) (i32.const 1)))
+      (then
+        (local.set $p (i32.sub (local.get $p) (i32.const 1)))
+        (local.set $bitpos (i32.sub (i32.const 8) (i32.ctz (local.get $v))))
+      )
+    )
+
+    ;; Update state
+    (i32.store (global.get $GR_P) (local.get $p))
+    (i32.store (global.get $GR_BITPOS) (local.get $bitpos))
+    (i32.const 1)
+  )
+
+  ;; ── decode_golomb_rice_bits ─────────────────────────────────
+  ;; Merges precision bits into the decoded run-lengths.
+  ;; For bitcount=1: multiply existing values by 2 and add 1 bit each.
+  ;; For bitcount=2: multiply by 4 and add 2 bits each.
+  ;; For bitcount=3: multiply by 8 and add 3 bits each.
+  ;; Returns 1 on success, 0 on failure.
+  (func $decode_golomb_rice_bits
+    (param $dst i32) (param $size i32) (param $bitcount i32) (result i32)
+    (local $p i32) (local $bitpos i32) (local $pEnd i32)
+    (local $dstEnd i32) (local $bitsNeeded i32) (local $bytesNeeded i32)
+    (local $bits i32) (local $val i32) (local $i i32)
+
+    (if (i32.eqz (local.get $bitcount))
+      (then (return (i32.const 1)))
+    )
+
+    (local.set $dstEnd (i32.add (local.get $dst) (local.get $size)))
+    (local.set $p (i32.load (global.get $GR_P)))
+    (local.set $bitpos (i32.load (global.get $GR_BITPOS)))
+    (local.set $pEnd (i32.load (global.get $GR_PEND)))
+
+    ;; Validate enough source data
+    (local.set $bitsNeeded (i32.add (local.get $bitpos)
+      (i32.mul (local.get $bitcount) (local.get $size))))
+    (local.set $bytesNeeded (i32.shr_u (i32.add (local.get $bitsNeeded) (i32.const 7)) (i32.const 3)))
+    (if (i32.gt_u (local.get $bytesNeeded) (i32.sub (local.get $pEnd) (local.get $p)))
+      (then (return (i32.const 0)))
+    )
+
+    ;; Simple bit-at-a-time implementation (works for bitcount 1-3)
+    ;; Load initial bits
+    (local.set $bits (i32.const 0))
+    (if (i32.lt_u (local.get $p) (local.get $pEnd))
+      (then (local.set $bits (i32.load8_u (local.get $p))))
+    )
+
+    (block $done
+      (loop $loop
+        (br_if $done (i32.ge_u (local.get $dst) (local.get $dstEnd)))
+
+        ;; Read bitcount bits
+        (local.set $val (i32.const 0))
+        (local.set $i (i32.const 0))
+        (block $bitDone
+          (loop $bitLoop
+            (br_if $bitDone (i32.ge_u (local.get $i) (local.get $bitcount)))
+            ;; Extract one bit: (bits >> (7 - bitpos)) & 1
+            (local.set $val
+              (i32.or
+                (i32.shl (local.get $val) (i32.const 1))
+                (i32.and
+                  (i32.shr_u (local.get $bits)
+                    (i32.sub (i32.const 7) (local.get $bitpos)))
+                  (i32.const 1))))
+            (local.set $bitpos (i32.add (local.get $bitpos) (i32.const 1)))
+            (if (i32.ge_u (local.get $bitpos) (i32.const 8))
+              (then
+                (local.set $bitpos (i32.const 0))
+                (local.set $p (i32.add (local.get $p) (i32.const 1)))
+                (if (i32.lt_u (local.get $p) (local.get $pEnd))
+                  (then (local.set $bits (i32.load8_u (local.get $p))))
+                )
+              )
+            )
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))
+            (br $bitLoop)
+          )
+        )
+
+        ;; dst[0] = dst[0] * (1 << bitcount) + val
+        (i32.store8 (local.get $dst)
+          (i32.add
+            (i32.shl (i32.load8_u (local.get $dst)) (local.get $bitcount))
+            (local.get $val)))
+        (local.set $dst (i32.add (local.get $dst) (i32.const 1)))
+        (br $loop)
+      )
+    )
+
+    ;; Update state
+    (i32.store (global.get $GR_P) (local.get $p))
+    (i32.store (global.get $GR_BITPOS) (local.get $bitpos))
+    (i32.const 1)
+  )
+
+  ;; ── br_read_fluff ──────────────────────────────────────────
+  ;; Read the fluff value for sub-256 symbol alphabets.
+  ;; Uses BR at 0x30.
+  (func $br_read_fluff (param $numSymbols i32) (result i32)
+    (local $x i32) (local $y i32) (local $v i32) (local $z i32)
+    (local $bits i32)
+
+    (if (i32.eq (local.get $numSymbols) (i32.const 256))
+      (then (return (i32.const 0)))
+    )
+
+    (local.set $x (i32.sub (i32.const 257) (local.get $numSymbols)))
+    (if (i32.gt_s (local.get $x) (local.get $numSymbols))
+      (then (local.set $x (local.get $numSymbols)))
+    )
+    (local.set $x (i32.mul (local.get $x) (i32.const 2)))
+
+    ;; y = log2(x-1) + 1
+    (local.set $y
+      (i32.add
+        (i32.sub (i32.const 31) (i32.clz (i32.sub (local.get $x) (i32.const 1))))
+        (i32.const 1)))
+
+    (local.set $bits (i32.load (global.get $BR_BITS)))
+    (local.set $v (i32.shr_u (local.get $bits)
+      (i32.sub (i32.const 32) (local.get $y))))
+    (local.set $z (i32.sub (i32.shl (i32.const 1) (local.get $y)) (local.get $x)))
+
+    (if (i32.ge_u (i32.shr_u (local.get $v) (i32.const 1)) (local.get $z))
+      (then
+        ;; Full precision
+        (i32.store (global.get $BR_BITS) (i32.shl (local.get $bits) (local.get $y)))
+        (i32.store (global.get $BR_BITPOS)
+          (i32.add (i32.load (global.get $BR_BITPOS)) (local.get $y)))
+        (return (i32.sub (local.get $v) (local.get $z)))
+      )
+    )
+
+    ;; Half precision
+    (i32.store (global.get $BR_BITS)
+      (i32.shl (local.get $bits) (i32.sub (local.get $y) (i32.const 1))))
+    (i32.store (global.get $BR_BITPOS)
+      (i32.add (i32.load (global.get $BR_BITPOS)) (i32.sub (local.get $y) (i32.const 1))))
+    (i32.shr_u (local.get $v) (i32.const 1))
+  )
 )
