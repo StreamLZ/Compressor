@@ -403,6 +403,10 @@ async function main() {
   await testDecompressVector('enwik8');
   await testDecompressVector('silesia10m');
   await testDecompressVector('silesia100m', false);  // blocked on src drift bug
+  await testDecompressVector('enwik8_l6_64k');
+  await testDecompressVector('l6_128k');
+  await testDecompressVector('l6_256k');
+  await testDecompressVector('enwik8_l6', false);  // L6 multi-chunk in progress
 
   console.log('\nAll tests passed.');
 }

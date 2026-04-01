@@ -4752,20 +4752,123 @@
       )
     )
 
-    ;; Unpack u32 length stream (alternating forward/backward)
-    ;; For now, skip u32 length stream decoding (assume no extended lengths)
-    ;; TODO: implement ReadLength/ReadLengthBackward
+    ;; Unpack u32 length stream (alternating forward/backward ReadLength)
+    ;; u32LenStream stored at 0x0C128000 (up to 512 entries * 4 = 2048 bytes)
+    (if (i32.or (i32.lt_s (local.get $u32LenStreamSize) (i32.const 0))
+                (i32.gt_s (local.get $u32LenStreamSize) (i32.const 512)))
+      (then (return (i32.const -1)))
+    )
+    (local.set $i (i32.const 0))
+    (block $u32Done
+      (loop $u32Loop
+        (br_if $u32Done (i32.ge_u (i32.add (local.get $i) (i32.const 1))
+                                   (local.get $u32LenStreamSize)))
+        ;; Forward: ReadLength from bitsA
+        ;; leadingZeros = clz(bitsA_bits)
+        (local.set $n (i32.clz (local.get $bitsA_bits)))
+        (if (i32.gt_s (local.get $n) (i32.const 12)) (then (return (i32.const -1))))
+        (local.set $bitsA_bitpos (i32.add (local.get $bitsA_bitpos) (local.get $n)))
+        (local.set $bitsA_bits (i32.shl (local.get $bitsA_bits) (local.get $n)))
+        ;; Refill A
+        (block $rLA (loop $rLAL
+          (br_if $rLA (i32.le_s (local.get $bitsA_bitpos) (i32.const 0)))
+          (br_if $rLA (i32.ge_u (local.get $bitsA_p) (local.get $bitsA_pEnd)))
+          (local.set $bitsA_bits (i32.or (local.get $bitsA_bits)
+            (i32.shl (i32.load8_u (local.get $bitsA_p)) (local.get $bitsA_bitpos))))
+          (local.set $bitsA_bitpos (i32.sub (local.get $bitsA_bitpos) (i32.const 8)))
+          (local.set $bitsA_p (i32.add (local.get $bitsA_p) (i32.const 1)))
+          (br $rLAL)))
+        ;; totalBits = leadingZeros + 7
+        (local.set $nb (i32.add (local.get $n) (i32.const 7)))
+        (i32.store (i32.add (i32.const 0x0C128000) (i32.shl (local.get $i) (i32.const 2)))
+          (i32.sub (i32.shr_u (local.get $bitsA_bits) (i32.sub (i32.const 32) (local.get $nb))) (i32.const 64)))
+        (local.set $bitsA_bitpos (i32.add (local.get $bitsA_bitpos) (local.get $nb)))
+        (local.set $bitsA_bits (i32.shl (local.get $bitsA_bits) (local.get $nb)))
+        ;; Refill A
+        (block $rLA2 (loop $rLA2L
+          (br_if $rLA2 (i32.le_s (local.get $bitsA_bitpos) (i32.const 0)))
+          (br_if $rLA2 (i32.ge_u (local.get $bitsA_p) (local.get $bitsA_pEnd)))
+          (local.set $bitsA_bits (i32.or (local.get $bitsA_bits)
+            (i32.shl (i32.load8_u (local.get $bitsA_p)) (local.get $bitsA_bitpos))))
+          (local.set $bitsA_bitpos (i32.sub (local.get $bitsA_bitpos) (i32.const 8)))
+          (local.set $bitsA_p (i32.add (local.get $bitsA_p) (i32.const 1)))
+          (br $rLA2L)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+
+        ;; Backward: ReadLengthBackward from bitsB
+        (br_if $u32Done (i32.ge_u (local.get $i) (local.get $u32LenStreamSize)))
+        (local.set $n (i32.clz (local.get $bitsB_bits)))
+        (if (i32.gt_s (local.get $n) (i32.const 12)) (then (return (i32.const -1))))
+        (local.set $bitsB_bitpos (i32.add (local.get $bitsB_bitpos) (local.get $n)))
+        (local.set $bitsB_bits (i32.shl (local.get $bitsB_bits) (local.get $n)))
+        ;; Refill B
+        (block $rLB (loop $rLBL
+          (br_if $rLB (i32.le_s (local.get $bitsB_bitpos) (i32.const 0)))
+          (br_if $rLB (i32.le_u (local.get $bitsB_p) (local.get $bitsB_pEnd)))
+          (local.set $bitsB_p (i32.sub (local.get $bitsB_p) (i32.const 1)))
+          (local.set $bitsB_bits (i32.or (local.get $bitsB_bits)
+            (i32.shl (i32.load8_u (local.get $bitsB_p)) (local.get $bitsB_bitpos))))
+          (local.set $bitsB_bitpos (i32.sub (local.get $bitsB_bitpos) (i32.const 8)))
+          (br $rLBL)))
+        (local.set $nb (i32.add (local.get $n) (i32.const 7)))
+        (i32.store (i32.add (i32.const 0x0C128000) (i32.shl (local.get $i) (i32.const 2)))
+          (i32.sub (i32.shr_u (local.get $bitsB_bits) (i32.sub (i32.const 32) (local.get $nb))) (i32.const 64)))
+        (local.set $bitsB_bitpos (i32.add (local.get $bitsB_bitpos) (local.get $nb)))
+        (local.set $bitsB_bits (i32.shl (local.get $bitsB_bits) (local.get $nb)))
+        ;; Refill B
+        (block $rLB2 (loop $rLB2L
+          (br_if $rLB2 (i32.le_s (local.get $bitsB_bitpos) (i32.const 0)))
+          (br_if $rLB2 (i32.le_u (local.get $bitsB_p) (local.get $bitsB_pEnd)))
+          (local.set $bitsB_p (i32.sub (local.get $bitsB_p) (i32.const 1)))
+          (local.set $bitsB_bits (i32.or (local.get $bitsB_bits)
+            (i32.shl (i32.load8_u (local.get $bitsB_p)) (local.get $bitsB_bitpos))))
+          (local.set $bitsB_bitpos (i32.sub (local.get $bitsB_bitpos) (i32.const 8)))
+          (br $rLB2L)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $u32Loop)
+      )
+    )
+    ;; Handle odd count
+    (if (i32.lt_u (local.get $i) (local.get $u32LenStreamSize))
+      (then
+        (local.set $n (i32.clz (local.get $bitsA_bits)))
+        (if (i32.gt_s (local.get $n) (i32.const 12)) (then (return (i32.const -1))))
+        (local.set $bitsA_bitpos (i32.add (local.get $bitsA_bitpos) (local.get $n)))
+        (local.set $bitsA_bits (i32.shl (local.get $bitsA_bits) (local.get $n)))
+        (block $rLAO (loop $rLAOL
+          (br_if $rLAO (i32.le_s (local.get $bitsA_bitpos) (i32.const 0)))
+          (br_if $rLAO (i32.ge_u (local.get $bitsA_p) (local.get $bitsA_pEnd)))
+          (local.set $bitsA_bits (i32.or (local.get $bitsA_bits)
+            (i32.shl (i32.load8_u (local.get $bitsA_p)) (local.get $bitsA_bitpos))))
+          (local.set $bitsA_bitpos (i32.sub (local.get $bitsA_bitpos) (i32.const 8)))
+          (local.set $bitsA_p (i32.add (local.get $bitsA_p) (i32.const 1)))
+          (br $rLAOL)))
+        (local.set $nb (i32.add (local.get $n) (i32.const 7)))
+        (i32.store (i32.add (i32.const 0x0C128000) (i32.shl (local.get $i) (i32.const 2)))
+          (i32.sub (i32.shr_u (local.get $bitsA_bits) (i32.sub (i32.const 32) (local.get $nb))) (i32.const 64)))
+        (local.set $bitsA_bitpos (i32.add (local.get $bitsA_bitpos) (local.get $nb)))
+        (local.set $bitsA_bits (i32.shl (local.get $bitsA_bits) (local.get $nb)))
+      )
+    )
 
     ;; Unpack packed litlen stream: values < 255 direct, 255 = overflow from u32 stream
     (local.set $lenStream (global.get $HLZ_LEN_BUF))
+    (local.set $n (i32.const 0))  ;; u32LenStream index
     (local.set $i (i32.const 0))
     (block $lenDone
       (loop $lenLoop
         (br_if $lenDone (i32.ge_u (local.get $i) (i32.load (global.get $HLZ_LEN_SIZE))))
-        (local.set $n (i32.load8_u (i32.add (local.get $packedLenStream) (local.get $i))))
-        ;; TODO: handle 255 overflow case with u32LenStream
+        (local.set $nb (i32.load8_u (i32.add (local.get $packedLenStream) (local.get $i))))
+        (if (i32.eq (local.get $nb) (i32.const 255))
+          (then
+            ;; Overflow: read from u32LenStream
+            (local.set $nb (i32.add (local.get $nb)
+              (i32.load (i32.add (i32.const 0x0C128000) (i32.shl (local.get $n) (i32.const 2))))))
+            (local.set $n (i32.add (local.get $n) (i32.const 1)))
+          )
+        )
         (i32.store (i32.add (local.get $lenStream) (i32.shl (local.get $i) (i32.const 2)))
-          (i32.add (local.get $n) (i32.const 3)))
+          (i32.add (local.get $nb) (i32.const 3)))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $lenLoop)
       )
