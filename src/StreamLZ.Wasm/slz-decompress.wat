@@ -4591,20 +4591,35 @@
           (then (return (i32.const -1)))
         )
         (local.set $src (i32.add (local.get $src) (local.get $i)))
+        ;; DEBUG: dump lowBits address and first few values
+        (i32.store (i32.const 0x0C12A000) (local.get $n))
+        (i32.store (i32.const 0x0C12A004) (i32.load8_u (local.get $n)))
+        (i32.store (i32.const 0x0C12A008) (i32.load8_u (i32.add (local.get $n) (i32.const 1))))
+        (i32.store (i32.const 0x0C12A00C) (i32.load (global.get $ENT_DECODED_SIZE)))
         (local.set $scratch (i32.add (local.get $scratch) (i32.load (global.get $HLZ_OFFS_SIZE))))
+      )
+    )
+
+    ;; Save lowBits to a safe location (0x0C1E0000) before litlen decode can corrupt them
+    (if (i32.and (i32.ne (local.get $offsScaling) (i32.const 0))
+                 (i32.ne (local.get $offsScaling) (i32.const 1)))
+      (then
+        (memory.copy (i32.const 0x0C1E0000) (local.get $n)
+          (i32.load (global.get $HLZ_OFFS_SIZE)))
+        (local.set $n (i32.const 0x0C1E0000))
       )
     )
 
     ;; ── Decode packed litlen stream ──
     (local.set $packedLenStream (local.get $scratch))
-    (local.set $n
+    (local.set $decSize  ;; reuse $decSize as temp (not $n — $n holds lowBits address!)
       (call $high_decode_bytes (local.get $src) (local.get $srcEnd)
         (local.get $scratch) (i32.shr_u (local.get $dstCount) (i32.const 2))))
-    (if (i32.lt_s (local.get $n) (i32.const 0))
+    (if (i32.lt_s (local.get $decSize) (i32.const 0))
       (then (global.set $TRACE (i32.const -3009)) (return (i32.const -1)))
     )
     (i32.store (global.get $HLZ_LEN_SIZE) (i32.load (global.get $ENT_DECODED_SIZE)))
-    (local.set $src (i32.add (local.get $src) (local.get $n)))
+    (local.set $src (i32.add (local.get $src) (local.get $decSize)))
     (local.set $scratch (i32.add (local.get $scratch) (i32.load (global.get $HLZ_LEN_SIZE))))
 
     ;; ── Reserve and set offset/length stream pointers ──
@@ -4647,9 +4662,9 @@
     (if (i32.lt_u (local.get $bitsB_bits) (i32.const 0x2000))
       (then (global.set $TRACE (i32.const -3010)) (return (i32.const -1)))
     )
-    (local.set $n (i32.clz (local.get $bitsB_bits)))
-    (local.set $bitsB_bitpos (i32.add (local.get $bitsB_bitpos) (local.get $n)))
-    (local.set $bitsB_bits (i32.shl (local.get $bitsB_bits) (local.get $n)))
+    (local.set $decSize (i32.clz (local.get $bitsB_bits)))  ;; use $decSize as temp, NOT $n (lowBits ptr!)
+    (local.set $bitsB_bitpos (i32.add (local.get $bitsB_bitpos) (local.get $decSize)))
+    (local.set $bitsB_bits (i32.shl (local.get $bitsB_bits) (local.get $decSize)))
     ;; Refill B
     (block $refB2 (loop $rB2
       (br_if $refB2 (i32.le_s (local.get $bitsB_bitpos) (i32.const 0)))
@@ -4659,11 +4674,11 @@
         (i32.shl (i32.load8_u (local.get $bitsB_p)) (local.get $bitsB_bitpos))))
       (local.set $bitsB_bitpos (i32.sub (local.get $bitsB_bitpos) (i32.const 8)))
       (br $rB2)))
-    (local.set $n (i32.add (local.get $n) (i32.const 1)))
+    (local.set $decSize (i32.add (local.get $decSize) (i32.const 1)))
     (local.set $u32LenStreamSize
-      (i32.sub (i32.shr_u (local.get $bitsB_bits) (i32.sub (i32.const 32) (local.get $n))) (i32.const 1)))
-    (local.set $bitsB_bitpos (i32.add (local.get $bitsB_bitpos) (local.get $n)))
-    (local.set $bitsB_bits (i32.shl (local.get $bitsB_bits) (local.get $n)))
+      (i32.sub (i32.shr_u (local.get $bitsB_bits) (i32.sub (i32.const 32) (local.get $decSize))) (i32.const 1)))
+    (local.set $bitsB_bitpos (i32.add (local.get $bitsB_bitpos) (local.get $decSize)))
+    (local.set $bitsB_bits (i32.shl (local.get $bitsB_bits) (local.get $decSize)))
     ;; Refill B
     (block $refB3 (loop $rB3
       (br_if $refB3 (i32.le_s (local.get $bitsB_bitpos) (i32.const 0)))
@@ -4938,10 +4953,30 @@
       )
     )
 
+    ;; DEBUG: dump base offsets and lowBits before scaling
+    (if (i32.and (i32.ne (local.get $offsScaling) (i32.const 0))
+                 (i32.ne (local.get $offsScaling) (i32.const 1)))
+      (then
+        ;; Store first 10 base offsets at 0xF0
+        (i32.store (i32.const 0xF0) (i32.load (i32.add (global.get $HLZ_OFFS_BUF) (i32.const 0))))
+        (i32.store (i32.const 0xF4) (i32.load (i32.add (global.get $HLZ_OFFS_BUF) (i32.const 4))))
+        ;; Store first 10 lowBits at 0x100 -- wait, that's INPUT_BASE!
+        ;; Use a safe address like 0x0C129000
+        (i32.store (i32.const 0x0C129000) (i32.load8_u (local.get $n)))
+        (i32.store (i32.const 0x0C129004) (i32.load8_u (i32.add (local.get $n) (i32.const 1))))
+        (i32.store (i32.const 0x0C129008) (i32.load8_u (i32.add (local.get $n) (i32.const 2))))
+        (i32.store (i32.const 0x0C12900C) (local.get $offsScaling))
+      )
+    )
+
     ;; Apply offset scaling: offsStream[i] = scale * offsStream[i] - lowBits[i]
     (if (i32.and (i32.ne (local.get $offsScaling) (i32.const 0))
                  (i32.ne (local.get $offsScaling) (i32.const 1)))
       (then
+        ;; DEBUG: verify $n address and first lowBits values at scaling time
+        (i32.store (i32.const 0x0C12A010) (local.get $n))
+        (i32.store (i32.const 0x0C12A014) (i32.load8_u (local.get $n)))
+        (i32.store (i32.const 0x0C12A018) (i32.load8_u (i32.add (local.get $n) (i32.const 1))))
         (local.set $i (i32.const 0))
         (block $scaleDone
           (loop $scaleLoop
@@ -4959,6 +4994,13 @@
       )
     )
 
+    ;; DEBUG: store bitsA/bitsB state at 0xD4..0xE3
+    (i32.store (i32.const 0xD4) (local.get $bitsA_bits))
+    (i32.store (i32.const 0xD8) (local.get $bitsA_bitpos))
+    (i32.store (i32.const 0xDC) (local.get $bitsB_bits))
+    (i32.store (i32.const 0xE0) (local.get $bitsB_bitpos))
+    (i32.store (i32.const 0xE4) (local.get $u32LenStreamSize))
+
     ;; Unpack u32 length stream (alternating forward/backward ReadLength)
     ;; u32LenStream stored at 0x0C128000 (up to 512 entries * 4 = 2048 bytes)
     (if (i32.or (i32.lt_s (local.get $u32LenStreamSize) (i32.const 0))
@@ -4972,10 +5014,10 @@
                                    (local.get $u32LenStreamSize)))
         ;; Forward: ReadLength from bitsA
         ;; leadingZeros = clz(bitsA_bits)
-        (local.set $n (i32.clz (local.get $bitsA_bits)))
-        (if (i32.gt_s (local.get $n) (i32.const 12)) (then (global.set $TRACE (i32.const -3013)) (return (i32.const -1))))
-        (local.set $bitsA_bitpos (i32.add (local.get $bitsA_bitpos) (local.get $n)))
-        (local.set $bitsA_bits (i32.shl (local.get $bitsA_bits) (local.get $n)))
+        (local.set $decSize (i32.clz (local.get $bitsA_bits)))
+        (if (i32.gt_s (local.get $decSize) (i32.const 12)) (then (global.set $TRACE (i32.const -3013)) (return (i32.const -1))))
+        (local.set $bitsA_bitpos (i32.add (local.get $bitsA_bitpos) (local.get $decSize)))
+        (local.set $bitsA_bits (i32.shl (local.get $bitsA_bits) (local.get $decSize)))
         ;; Refill A
         (block $rLA (loop $rLAL
           (br_if $rLA (i32.le_s (local.get $bitsA_bitpos) (i32.const 0)))
@@ -4986,7 +5028,7 @@
           (local.set $bitsA_p (i32.add (local.get $bitsA_p) (i32.const 1)))
           (br $rLAL)))
         ;; totalBits = leadingZeros + 7
-        (local.set $nb (i32.add (local.get $n) (i32.const 7)))
+        (local.set $nb (i32.add (local.get $decSize) (i32.const 7)))
         (i32.store (i32.add (i32.const 0x0C128000) (i32.shl (local.get $i) (i32.const 2)))
           (i32.sub (i32.shr_u (local.get $bitsA_bits) (i32.sub (i32.const 32) (local.get $nb))) (i32.const 64)))
         (local.set $bitsA_bitpos (i32.add (local.get $bitsA_bitpos) (local.get $nb)))
@@ -5004,10 +5046,10 @@
 
         ;; Backward: ReadLengthBackward from bitsB
         (br_if $u32Done (i32.ge_u (local.get $i) (local.get $u32LenStreamSize)))
-        (local.set $n (i32.clz (local.get $bitsB_bits)))
-        (if (i32.gt_s (local.get $n) (i32.const 12)) (then (global.set $TRACE (i32.const -3014)) (return (i32.const -1))))
-        (local.set $bitsB_bitpos (i32.add (local.get $bitsB_bitpos) (local.get $n)))
-        (local.set $bitsB_bits (i32.shl (local.get $bitsB_bits) (local.get $n)))
+        (local.set $decSize (i32.clz (local.get $bitsB_bits)))
+        (if (i32.gt_s (local.get $decSize) (i32.const 12)) (then (global.set $TRACE (i32.const -3014)) (return (i32.const -1))))
+        (local.set $bitsB_bitpos (i32.add (local.get $bitsB_bitpos) (local.get $decSize)))
+        (local.set $bitsB_bits (i32.shl (local.get $bitsB_bits) (local.get $decSize)))
         ;; Refill B
         (block $rLB (loop $rLBL
           (br_if $rLB (i32.le_s (local.get $bitsB_bitpos) (i32.const 0)))
@@ -5017,7 +5059,7 @@
             (i32.shl (i32.load8_u (local.get $bitsB_p)) (local.get $bitsB_bitpos))))
           (local.set $bitsB_bitpos (i32.sub (local.get $bitsB_bitpos) (i32.const 8)))
           (br $rLBL)))
-        (local.set $nb (i32.add (local.get $n) (i32.const 7)))
+        (local.set $nb (i32.add (local.get $decSize) (i32.const 7)))
         (i32.store (i32.add (i32.const 0x0C128000) (i32.shl (local.get $i) (i32.const 2)))
           (i32.sub (i32.shr_u (local.get $bitsB_bits) (i32.sub (i32.const 32) (local.get $nb))) (i32.const 64)))
         (local.set $bitsB_bitpos (i32.add (local.get $bitsB_bitpos) (local.get $nb)))
@@ -5038,10 +5080,10 @@
     ;; Handle odd count
     (if (i32.lt_u (local.get $i) (local.get $u32LenStreamSize))
       (then
-        (local.set $n (i32.clz (local.get $bitsA_bits)))
-        (if (i32.gt_s (local.get $n) (i32.const 12)) (then (global.set $TRACE (i32.const -3015)) (return (i32.const -1))))
-        (local.set $bitsA_bitpos (i32.add (local.get $bitsA_bitpos) (local.get $n)))
-        (local.set $bitsA_bits (i32.shl (local.get $bitsA_bits) (local.get $n)))
+        (local.set $decSize (i32.clz (local.get $bitsA_bits)))
+        (if (i32.gt_s (local.get $decSize) (i32.const 12)) (then (global.set $TRACE (i32.const -3015)) (return (i32.const -1))))
+        (local.set $bitsA_bitpos (i32.add (local.get $bitsA_bitpos) (local.get $decSize)))
+        (local.set $bitsA_bits (i32.shl (local.get $bitsA_bits) (local.get $decSize)))
         (block $rLAO (loop $rLAOL
           (br_if $rLAO (i32.le_s (local.get $bitsA_bitpos) (i32.const 0)))
           (br_if $rLAO (i32.ge_u (local.get $bitsA_p) (local.get $bitsA_pEnd)))
@@ -5050,7 +5092,7 @@
           (local.set $bitsA_bitpos (i32.sub (local.get $bitsA_bitpos) (i32.const 8)))
           (local.set $bitsA_p (i32.add (local.get $bitsA_p) (i32.const 1)))
           (br $rLAOL)))
-        (local.set $nb (i32.add (local.get $n) (i32.const 7)))
+        (local.set $nb (i32.add (local.get $decSize) (i32.const 7)))
         (i32.store (i32.add (i32.const 0x0C128000) (i32.shl (local.get $i) (i32.const 2)))
           (i32.sub (i32.shr_u (local.get $bitsA_bits) (i32.sub (i32.const 32) (local.get $nb))) (i32.const 64)))
         (local.set $bitsA_bitpos (i32.add (local.get $bitsA_bitpos) (local.get $nb)))
