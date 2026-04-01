@@ -406,7 +406,7 @@ async function main() {
   await testDecompressVector('enwik8_l6_64k');
   await testDecompressVector('l6_128k');
   await testDecompressVector('l6_256k');
-  await testDecompressVector('enwik8_l6', false);  // L6 multi-chunk in progress
+  await testDecompressVector('enwik8_l6');
 
   console.log('\nAll tests passed.');
 }

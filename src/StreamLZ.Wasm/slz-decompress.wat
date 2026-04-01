@@ -1223,6 +1223,9 @@
           )
         )
 
+        ;; Store chunk dstStart for SC High codec (at 0xD0)
+        (i32.store (i32.const 0xD0) (local.get $dstCur))
+
         ;; Bytes left for this 256KB chunk
         (local.set $chunkBytesLeft
           (i32.sub (local.get $dstEnd) (local.get $dstCur)))
@@ -1352,6 +1355,8 @@
         (if (i32.eqz (local.get $decoderType))
           (then
             ;; High codec (decoder type 0)
+            ;; SC mode: dstStart = chunk output start (stored at start of outer loop)
+            ;; This makes offset = dst - dstStart = position within current chunk
             (if (i32.lt_s
                   (call $high_decode_chunk_lz
                     (local.get $src)
@@ -1359,9 +1364,9 @@
                     (local.get $dstCur)
                     (local.get $dstCount)
                     (local.get $mode)
-                    (local.get $dst))
+                    (i32.load (i32.const 0xD0)))  ;; chunk dstStart from outer loop
                   (i32.const 0))
-              (then (global.set $TRACE (i32.const -2031)) (return (i32.const -1)))
+              (then (return (i32.const -1)))  ;; TRACE already set by inner function
             )
           )
           (else
@@ -4492,10 +4497,10 @@
     ;; Validate
     (if (i32.or (i32.gt_u (local.get $mode) (i32.const 1))
                 (i32.le_s (local.get $dstCount) (i32.const 0)))
-      (then (return (i32.const -1)))
+      (then (global.set $TRACE (i32.const -3001)) (return (i32.const -1)))
     )
     (if (i32.lt_s (i32.sub (local.get $srcEnd) (local.get $src)) (i32.const 13))
-      (then (return (i32.const -1)))
+      (then (global.set $TRACE (i32.const -3002)) (return (i32.const -1)))
     )
 
     ;; Initial 8 literal bytes
@@ -4508,17 +4513,20 @@
 
     ;; Check excess flag (not supported)
     (if (i32.and (i32.load8_u (local.get $src)) (i32.const 0x80))
-      (then (return (i32.const -1)))
+      (then (global.set $TRACE (i32.const -3003)) (return (i32.const -1)))
     )
 
     (local.set $scratch (global.get $HLZ_SCRATCH))
+
+    ;; Record entry point src and offset for debugging
+    (global.set $TRACE2 (i32.sub (local.get $src) (global.get $INPUT_BASE)))
 
     ;; ── Decode literal stream ──
     (local.set $n
       (call $high_decode_bytes (local.get $src) (local.get $srcEnd)
         (local.get $scratch) (local.get $dstCount)))
     (if (i32.lt_s (local.get $n) (i32.const 0))
-      (then (return (i32.const -1)))
+      (then (global.set $TRACE (i32.const -3004)) (return (i32.const -1)))
     )
     (local.set $decSize (i32.load (global.get $ENT_DECODED_SIZE)))
     (local.set $src (i32.add (local.get $src) (local.get $n)))
@@ -4531,7 +4539,7 @@
       (call $high_decode_bytes (local.get $src) (local.get $srcEnd)
         (local.get $scratch) (local.get $dstCount)))
     (if (i32.lt_s (local.get $n) (i32.const 0))
-      (then (return (i32.const -1)))
+      (then (global.set $TRACE (i32.const -3005)) (return (i32.const -1)))
     )
     (local.set $decSize (i32.load (global.get $ENT_DECODED_SIZE)))
     (local.set $src (i32.add (local.get $src) (local.get $n)))
@@ -4541,7 +4549,7 @@
 
     ;; ── Check offset scaling mode ──
     (if (i32.lt_s (i32.sub (local.get $srcEnd) (local.get $src)) (i32.const 3))
-      (then (return (i32.const -1)))
+      (then (global.set $TRACE (i32.const -3006)) (return (i32.const -1)))
     )
 
     (local.set $offsScaling (i32.const 0))
@@ -4559,7 +4567,7 @@
       (call $high_decode_bytes (local.get $src) (local.get $srcEnd)
         (local.get $scratch) (i32.load (global.get $HLZ_CMD_SIZE))))
     (if (i32.lt_s (local.get $n) (i32.const 0))
-      (then (return (i32.const -1)))
+      (then (global.set $TRACE (i32.const -3007)) (return (i32.const -1)))
     )
     (i32.store (global.get $HLZ_OFFS_SIZE) (i32.load (global.get $ENT_DECODED_SIZE)))
     (local.set $src (i32.add (local.get $src) (local.get $n)))
@@ -4568,7 +4576,7 @@
     ;; Skip extra offset stream for offsScaling != 1 (not supported for now)
     (if (i32.and (i32.ne (local.get $offsScaling) (i32.const 0))
                  (i32.ne (local.get $offsScaling) (i32.const 1)))
-      (then (return (i32.const -1)))
+      (then (global.set $TRACE (i32.const -3008)) (return (i32.const -1)))
     )
 
     ;; ── Decode packed litlen stream ──
@@ -4577,7 +4585,7 @@
       (call $high_decode_bytes (local.get $src) (local.get $srcEnd)
         (local.get $scratch) (i32.shr_u (local.get $dstCount) (i32.const 2))))
     (if (i32.lt_s (local.get $n) (i32.const 0))
-      (then (return (i32.const -1)))
+      (then (global.set $TRACE (i32.const -3009)) (return (i32.const -1)))
     )
     (i32.store (global.get $HLZ_LEN_SIZE) (i32.load (global.get $ENT_DECODED_SIZE)))
     (local.set $src (i32.add (local.get $src) (local.get $n)))
@@ -4621,7 +4629,7 @@
     ;; Read u32LenStreamSize from backward reader (gamma coded)
     (local.set $u32LenStreamSize (i32.const 0))
     (if (i32.lt_u (local.get $bitsB_bits) (i32.const 0x2000))
-      (then (return (i32.const -1)))
+      (then (global.set $TRACE (i32.const -3010)) (return (i32.const -1)))
     )
     (local.set $n (i32.clz (local.get $bitsB_bits)))
     (local.set $bitsB_bitpos (i32.add (local.get $bitsB_bitpos) (local.get $n)))
@@ -4748,7 +4756,7 @@
       )
       (else
         ;; Traditional offset mode (offsScaling == 0) — not implemented yet
-        (return (i32.const -1))
+        (global.set $TRACE (i32.const -3011)) (return (i32.const -1))
       )
     )
 
@@ -4756,7 +4764,7 @@
     ;; u32LenStream stored at 0x0C128000 (up to 512 entries * 4 = 2048 bytes)
     (if (i32.or (i32.lt_s (local.get $u32LenStreamSize) (i32.const 0))
                 (i32.gt_s (local.get $u32LenStreamSize) (i32.const 512)))
-      (then (return (i32.const -1)))
+      (then (global.set $TRACE (i32.const -3012)) (return (i32.const -1)))
     )
     (local.set $i (i32.const 0))
     (block $u32Done
@@ -4766,7 +4774,7 @@
         ;; Forward: ReadLength from bitsA
         ;; leadingZeros = clz(bitsA_bits)
         (local.set $n (i32.clz (local.get $bitsA_bits)))
-        (if (i32.gt_s (local.get $n) (i32.const 12)) (then (return (i32.const -1))))
+        (if (i32.gt_s (local.get $n) (i32.const 12)) (then (global.set $TRACE (i32.const -3013)) (return (i32.const -1))))
         (local.set $bitsA_bitpos (i32.add (local.get $bitsA_bitpos) (local.get $n)))
         (local.set $bitsA_bits (i32.shl (local.get $bitsA_bits) (local.get $n)))
         ;; Refill A
@@ -4798,7 +4806,7 @@
         ;; Backward: ReadLengthBackward from bitsB
         (br_if $u32Done (i32.ge_u (local.get $i) (local.get $u32LenStreamSize)))
         (local.set $n (i32.clz (local.get $bitsB_bits)))
-        (if (i32.gt_s (local.get $n) (i32.const 12)) (then (return (i32.const -1))))
+        (if (i32.gt_s (local.get $n) (i32.const 12)) (then (global.set $TRACE (i32.const -3014)) (return (i32.const -1))))
         (local.set $bitsB_bitpos (i32.add (local.get $bitsB_bitpos) (local.get $n)))
         (local.set $bitsB_bits (i32.shl (local.get $bitsB_bits) (local.get $n)))
         ;; Refill B
@@ -4832,7 +4840,7 @@
     (if (i32.lt_u (local.get $i) (local.get $u32LenStreamSize))
       (then
         (local.set $n (i32.clz (local.get $bitsA_bits)))
-        (if (i32.gt_s (local.get $n) (i32.const 12)) (then (return (i32.const -1))))
+        (if (i32.gt_s (local.get $n) (i32.const 12)) (then (global.set $TRACE (i32.const -3015)) (return (i32.const -1))))
         (local.set $bitsA_bitpos (i32.add (local.get $bitsA_bitpos) (local.get $n)))
         (local.set $bitsA_bits (i32.shl (local.get $bitsA_bits) (local.get $n)))
         (block $rLAO (loop $rLAOL
