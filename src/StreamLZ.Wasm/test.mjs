@@ -408,6 +408,8 @@ async function main() {
   await testDecompressVector('l6_256k');
   await testDecompressVector('enwik8_l6');
   await testDecompressVector('enwik8_l9');
+  await testDecompressVector('silesia100m_l6');
+  await testDecompressVector('silesia100m_l9');
 
   console.log('\nAll tests passed.');
 }
