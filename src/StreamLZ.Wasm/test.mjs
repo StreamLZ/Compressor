@@ -402,7 +402,7 @@ async function main() {
   await testDecompressVector('web');
   await testDecompressVector('enwik8');
   await testDecompressVector('silesia10m');
-  await testDecompressVector('silesia100m', false);  // blocked on tANS
+  await testDecompressVector('silesia100m', false);  // blocked on src drift bug
 
   console.log('\nAll tests passed.');
 }

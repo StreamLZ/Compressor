@@ -21,6 +21,10 @@
   ;; i32.load reads LE, so we compare against 0x534C5A31
   (global $SLZ1_MAGIC i32 (i32.const 0x534C5A31))
   (global $FRAME_VERSION i32 (i32.const 1))
+  (global $TRACE (mut i32) (i32.const 0))
+  (global $TRACE2 (mut i32) (i32.const 0))
+  (func (export "getTrace") (result i32) (global.get $TRACE))
+  (func (export "getTrace2") (result i32) (global.get $TRACE2))
 
   ;; Memory region base addresses
   (global $INPUT_BASE  i32 (i32.const 0x00000100))
@@ -661,64 +665,65 @@
     (i32.store (global.get $ENT_DECODED_SIZE) (local.get $dstSize))
 
     ;; Dispatch based on chunkType
-    ;; Type 5: recursive — decode N sub-blocks
+    ;; Dispatch to sub-decoders. Each returns srcSize on success, -1 on error.
+    ;; We then compute total consumed = src + srcSize - srcStart.
+    (local.set $bits (i32.const -1))  ;; reuse $bits as sub-decoder result
+
+    ;; Type 5: recursive
     (if (i32.eq (local.get $chunkType) (i32.const 5))
       (then
-        (return
+        (local.set $bits
           (call $high_decode_recursive
             (local.get $src) (local.get $srcSize)
-            (local.get $dst) (local.get $dstSize)
-            (local.get $srcStart)))
+            (local.get $dst) (local.get $dstSize)))
       )
     )
-
     ;; Type 3: RLE
     (if (i32.eq (local.get $chunkType) (i32.const 3))
       (then
-        (return
+        (local.set $bits
           (call $high_decode_rle
             (local.get $src) (local.get $srcSize)
-            (local.get $dst) (local.get $dstSize)
-            (local.get $srcStart)))
+            (local.get $dst) (local.get $dstSize)))
       )
     )
-
-    ;; Types 2 (Huffman 2-way) and 4 (Huffman 4-way)
+    ;; Types 2/4: Huffman
     (if (i32.or (i32.eq (local.get $chunkType) (i32.const 2))
                 (i32.eq (local.get $chunkType) (i32.const 4)))
       (then
-        (return
+        (local.set $bits
           (call $high_decode_huff
             (local.get $src) (local.get $srcSize)
             (local.get $dst) (local.get $dstSize)
-            (i32.shr_u (local.get $chunkType) (i32.const 1))  ;; type: 1=2way, 2=4way
-            (local.get $srcStart)))
+            (i32.shr_u (local.get $chunkType) (i32.const 1))))
       )
     )
-
-    ;; Type 1 (tANS)
+    ;; Type 1: tANS
     (if (i32.eq (local.get $chunkType) (i32.const 1))
       (then
-        (return
+        (local.set $bits
           (call $high_decode_tans
             (local.get $src) (local.get $srcSize)
-            (local.get $dst) (local.get $dstSize)
-            (local.get $srcStart)))
+            (local.get $dst) (local.get $dstSize)))
       )
     )
 
-    ;; Unknown type
-    (return (i32.const -1))
+    ;; Check result
+    (if (i32.lt_s (local.get $bits) (i32.const 0))
+      (then (return (i32.const -1)))
+    )
+
+    ;; Return total consumed: src + srcSize - srcStart
+    (i32.sub (i32.add (local.get $src) (local.get $srcSize)) (local.get $srcStart))
   )
 
   ;; ── high_decode_recursive ──────────────────────────────────
   ;; Decode a recursive entropy block (type 5, simple variant).
   ;; Reads N sub-blocks, decoding each with high_decode_bytes.
-  ;; Returns total source bytes consumed from srcStart, or -1 on error.
+  ;; Returns srcSize on success, or -1 on error.
   (func $high_decode_recursive
     (param $src i32) (param $srcSize i32)
     (param $dst i32) (param $dstSize i32)
-    (param $srcStart i32)
     (result i32)
     (local $srcEnd i32)
     (local $dstEnd i32)
@@ -776,18 +781,17 @@
       (then (return (i32.const -1)))
     )
 
-    ;; Return total consumed from srcStart
-    (i32.sub (local.get $src) (local.get $srcStart))
+    ;; Return srcSize on success
+    (local.get $srcSize)
   )
 
   ;; ── high_decode_rle ────────────────────────────────────────
   ;; RLE decoder (entropy type 3).
   ;; Commands read backwards from end, literals forward from front.
-  ;; Returns total source bytes consumed from srcStart, or -1 on error.
+  ;; Returns srcSize on success, or -1 on error.
   (func $high_decode_rle
     (param $src i32) (param $srcSize i32)
     (param $dst i32) (param $dstSize i32)
-    (param $srcStart i32)
     (result i32)
     (local $dstEnd i32)
     (local $cmdPtr i32)
@@ -808,9 +812,7 @@
           (i32.load8_u (local.get $src))
           (local.get $dstSize))
         (i32.store (global.get $ENT_DECODED_SIZE) (local.get $dstSize))
-        (return (i32.sub
-          (i32.add (local.get $src) (i32.const 1))
-          (local.get $srcStart)))
+        (return (local.get $srcSize))
       )
     )
 
@@ -823,12 +825,14 @@
         ;; Decode the entropy-coded prefix into a scratch buffer
         ;; Use a scratch area past DECODE_SCRATCH + 256KB = 0x0C041100
         (local.set $cmdPtr (i32.const 0x0C081100))
+        (global.set $TRACE (i32.const 0xE0))
         (local.set $data  ;; reuse $data as temp for decoded count
           (call $high_decode_bytes
             (local.get $src)
             (i32.add (local.get $src) (local.get $srcSize))
             (local.get $cmdPtr)
             (i32.const 0x40000)))  ;; max 256KB
+        (global.set $TRACE (i32.add (i32.const 0xE000) (local.get $data)))
         (if (i32.lt_s (local.get $data) (i32.const 0))
           (then (return (i32.const -1)))
         )
@@ -962,9 +966,7 @@
     )
 
     (i32.store (global.get $ENT_DECODED_SIZE) (local.get $dstSize))
-    (i32.sub
-      (i32.add (local.get $src) (local.get $srcSize))
-      (local.get $srcStart))
+    (local.get $srcSize)
   )
 
   ;; ============================================================
@@ -1199,7 +1201,8 @@
       (loop $chunkOuterLoop
         (br_if $blockDone (i32.ge_u (local.get $dstCur) (local.get $dstEnd)))
 
-        ;; Parse StreamLZ header at every 256KB boundary
+        ;; Track: pack chunk_index (upper 16) and sub-chunk iterations completed (lower 16)
+        (global.set $TRACE (i32.shr_u (local.get $offset) (i32.const 18)))
         (if (i32.eqz (i32.and (local.get $offset) (i32.const 0x3FFFF)))
           (then
             (if (i32.lt_s (i32.sub (local.get $srcEnd) (local.get $src)) (i32.const 2))
@@ -1280,7 +1283,7 @@
 
         ;; Read 3-byte big-endian sub-chunk header
         (if (i32.lt_s (i32.sub (local.get $srcEnd) (local.get $src)) (i32.const 3))
-          (then (return (i32.const -1)))
+          (then (global.set $TRACE (i32.const -2001)) (return (i32.const -1)))
         )
 
         (local.set $subHdr
@@ -1301,10 +1304,13 @@
                 (local.get $dstCur)
                 (local.get $dstCount)))
             (if (i32.lt_s (local.get $srcUsed) (i32.const 0))
-              (then (return (i32.const -1)))
+              (then
+                ;; Store the first byte of the failing entropy block for diagnosis
+                (global.set $TRACE2 (i32.load8_u (local.get $src)))
+                (global.set $TRACE (i32.const -2010)) (return (i32.const -1)))
             )
             (if (i32.ne (i32.load (global.get $ENT_DECODED_SIZE)) (local.get $dstCount))
-              (then (return (i32.const -1)))
+              (then (global.set $TRACE (i32.const -2011)) (return (i32.const -1)))
             )
             (local.set $src (i32.add (local.get $src) (local.get $srcUsed)))
             (local.set $dstCur (i32.add (local.get $dstCur) (local.get $dstCount)))
@@ -1319,7 +1325,7 @@
 
         ;; Validate source data available
         (if (i32.gt_s (local.get $srcUsed) (i32.sub (local.get $srcEnd) (local.get $src)))
-          (then (return (i32.const -1)))
+          (then (global.set $TRACE (i32.const -2020)) (return (i32.const -1)))
         )
 
         ;; If srcUsed >= dstCount and mode == 0, stored (copy)
@@ -1328,7 +1334,7 @@
               (i32.eqz (local.get $mode)))
           (then
             (if (i32.ne (local.get $srcUsed) (local.get $dstCount))
-              (then (return (i32.const -1)))
+              (then (global.set $TRACE (i32.const -2021)) (return (i32.const -1)))
             )
             (memory.copy (local.get $dstCur) (local.get $src) (local.get $dstCount))
             (local.set $src (i32.add (local.get $src) (local.get $srcUsed)))
@@ -1347,12 +1353,13 @@
                 (local.get $mode)
                 (local.get $dst))  ;; dstStart for offset validation
               (i32.const 0))
-          (then (return (i32.const -1)))
+          (then (global.set $TRACE (i32.const -2030)) (return (i32.const -1)))
         )
         (local.set $src (i32.add (local.get $src) (local.get $srcUsed)))
         (local.set $dstCur (i32.add (local.get $dstCur) (local.get $dstCount)))
         (local.set $chunkBytesLeft (i32.sub (local.get $chunkBytesLeft) (local.get $dstCount)))
         (local.set $offset (i32.add (local.get $offset) (local.get $dstCount)))
+        (global.set $TRACE2 (i32.add (global.get $TRACE2) (i32.const 1)))
         (br $chunkLoop)
       )
     )  ;; end sub-chunk loop
@@ -1428,11 +1435,11 @@
 
     ;; Validate mode
     (if (i32.gt_u (local.get $mode) (i32.const 1))
-      (then (return (i32.const -1)))
+      (then (global.set $TRACE (i32.const -1001)) (return (i32.const -1)))
     )
     (if (i32.or (i32.le_s (local.get $dstCount) (i32.const 0))
                 (i32.le_s (i32.sub (local.get $srcEnd) (local.get $src)) (i32.const 0)))
-      (then (return (i32.const -1)))
+      (then (global.set $TRACE (i32.const -1002)) (return (i32.const -1)))
     )
 
     (local.set $offset (i64.extend_i32_u (i32.sub (local.get $dst) (local.get $dstStart))))
@@ -1444,7 +1451,7 @@
     (if (i64.eqz (local.get $offset))
       (then
         (if (i32.lt_s (i32.sub (local.get $srcEnd) (local.get $src)) (i32.const 8))
-          (then (return (i32.const -1)))
+          (then (global.set $TRACE (i32.const -1003)) (return (i32.const -1)))
         )
         (call $copy64 (local.get $dst) (local.get $src))
         (local.set $src (i32.add (local.get $src) (i32.const 8)))
@@ -1457,7 +1464,7 @@
         (local.get $src) (local.get $srcEnd)
         (local.get $scratchCur) (local.get $dstCount)))
     (if (i32.lt_s (local.get $n) (i32.const 0))
-      (then (return (i32.const -1)))
+      (then (global.set $TRACE (i32.const -1001)) (global.set $TRACE (i32.const -1004)) (return (i32.const -1)))
     )
     (local.set $decSize (i32.load (global.get $ENT_DECODED_SIZE)))
     (local.set $src (i32.add (local.get $src) (local.get $n)))
@@ -1472,7 +1479,7 @@
         (local.get $src) (local.get $srcEnd)
         (local.get $scratchCur) (local.get $dstCount)))
     (if (i32.lt_s (local.get $n) (i32.const 0))
-      (then (return (i32.const -1)))
+      (then (global.set $TRACE (i32.const -1005)) (return (i32.const -1)))
     )
     (local.set $decSize (i32.load (global.get $ENT_DECODED_SIZE)))
     (local.set $src (i32.add (local.get $src) (local.get $n)))
@@ -1491,7 +1498,7 @@
       )
       (else
         (if (i32.lt_s (i32.sub (local.get $srcEnd) (local.get $src)) (i32.const 2))
-          (then (return (i32.const -1)))
+          (then (global.set $TRACE (i32.const -1006)) (return (i32.const -1)))
         )
         (i32.store (global.get $LZ_CMD2_OFF)
           (i32.load16_u (local.get $src)))
@@ -1499,14 +1506,14 @@
         ;; Validate cmd2Offset <= cmd2OffsetEnd
         (if (i32.gt_u (i32.load (global.get $LZ_CMD2_OFF))
                        (i32.load (global.get $LZ_CMD2_END)))
-          (then (return (i32.const -1)))
+          (then (global.set $TRACE (i32.const -1007)) (return (i32.const -1)))
         )
       )
     )
 
     ;; ── Decode off16 stream ──
     (if (i32.lt_s (i32.sub (local.get $srcEnd) (local.get $src)) (i32.const 2))
-      (then (return (i32.const -1)))
+      (then (global.set $TRACE (i32.const -1008)) (return (i32.const -1)))
     )
     (local.set $off16Count (i32.load16_u (local.get $src)))
 
@@ -1516,13 +1523,13 @@
         (local.set $src (i32.add (local.get $src) (i32.const 2)))
         ;; TODO: implement entropy-coded off16
         ;; For now, return error
-        (return (i32.const -1))
+        (global.set $TRACE (i32.const -1009)) (return (i32.const -1))
       )
       (else
         ;; Raw off16: directly in source
         (if (i32.lt_s (i32.sub (local.get $srcEnd) (local.get $src))
               (i32.add (i32.const 2) (i32.shl (local.get $off16Count) (i32.const 1))))
-          (then (return (i32.const -1)))
+          (then (global.set $TRACE (i32.const -1010)) (return (i32.const -1)))
         )
         (i32.store (global.get $LZ_OFF16_START)
           (i32.add (local.get $src) (i32.const 2)))
@@ -1535,7 +1542,7 @@
 
     ;; ── Decode off32 stream sizes ──
     (if (i32.lt_s (i32.sub (local.get $srcEnd) (local.get $src)) (i32.const 3))
-      (then (return (i32.const -1)))
+      (then (global.set $TRACE (i32.const -1011)) (return (i32.const -1)))
     )
     (local.set $tmp
       (i32.or
@@ -1554,7 +1561,7 @@
         (if (i32.eq (local.get $off32Size1) (i32.const 4095))
           (then
             (if (i32.lt_s (i32.sub (local.get $srcEnd) (local.get $src)) (i32.const 2))
-              (then (return (i32.const -1)))
+              (then (global.set $TRACE (i32.const -1012)) (return (i32.const -1)))
             )
             (local.set $off32Size1 (i32.load16_u (local.get $src)))
             (local.set $src (i32.add (local.get $src) (i32.const 2)))
@@ -1564,7 +1571,7 @@
         (if (i32.eq (local.get $off32Size2) (i32.const 4095))
           (then
             (if (i32.lt_s (i32.sub (local.get $srcEnd) (local.get $src)) (i32.const 2))
-              (then (return (i32.const -1)))
+              (then (global.set $TRACE (i32.const -1013)) (return (i32.const -1)))
             )
             (local.set $off32Size2 (i32.load16_u (local.get $src)))
             (local.set $src (i32.add (local.get $src) (i32.const 2)))
@@ -1596,7 +1603,7 @@
             (local.get $off32Size1)
             (local.get $offset)))
         (if (i32.lt_s (local.get $n) (i32.const 0))
-          (then (return (i32.const -1)))
+          (then (global.set $TRACE (i32.const -1014)) (return (i32.const -1)))
         )
         (local.set $src (i32.add (local.get $src) (local.get $n)))
 
@@ -1608,7 +1615,7 @@
             (local.get $off32Size2)
             (i64.add (local.get $offset) (i64.const 0x10000))))
         (if (i32.lt_s (local.get $n) (i32.const 0))
-          (then (return (i32.const -1)))
+          (then (global.set $TRACE (i32.const -1015)) (return (i32.const -1)))
         )
         (local.set $src (i32.add (local.get $src) (local.get $n)))
       )
@@ -1621,10 +1628,7 @@
       )
     )
 
-    ;; DBG: Store lit size at 0xA0, cmd size at 0xA4, off16 count at 0xA8
-    ;; TRACE:
-    (i32.store (i32.const 0xB0)
-      (i32.sub (i32.load (global.get $LZ_LIT_END)) (i32.load (global.get $LZ_LIT_START))))
+    ;; (debug traces removed)
     (i32.store (i32.const 0xA4)
       (i32.sub (i32.load (global.get $LZ_CMD_END)) (i32.load (global.get $LZ_CMD_START))))
     (i32.store (i32.const 0xA8)
@@ -2783,7 +2787,7 @@
   (func $high_decode_huff
     (param $src i32) (param $srcSize i32)
     (param $dst i32) (param $dstSize i32)
-    (param $type i32) (param $srcStart i32)
+    (param $type i32)
     (result i32)
     (local $srcEnd i32)
     (local $numSyms i32)
@@ -2841,9 +2845,7 @@
           (i32.load8_u (global.get $HUFF_SYMS))
           (local.get $dstSize))
         (i32.store (global.get $ENT_DECODED_SIZE) (local.get $dstSize))
-        (return (i32.sub
-          (i32.add (local.get $src) (local.get $srcSize))
-          (local.get $srcStart)))
+        (return (local.get $srcSize))
       )
     )
 
@@ -2925,9 +2927,7 @@
     )
 
     (i32.store (global.get $ENT_DECODED_SIZE) (local.get $dstSize))
-    (i32.sub
-      (i32.add (local.get $src) (local.get $srcSize))
-      (local.get $srcStart))
+    (local.get $srcSize)
   )
 
   ;; ============================================================
@@ -3604,7 +3604,6 @@
   (func $high_decode_tans
     (param $src i32) (param $srcSize i32)
     (param $dst i32) (param $dstSize i32)
-    (param $srcStart i32)
     (result i32)
     (local $srcEnd i32)
     (local $logTableBits i32)
@@ -3628,7 +3627,7 @@
 
     ;; Reserved bit (must be 0)
     ;; TRACE:
-    (i32.store (i32.const 0xB0) (i32.const 0x10))
+    (global.set $TRACE (i32.const 0x10))
     (if (call $br_read_bits_no_refill (i32.const 1))
       (then (return (i32.const -1)))
     )
@@ -3637,7 +3636,7 @@
     (local.set $logTableBits
       (i32.add (call $br_read_bits_no_refill (i32.const 2)) (i32.const 8)))
     ;; TRACE:
-    (i32.store (i32.const 0xB0) (i32.add (i32.const 0x20) (local.get $logTableBits)))
+    (global.set $TRACE (i32.add (i32.const 0x20) (local.get $logTableBits)))
 
     ;; Decode frequency table (sparse path)
     ;; Check which path: read next bit
@@ -3646,22 +3645,22 @@
       (then
         ;; Golomb-Rice path — not implemented
         ;; TRACE:
-    (i32.store (i32.const 0xB0) (i32.const 0x31))
+    (global.set $TRACE (i32.const 0x31))
         (return (i32.const -1))
       )
     )
 
     ;; Sparse path
     ;; TRACE:
-    (i32.store (i32.const 0xB0) (i32.const 0x40))
+    (global.set $TRACE (i32.const 0x40))
     (if (i32.eqz (call $tans_decode_table_sparse (local.get $logTableBits)))
       (then
         ;; TRACE:
-    (i32.store (i32.const 0xB0) (i32.const 0x41))
+    (global.set $TRACE (i32.const 0x41))
         (return (i32.const -1)))
     )
     ;; TRACE:
-    (i32.store (i32.const 0xB0) (i32.const 0x50))
+    (global.set $TRACE (i32.const 0x50))
 
     ;; Recover src from bit reader
     (local.set $src
@@ -3678,11 +3677,11 @@
     (if (i32.eqz (call $tans_init_lut (local.get $logTableBits)))
       (then
         ;; TRACE:
-    (i32.store (i32.const 0xB0) (i32.const 0x61))
+    (global.set $TRACE (i32.const 0x61))
         (return (i32.const -1)))
     )
     ;; TRACE:
-    (i32.store (i32.const 0xB0) (i32.const 0x70))
+    (global.set $TRACE (i32.const 0x70))
 
     ;; Read initial states from bitstream
     (local.set $lMask (i32.sub (i32.shl (i32.const 1) (local.get $logTableBits)) (i32.const 1)))
@@ -3752,8 +3751,6 @@
     )
 
     (i32.store (global.get $ENT_DECODED_SIZE) (local.get $dstSize))
-    (i32.sub
-      (i32.add (local.get $src) (local.get $srcSize))
-      (local.get $srcStart))
+    (local.get $srcSize)
   )
 )
