@@ -208,6 +208,7 @@ async function getSingleInstance() {
 }
 
 const PAGE_SIZE = 65536;
+const DEFAULT_MAX_DECOMPRESSED_SIZE = 1073741824; // 1 GB
 
 function ensureCapacity(wasm, inputSize, outputSize) {
   const inputBase = wasm.getInputBase();
@@ -216,7 +217,11 @@ function ensureCapacity(wasm, inputSize, outputSize) {
   const needed = outputBase + outputSize + PAGE_SIZE;
   const currentSize = wasm.memory.buffer.byteLength;
   if (needed > currentSize) {
-    wasm.memory.grow(Math.ceil((needed - currentSize) / PAGE_SIZE));
+    try {
+      wasm.memory.grow(Math.ceil((needed - currentSize) / PAGE_SIZE));
+    } catch (e) {
+      throw new Error(`StreamLZ: failed to allocate ${needed} bytes of WASM memory`);
+    }
   }
   wasm.setOutputBase(outputBase);
 }
@@ -293,14 +298,22 @@ async function getCoreCount() {
  * @param {Object} [options]
  * @param {number} [options.threads=0] - Worker count for L6-L8 SC parallel decompression.
  *   0 = auto (use hardware concurrency). 1 = force single-threaded.
+ * @param {number} [options.maxDecompressedSize=1073741824] - Maximum allowed decompressed
+ *   size in bytes. Rejects streams claiming larger output to prevent decompression bombs.
  * @returns {Promise<Uint8Array>} Decompressed data
  */
 export async function decompress(data, options = {}) {
   if (data.length === 0) return new Uint8Array(0);
 
   const threads = options.threads ?? 0;
+  const maxSize = options.maxDecompressedSize ?? DEFAULT_MAX_DECOMPRESSED_SIZE;
   const frame = scanFrame(data);
   if (!frame) throw new Error('Not a valid SLZ1 stream');
+
+  if (frame.contentSize > maxSize) {
+    throw new Error(
+      `StreamLZ: contentSize ${frame.contentSize} exceeds maxDecompressedSize ${maxSize}`);
+  }
 
   // L6-L8 SC with threads > 1 and SharedArrayBuffer available → parallel
   if (frame.isSC && frame.chunks && threads !== 1 && hasSharedArrayBuffer) {
