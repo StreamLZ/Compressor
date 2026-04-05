@@ -1,5 +1,5 @@
 // StreamLZ WASM Worker — runs in both Node worker_threads and browser Web Workers
-// Receives WASM module bytes via initialization, decompresses chunks on demand.
+// Receives pre-compiled WASM Module via initialization, decompresses chunks on demand.
 
 let wasm = null;
 let mem = null;
@@ -25,31 +25,15 @@ function decompressChunk(msg) {
   const input = new Uint8Array(inputSAB);
   const output = new Uint8Array(outputSAB);
 
-  // Build minimal SLZ1 frame wrapping this chunk
-  const frameSize = 18 + 8 + inputLen + 4;
   const inputBase = wasm.getInputBase();
 
   // Refresh mem view in case of memory.grow
   mem = new Uint8Array(wasm.memory.buffer);
 
-  const dv = new DataView(wasm.memory.buffer, inputBase, frameSize);
-  dv.setUint32(0, 0x534C5A31, true); // magic
-  mem[inputBase + 4] = 1;   // version
-  mem[inputBase + 5] = 1;   // flags (contentSize)
-  mem[inputBase + 6] = 0;   // codec = High
-  mem[inputBase + 7] = 5;   // level
-  mem[inputBase + 8] = 2;   // blockSizeLog2
-  mem[inputBase + 9] = 0;   // reserved
-  dv.setUint32(10, dstSize, true);
-  dv.setUint32(14, 0, true);
-  dv.setUint32(18, inputLen, true);
-  dv.setInt32(22, dstSize, true);
+  // Copy chunk data directly to WASM input buffer (no synthetic frame needed)
+  mem.set(input.subarray(inputOffset, inputOffset + inputLen), inputBase);
 
-  // Copy chunk data from shared input
-  mem.set(input.subarray(inputOffset, inputOffset + inputLen), inputBase + 26);
-  dv.setUint32(26 + inputLen, 0, true); // end mark
-
-  const result = wasm.decompress(frameSize);
+  const result = wasm.decompressChunk(inputLen, dstSize);
 
   if (result === dstSize) {
     const outputBase = wasm.getOutputBase();
