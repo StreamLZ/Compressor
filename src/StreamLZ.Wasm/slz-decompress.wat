@@ -24,9 +24,7 @@
   (global $SLZ1_MAGIC i32 (i32.const 0x534C5A31))
   (global $FRAME_VERSION i32 (i32.const 1))
   (global $TRACE (mut i32) (i32.const 0))
-  (global $TRACE2 (mut i32) (i32.const 0))
   (func (export "getTrace") (result i32) (global.get $TRACE))
-  (func (export "getTrace2") (result i32) (global.get $TRACE2))
 
   ;; Memory region base addresses
   (global $INPUT_BASE  i32 (i32.const 0x00000100))
@@ -532,7 +530,6 @@
 
   (global $ENT_DECODED_SIZE i32 (i32.const 0x50))
   ;; Debug counter (kept for test harness)
-  (global $DBG_COUNTER i32 (i32.const 0x54))
 
   (func (export "getEntDecodedSize") (result i32)
     (i32.load (global.get $ENT_DECODED_SIZE))
@@ -1366,7 +1363,7 @@
             (if (i32.lt_s (local.get $srcUsed) (i32.const 0))
               (then
                 ;; Store the first byte of the failing entropy block for diagnosis
-                (global.set $TRACE2 (i32.load8_u (local.get $src)))
+
                 (global.set $TRACE (i32.const -2010)) (return (i32.const -1)))
             )
             (if (i32.ne (i32.load (global.get $ENT_DECODED_SIZE)) (local.get $dstCount))
@@ -1444,7 +1441,7 @@
         (local.set $dstCur (i32.add (local.get $dstCur) (local.get $dstCount)))
         (local.set $chunkBytesLeft (i32.sub (local.get $chunkBytesLeft) (local.get $dstCount)))
         (local.set $offset (i32.add (local.get $offset) (local.get $dstCount)))
-        (global.set $TRACE2 (i32.add (global.get $TRACE2) (i32.const 1)))
+
         (br $chunkLoop)
       )
     )  ;; end sub-chunk loop
@@ -1725,7 +1722,7 @@
     (i32.store (global.get $LZ_LEN_STREAM) (local.get $src))
 
     ;; DBG: 6 = about to process LZ runs
-    (i32.store (global.get $DBG_COUNTER) (i32.const 6))
+
 
     ;; ── ProcessLzRuns ──
     ;; Process up to two 64KB sub-chunks
@@ -1867,9 +1864,6 @@
     (local $remaining i32)
     (local $isDelta i32)
 
-    ;; DBG: 7 = entered process_mode
-    (i32.store (global.get $DBG_COUNTER) (i32.const 7))
-
     (local.set $dstEnd (i32.add (local.get $dst) (local.get $dstSize)))
     (local.set $cmdStream (i32.load (global.get $LZ_CMD_START)))
     (local.set $cmdStreamEnd (i32.load (global.get $LZ_CMD_END)))
@@ -1898,12 +1892,7 @@
           (then
             ;; Bounds check
             (if (i32.ge_u (local.get $dstCur) (local.get $dstEnd))
-              (then
-                ;; Store diagnostics: offset 0x54=dstCur-dst, 0x58=dstSize
-                (i32.store (global.get $DBG_COUNTER)
-                  (i32.sub (local.get $dstCur) (local.get $dst)))
-                (i32.store (i32.const 0x58) (local.get $dstSize))
-                (return (i32.const -1)))
+              (then (return (i32.const -1)))
             )
 
             ;; litLen = cmd & 7
@@ -2164,9 +2153,6 @@
         (br $cmdLoop)
       )
     )
-
-    ;; DBG: 8 = command loop done
-    (i32.store (global.get $DBG_COUNTER) (i32.const 8))
 
     ;; Copy remaining literals
     (local.set $remaining (i32.sub (local.get $dstEnd) (local.get $dstCur)))
@@ -4559,9 +4545,6 @@
 
     (local.set $scratch (global.get $HLZ_SCRATCH))
 
-    ;; Record entry point src and offset for debugging
-    (global.set $TRACE2 (i32.sub (local.get $src) (global.get $INPUT_BASE)))
-
     ;; ── Decode literal stream ──
     (local.set $n
       (call $high_decode_bytes (local.get $src) (local.get $srcEnd)
@@ -4632,11 +4615,6 @@
           (then (return (i32.const -1)))
         )
         (local.set $src (i32.add (local.get $src) (local.get $i)))
-        ;; DEBUG: dump lowBits address and first few values
-        (i32.store (i32.const 0x0C12A000) (local.get $n))
-        (i32.store (i32.const 0x0C12A004) (i32.load8_u (local.get $n)))
-        (i32.store (i32.const 0x0C12A008) (i32.load8_u (i32.add (local.get $n) (i32.const 1))))
-        (i32.store (i32.const 0x0C12A00C) (i32.load (global.get $ENT_DECODED_SIZE)))
         (local.set $scratch (i32.add (local.get $scratch) (i32.load (global.get $HLZ_OFFS_SIZE))))
       )
     )
@@ -5014,10 +4992,6 @@
     (if (i32.and (i32.ne (local.get $offsScaling) (i32.const 0))
                  (i32.ne (local.get $offsScaling) (i32.const 1)))
       (then
-        ;; DEBUG: verify $n address and first lowBits values at scaling time
-        (i32.store (i32.const 0x0C12A010) (local.get $n))
-        (i32.store (i32.const 0x0C12A014) (i32.load8_u (local.get $n)))
-        (i32.store (i32.const 0x0C12A018) (i32.load8_u (i32.add (local.get $n) (i32.const 1))))
         (local.set $i (i32.const 0))
         (block $scaleDone
           (loop $scaleLoop
