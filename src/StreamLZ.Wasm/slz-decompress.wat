@@ -1003,6 +1003,28 @@
     )
   )
 
+  ;; ── match_copy ───────────────────────────────────────────────
+  ;; Copy match bytes: SIMD wildcopy if offset >= 16, else byte-at-a-time
+  ;; for overlapping matches. Used by both Fast and High decoders.
+  (func $match_copy (param $dst i32) (param $src i32) (param $len i32)
+    (local $i i32)
+    (if (i32.ge_u (i32.sub (local.get $dst) (local.get $src)) (i32.const 16))
+      (then
+        (call $wildcopy16 (local.get $dst) (local.get $src)
+          (i32.add (local.get $dst) (local.get $len)))
+      )
+      (else
+        (local.set $i (i32.const 0))
+        (block $done (loop $loop
+          (br_if $done (i32.ge_u (local.get $i) (local.get $len)))
+          (i32.store8 (i32.add (local.get $dst) (local.get $i))
+            (i32.load8_u (i32.add (local.get $src) (local.get $i))))
+          (local.set $i (i32.add (local.get $i) (i32.const 1)))
+          (br $loop)))
+      )
+    )
+  )
+
   ;; ── decode_far_offsets ─────────────────────────────────────
   ;; Decode 32-bit far offsets from source stream.
   ;; 3 bytes per offset; offsets >= 0xC00000 have a 4th byte.
@@ -2083,22 +2105,7 @@
             )
             (local.set $recentOffs (i32.sub (local.get $match) (local.get $dstCur)))
 
-            ;; Copy match (long) — SIMD if offset >= 16, else byte-at-a-time
-            (if (i32.ge_u (i32.sub (local.get $dstCur) (local.get $match)) (i32.const 16))
-              (then
-                (call $wildcopy16 (local.get $dstCur) (local.get $match)
-                  (i32.add (local.get $dstCur) (local.get $length)))
-              )
-              (else
-                (local.set $litLen (i32.const 0))
-                (block $mlDone (loop $mlLoop
-                  (br_if $mlDone (i32.ge_u (local.get $litLen) (local.get $length)))
-                  (i32.store8 (i32.add (local.get $dstCur) (local.get $litLen))
-                    (i32.load8_u (i32.add (local.get $match) (local.get $litLen))))
-                  (local.set $litLen (i32.add (local.get $litLen) (i32.const 1)))
-                  (br $mlLoop)))
-              )
-            )
+            (call $match_copy (local.get $dstCur) (local.get $match) (local.get $length))
             (local.set $dstCur (i32.add (local.get $dstCur) (local.get $length)))
             (br $cmdLoop)
           )
@@ -2133,22 +2140,7 @@
         (local.set $off32Stream (i32.add (local.get $off32Stream) (i32.const 4)))
         (local.set $recentOffs (i32.sub (local.get $match) (local.get $dstCur)))
 
-        ;; Copy match (long) — SIMD if offset >= 16
-        (if (i32.ge_u (i32.sub (local.get $dstCur) (local.get $match)) (i32.const 16))
-          (then
-            (call $wildcopy16 (local.get $dstCur) (local.get $match)
-              (i32.add (local.get $dstCur) (local.get $length)))
-          )
-          (else
-            (local.set $litLen (i32.const 0))
-            (block $ml2Done (loop $ml2Loop
-              (br_if $ml2Done (i32.ge_u (local.get $litLen) (local.get $length)))
-              (i32.store8 (i32.add (local.get $dstCur) (local.get $litLen))
-                (i32.load8_u (i32.add (local.get $match) (local.get $litLen))))
-              (local.set $litLen (i32.add (local.get $litLen) (i32.const 1)))
-              (br $ml2Loop)))
-          )
-        )
+        (call $match_copy (local.get $dstCur) (local.get $match) (local.get $length))
         (local.set $dstCur (i32.add (local.get $dstCur) (local.get $length)))
         (br $cmdLoop)
       )
@@ -5261,27 +5253,7 @@
 
         ;; ── Execute: copy match ──
         (local.set $match (i32.add (local.get $dst) (local.get $tokOffset)))
-        ;; If offset >= 16, use SIMD wildcopy; else byte-at-a-time (overlap-safe)
-        (if (i32.ge_u (i32.sub (i32.const 0) (local.get $tokOffset)) (i32.const 16))
-          (then
-            ;; Non-overlapping: SIMD 16-byte copies
-            (call $wildcopy16 (local.get $dst) (local.get $match)
-              (i32.add (local.get $dst) (local.get $matchLen)))
-          )
-          (else
-            ;; Overlapping: byte-at-a-time
-            (local.set $i (i32.const 0))
-            (block $matchDone
-              (loop $matchLoop
-                (br_if $matchDone (i32.ge_u (local.get $i) (local.get $matchLen)))
-                (i32.store8 (i32.add (local.get $dst) (local.get $i))
-                  (i32.load8_u (i32.add (local.get $match) (local.get $i))))
-                (local.set $i (i32.add (local.get $i) (i32.const 1)))
-                (br $matchLoop)
-              )
-            )
-          )
-        )
+        (call $match_copy (local.get $dst) (local.get $match) (local.get $matchLen))
         (local.set $dst (i32.add (local.get $dst) (local.get $matchLen)))
 
         ;; Save current offset as lastOffset for delta mode's next literal
