@@ -1194,6 +1194,27 @@
     (local.get $outPos)
   )
 
+  ;; ── decompressChunk ──────────────────────────────────────────
+  ;; Decompress a single SC chunk directly (no frame/block header parsing).
+  ;; Input: chunk data at INPUT_BASE (StreamLZ header + chunk header + sub-chunks).
+  ;; Output: decompressed data at OUTPUT_BASE.
+  ;; Parameters:
+  ;;   inputLen — byte length of chunk data at INPUT_BASE
+  ;;   dstSize  — expected decompressed size
+  ;; Returns: decompressed size on success, -1 on error.
+  (func (export "decompressChunk") (param $inputLen i32) (param $dstSize i32) (result i32)
+    (if (i32.lt_s
+          (call $decode_block
+            (global.get $INPUT_BASE)
+            (i32.add (global.get $INPUT_BASE) (local.get $inputLen))
+            (global.get $OUTPUT_BASE)
+            (local.get $dstSize))
+          (i32.const 0))
+      (then (return (i32.const -1)))
+    )
+    (local.get $dstSize)
+  )
+
   ;; ── decode_block ───────────────────────────────────────────
   ;; Decode one compressed frame-level block.
   ;; A block contains multiple 256KB StreamLZ chunks, each with its own
