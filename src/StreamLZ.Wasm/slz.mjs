@@ -225,7 +225,10 @@ export async function decompress(data, options = {}) {
 
   // L6 SC with threads > 1 and SharedArrayBuffer available → parallel
   if (frame.isSC && frame.chunks && threads !== 1 && hasSharedArrayBuffer) {
-    const numWorkers = threads > 0 ? threads : 8;
+    const numWorkers = threads > 0 ? threads :
+      (typeof navigator !== 'undefined' && navigator.hardwareConcurrency
+        ? navigator.hardwareConcurrency
+        : (await import('os')).default.cpus().length);
 
     if (!_pool || _pool.size !== numWorkers) {
       if (_pool) _pool.terminate();
