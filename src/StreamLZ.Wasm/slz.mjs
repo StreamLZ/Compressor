@@ -21,8 +21,7 @@ async function getWasmBytes() {
       const __dirname = dirname(fileURLToPath(import.meta.url));
       _wasmBytes = readFileSync(resolve(__dirname, 'slz-decompress.wasm'));
     } else {
-      const resp = await fetch(new URL('slz-decompress.wasm', import.meta.url));
-      _wasmBytes = new Uint8Array(await resp.arrayBuffer());
+      _wasmBytes = null; // browser uses compileStreaming instead
     }
     return _wasmBytes;
   })();
@@ -31,8 +30,23 @@ async function getWasmBytes() {
 
 async function getWasmModule() {
   if (_wasmModule) return _wasmModule;
-  const bytes = await getWasmBytes();
-  _wasmModule = await WebAssembly.compile(bytes);
+  try {
+    if (!isNode && typeof WebAssembly.compileStreaming === 'function') {
+      // Browser: compile while downloading (faster cold start)
+      _wasmModule = await WebAssembly.compileStreaming(
+        fetch(new URL('slz-decompress.wasm', import.meta.url)));
+    } else {
+      const bytes = await getWasmBytes();
+      _wasmModule = await WebAssembly.compile(bytes);
+    }
+  } catch (e) {
+    if (e instanceof WebAssembly.CompileError) {
+      throw new Error(
+        'StreamLZ: WASM compilation failed. This module requires SIMD128 and bulk-memory support. ' +
+        e.message);
+    }
+    throw e;
+  }
   return _wasmModule;
 }
 

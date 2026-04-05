@@ -49,6 +49,12 @@ Cross-Origin-Embedder-Policy: require-corp
 
 Without these headers, decompression falls back to single-threaded mode.
 
+## Performance Notes
+
+- **Requires SIMD128 and bulk-memory** — supported in all modern browsers (Chrome 91+, Firefox 89+, Safari 16.4+). Older browsers will get a clear error message at load time.
+- **Main thread blocking** — single-threaded decompression of large files (>10MB) can take tens of milliseconds. For UI-sensitive applications, run decompression in a Web Worker to avoid frame drops.
+- **L6-L8 parallel** decompression already runs in workers and does not block the main thread.
+
 ## Building from Source
 
 Requires [wabt](https://github.com/WebAssembly/wabt) (WebAssembly Binary Toolkit):
