@@ -1930,14 +1930,10 @@
                 )
               )
               (else
-                ;; Raw: copy up to 8 bytes via copy64
-                (if (i32.ge_u (local.get $litLen) (i32.const 1))
-                  (then
-                    (call $copy64 (local.get $dstCur) (local.get $litStream))
-                    (local.set $dstCur (i32.add (local.get $dstCur) (i32.and (local.get $cmd) (i32.const 7))))
-                    (local.set $litStream (i32.add (local.get $litStream) (i32.and (local.get $cmd) (i32.const 7))))
-                  )
-                )
+                ;; Raw: unconditional 16-byte SIMD copy (litLen 0-7, no overlap)
+                (call $copy128 (local.get $dstCur) (local.get $litStream))
+                (local.set $dstCur (i32.add (local.get $dstCur) (local.get $litLen)))
+                (local.set $litStream (i32.add (local.get $litStream) (local.get $litLen)))
               )
             )
 
