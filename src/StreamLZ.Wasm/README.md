@@ -4,11 +4,13 @@ High-performance LZ decompression for the browser and Node.js. Hand-coded WebAss
 
 ## Performance (enwik8 100MB)
 
-| Level | Single-thread | Parallel (24-core) | Ratio |
-|-------|--------------|-------------------|-------|
-| L1 | 1.18 GB/s | — | 58.6% |
-| L6 | 530 MB/s | **5.4 GB/s** | 33.7% |
-| L9 | 560 MB/s | — | 27.4% |
+| Level | Codec | Threading | Single-thread | Parallel (24-core) | Ratio |
+|-------|-------|-----------|--------------|-------------------|-------|
+| L1-L5 | Fast | single | 1.21 GB/s | — | 58.6% |
+| L6-L8 | High (SC) | **auto-parallel** | 530 MB/s | **4.97 GB/s** | 33.7% |
+| L9-L11 | High | single | 550 MB/s | — | 27.4% |
+
+L6-L8 use self-contained (SC) chunks that can be decompressed independently. The API automatically parallelizes these across Web Workers when `SharedArrayBuffer` is available. All other levels run single-threaded.
 
 ## Usage
 
