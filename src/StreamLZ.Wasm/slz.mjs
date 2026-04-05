@@ -74,6 +74,32 @@ function scanFrame(data) {
   return { contentSize: blockDecompSize, codec, isSC, chunks, prefixBase, headerSize };
 }
 
+// ── Error messages ───────────────────────────────────────────
+
+function getError(wasm, code) {
+  const trace = wasm.getTrace ? wasm.getTrace() : 0;
+  const errors = {
+    '-2001': 'Sub-chunk header truncated (src exhausted)',
+    '-2010': 'Entropy decoder failed on sub-chunk',
+    '-2011': 'Entropy decoded size mismatch',
+    '-2020': 'Compressed sub-chunk source data truncated',
+    '-2021': 'Stored sub-chunk size mismatch',
+    '-2030': 'Fast LZ decoder failed',
+    '-2031': 'High LZ decoder failed',
+    '-3001': 'High LZ: invalid mode (must be 0 or 1)',
+    '-3002': 'High LZ: invalid input size',
+    '-3003': 'High LZ: source too short',
+    '-3004': 'High LZ: literal entropy decode failed',
+    '-3005': 'High LZ: command entropy decode failed',
+    '-3008': 'High LZ: unsupported offset scaling mode',
+    '-3009': 'High LZ: packed length entropy decode failed',
+    '-3010': 'High LZ: u32 length stream gamma decode failed',
+    '-3011': 'High LZ: traditional offset mode failed',
+  };
+  const msg = errors[String(trace)] || `unknown error (trace=${trace})`;
+  return `StreamLZ decompress failed (code ${code}): ${msg}`;
+}
+
 // ── Worker pool ──────────────────────────────────────────────
 
 class WorkerPool {
@@ -149,13 +175,42 @@ async function getSingleInstance() {
   return _singleInstance;
 }
 
-function decompressSingle(data) {
+// Scratch region ends at ~0x0C300000 (195MB). Output can go above that for large files.
+const SCRATCH_END = 0x0D000000; // 208MB — safe margin above all scratch/LUT/tANS/HighLZ
+const DEFAULT_OUTPUT_BASE = 0x04000100;
+const PAGE_SIZE = 65536;
+
+function ensureCapacity(wasm, inputSize, outputSize) {
+  const inputBase = wasm.getInputBase();
+  const inputEnd = inputBase + inputSize;
+
+  // If input fits before default output and output fits before scratch: use defaults
+  if (inputEnd <= DEFAULT_OUTPUT_BASE && outputSize <= SCRATCH_END - DEFAULT_OUTPUT_BASE) {
+    wasm.setOutputBase(DEFAULT_OUTPUT_BASE);
+    return;
+  }
+
+  // Large file: place output AFTER scratch region
+  const outputBase = SCRATCH_END;
+  wasm.setOutputBase(outputBase);
+
+  // Grow memory if needed
+  const needed = outputBase + outputSize + PAGE_SIZE; // +1 page safety
+  const currentSize = wasm.memory.buffer.byteLength;
+  if (needed > currentSize) {
+    const pagesToGrow = Math.ceil((needed - currentSize) / PAGE_SIZE);
+    wasm.memory.grow(pagesToGrow);
+  }
+}
+
+function decompressSingle(data, contentSize) {
   const wasm = _singleInstance;
+  ensureCapacity(wasm, data.length, contentSize || data.length * 4);
   const mem = new Uint8Array(wasm.memory.buffer);
   const inputBase = wasm.getInputBase();
   mem.set(data, inputBase);
   const result = wasm.decompress(data.length);
-  if (result < 0) throw new Error(`StreamLZ decompress failed (code ${result})`);
+  if (result < 0) throw new Error(getError(wasm, result));
   const outputBase = wasm.getOutputBase();
   return new Uint8Array(wasm.memory.buffer.slice(outputBase, outputBase + result));
 }
@@ -241,7 +296,7 @@ export async function decompress(data, options = {}) {
 
   // Single-threaded fallback (L1, L9, small files, no SharedArrayBuffer)
   await getSingleInstance();
-  return decompressSingle(data);
+  return decompressSingle(data, frame.contentSize);
 }
 
 /**

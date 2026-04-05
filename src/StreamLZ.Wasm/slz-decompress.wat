@@ -6,15 +6,17 @@
   ;;
   ;; Memory layout (64 KB pages):
   ;;   0x00000000 .. 0x000000FF  —  Scratch / parsed header (256 B)
-  ;;   0x00000100 .. 0x03FFFFFF  —  Input buffer  (up to 64 MB)
-  ;;   0x04000100 .. 0x0BFFFFFF  —  Output buffer (up to 128 MB)
-  ;;   0x0C000100 .. 0x0C0010FF  —  Huffman LUT   (2048 * 2 = 4 KB)
-  ;;   0x0C001100 .. 0x0C0810FF  —  Decode scratch (512 KB)
+  ;;   0x00000100 .. INPUT_END   —  Input buffer (dynamic size)
+  ;;   OUTPUT_BASE .. OUTPUT_END —  Output buffer (dynamic size)
+  ;;   0x0C000100+               —  Scratch, LUTs, tANS, High LZ
   ;;
-  ;; All offsets are byte addresses in linear memory.
+  ;; INPUT_BASE is fixed at 0x100. OUTPUT_BASE is set by JS via
+  ;; setOutputBase() before calling decompress(). For files > 128MB
+  ;; output, JS grows memory and moves OUTPUT_BASE past the scratch
+  ;; region (0x0D000000+).
   ;; ============================================================
 
-  (memory (export "memory") 3200)  ;; 3200 pages = 200 MB
+  (memory (export "memory") 3200 65536)  ;; 3200 pages initial (200 MB), max 4 GB
 
   ;; ── Constants ──────────────────────────────────────────────
   ;; Frame magic: 'S','L','Z','1' = 0x534C5A31 written as LE bytes 31 5A 4C 53
@@ -28,7 +30,12 @@
 
   ;; Memory region base addresses
   (global $INPUT_BASE  i32 (i32.const 0x00000100))
-  (global $OUTPUT_BASE i32 (i32.const 0x04000100))
+  (global $OUTPUT_BASE (mut i32) (i32.const 0x04000100))
+
+  ;; Set output base address (called by JS for large files)
+  (func (export "setOutputBase") (param $base i32)
+    (global.set $OUTPUT_BASE (local.get $base))
+  )
   (global $LUT_BASE    i32 (i32.const 0x0C000100))
   (global $SCRATCH_BASE i32 (i32.const 0x0C001100))
 
