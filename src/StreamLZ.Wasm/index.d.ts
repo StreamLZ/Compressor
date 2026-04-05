@@ -9,11 +9,13 @@
  * @param options - Decompression options
  * @param options.threads - Worker count for parallel decompression.
  *   0 = auto (hardware concurrency). 1 = force single-threaded.
+ * @param options.maxDecompressedSize - Maximum allowed decompressed size in bytes.
+ *   Rejects streams claiming larger output. Default: 1 GB (1073741824).
  * @returns Decompressed data
  */
 export function decompress(
   data: Uint8Array | Buffer,
-  options?: { threads?: number }
+  options?: { threads?: number; maxDecompressedSize?: number }
 ): Promise<Uint8Array>;
 
 /**

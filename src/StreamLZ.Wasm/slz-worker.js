@@ -32,7 +32,12 @@ function decompressChunk(msg) {
   const needed = outputBase + dstSize + 65536;
   const currentSize = wasm.memory.buffer.byteLength;
   if (needed > currentSize) {
-    wasm.memory.grow(Math.ceil((needed - currentSize) / 65536));
+    try {
+      wasm.memory.grow(Math.ceil((needed - currentSize) / 65536));
+    } catch (e) {
+      post({ type: 'done', chunkIndex, ok: false, error: 'OOM' });
+      return;
+    }
   }
   wasm.setOutputBase(outputBase);
 
