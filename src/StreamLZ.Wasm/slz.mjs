@@ -8,6 +8,7 @@ const hasSharedArrayBuffer = typeof SharedArrayBuffer !== 'undefined';
 
 let _wasmBytes = null;
 let _wasmBytesPromise = null;
+let _wasmModule = null;
 
 async function getWasmBytes() {
   if (_wasmBytes) return _wasmBytes;
@@ -26,6 +27,13 @@ async function getWasmBytes() {
     return _wasmBytes;
   })();
   return _wasmBytesPromise;
+}
+
+async function getWasmModule() {
+  if (_wasmModule) return _wasmModule;
+  const bytes = await getWasmBytes();
+  _wasmModule = await WebAssembly.compile(bytes);
+  return _wasmModule;
 }
 
 // ── Frame scanner ────────────────────────────────────────────
@@ -113,35 +121,42 @@ class WorkerPool {
     this.workers = [];
     this.available = [];
     this.queue = [];
-    this.ready = 0;
-    this._readyPromise = null;
-    this._readyResolve = null;
   }
 
   async init() {
-    const wasmBytes = await getWasmBytes();
-    this._readyPromise = new Promise(r => { this._readyResolve = r; });
+    const wasmModule = await getWasmModule();
 
+    const spawns = [];
     for (let i = 0; i < this.size; i++) {
-      let worker;
-      if (isNode) {
-        const { Worker } = await import('worker_threads');
-        const { resolve, dirname } = await import('path');
-        const { fileURLToPath } = await import('url');
-        worker = new Worker(resolve(dirname(fileURLToPath(import.meta.url)), 'slz-worker.js'), {
-          workerData: { wasmModule: wasmBytes }
-        });
-      } else {
-        worker = new globalThis.Worker(new URL('slz-worker.js', import.meta.url));
-        worker.postMessage({ type: 'init', wasmBytes });
-      }
-      this.workers.push(worker);
+      spawns.push(this._spawnWorker(wasmModule));
+    }
+    // Don't await all — workers join available pool individually via _drain
+    // But we need at least one ready before returning so dispatch works
+    await Promise.race(spawns);
+  }
 
+  async _spawnWorker(wasmModule) {
+    let worker;
+    if (isNode) {
+      const { Worker } = await import('worker_threads');
+      const { resolve, dirname } = await import('path');
+      const { fileURLToPath } = await import('url');
+      worker = new Worker(resolve(dirname(fileURLToPath(import.meta.url)), 'slz-worker.js'), {
+        workerData: { wasmModule }
+      });
+    } else {
+      worker = new globalThis.Worker(new URL('slz-worker.js', import.meta.url));
+      worker.postMessage({ type: 'init', wasmModule });
+    }
+    this.workers.push(worker);
+
+    return new Promise((resolve) => {
       const onMsg = (msg) => {
-        const data = msg.data || msg; // Browser wraps in .data
+        const data = msg.data || msg;
         if (data.type === 'ready') {
-          this.ready++;
-          if (this.ready === this.size) this._readyResolve();
+          this.available.push(worker);
+          this._drain();
+          resolve();
         } else if (data.type === 'done') {
           const cb = worker._callback;
           worker._callback = null;
@@ -153,10 +168,7 @@ class WorkerPool {
 
       if (isNode) worker.on('message', onMsg);
       else worker.addEventListener('message', onMsg);
-    }
-
-    await this._readyPromise;
-    this.available = [...this.workers];
+    });
   }
 
   dispatch(msg) {
@@ -179,7 +191,6 @@ class WorkerPool {
     for (const w of this.workers) w.terminate();
     this.workers = [];
     this.available = [];
-    this.ready = 0;
   }
 }
 
@@ -189,8 +200,8 @@ let _singleInstance = null;
 
 async function getSingleInstance() {
   if (!_singleInstance) {
-    const bytes = await getWasmBytes();
-    const { instance } = await WebAssembly.instantiate(bytes);
+    const module = await getWasmModule();
+    const instance = await WebAssembly.instantiate(module);
     _singleInstance = instance.exports;
   }
   return _singleInstance;
@@ -300,9 +311,17 @@ export async function decompress(data, options = {}) {
 
   // L6-L8 SC with threads > 1 and SharedArrayBuffer available → parallel
   if (frame.isSC && frame.chunks && threads !== 1 && hasSharedArrayBuffer) {
-    const numWorkers = threads > 0 ? threads : await getCoreCount();
+    const dispatchable = frame.chunks.filter(c => !c.isUncomp && !c.isMemset).length;
+    if (dispatchable < 2) {
+      // Not worth parallelizing — single-threaded is faster
+      await getSingleInstance();
+      return decompressSingle(data, frame.contentSize);
+    }
 
-    if (!_pool || _pool.size !== numWorkers) {
+    const coreCount = threads > 0 ? threads : await getCoreCount();
+    const numWorkers = Math.min(coreCount, dispatchable);
+
+    if (!_pool || _pool.size < numWorkers) {
       if (_pool) _pool.terminate();
       _pool = new WorkerPool(numWorkers);
       await _pool.init();

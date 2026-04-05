@@ -13,8 +13,8 @@ function post(msg) {
   }
 }
 
-async function init(wasmBytes) {
-  const { instance } = await WebAssembly.instantiate(wasmBytes);
+async function init(wasmModule) {
+  const instance = await WebAssembly.instantiate(wasmModule);
   wasm = instance.exports;
   mem = new Uint8Array(wasm.memory.buffer);
   post({ type: 'ready' });
@@ -62,7 +62,7 @@ function decompressChunk(msg) {
 }
 
 function onMessage(msg) {
-  if (msg.type === 'init') init(msg.wasmBytes);
+  if (msg.type === 'init') init(msg.wasmModule);
   else if (msg.type === 'decompress_chunk') decompressChunk(msg);
 }
 
