@@ -27,10 +27,19 @@ function decompressChunk(msg) {
 
   const inputBase = wasm.getInputBase();
 
-  // Refresh mem view in case of memory.grow
+  // Ensure memory is large enough for input + output
+  const outputBase = ((inputBase + inputLen + 255) & ~255);
+  const needed = outputBase + dstSize + 65536;
+  const currentSize = wasm.memory.buffer.byteLength;
+  if (needed > currentSize) {
+    wasm.memory.grow(Math.ceil((needed - currentSize) / 65536));
+  }
+  wasm.setOutputBase(outputBase);
+
+  // Refresh mem view after potential grow
   mem = new Uint8Array(wasm.memory.buffer);
 
-  // Copy chunk data directly to WASM input buffer (no synthetic frame needed)
+  // Copy chunk data directly to WASM input buffer
   mem.set(input.subarray(inputOffset, inputOffset + inputLen), inputBase);
 
   const result = wasm.decompressChunk(inputLen, dstSize);

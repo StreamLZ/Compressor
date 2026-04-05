@@ -207,25 +207,18 @@ async function getSingleInstance() {
   return _singleInstance;
 }
 
-const SCRATCH_END = 0x0D000000;
-const DEFAULT_OUTPUT_BASE = 0x04000100;
 const PAGE_SIZE = 65536;
 
 function ensureCapacity(wasm, inputSize, outputSize) {
   const inputBase = wasm.getInputBase();
-  const inputEnd = inputBase + inputSize;
-
-  if (inputEnd <= DEFAULT_OUTPUT_BASE && outputSize <= SCRATCH_END - DEFAULT_OUTPUT_BASE) {
-    wasm.setOutputBase(DEFAULT_OUTPUT_BASE);
-    return;
-  }
-
-  wasm.setOutputBase(SCRATCH_END);
-  const needed = SCRATCH_END + outputSize + PAGE_SIZE;
+  // Place output right after input (aligned to 256 bytes)
+  const outputBase = ((inputBase + inputSize + 255) & ~255);
+  const needed = outputBase + outputSize + PAGE_SIZE;
   const currentSize = wasm.memory.buffer.byteLength;
   if (needed > currentSize) {
     wasm.memory.grow(Math.ceil((needed - currentSize) / PAGE_SIZE));
   }
+  wasm.setOutputBase(outputBase);
 }
 
 function decompressSingle(data, contentSize) {

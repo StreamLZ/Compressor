@@ -210,7 +210,7 @@ async function testBitReaderForward() {
   const mem = new Uint8Array(wasm.memory.buffer);
 
   // Place known bytes at a test address (use scratch area)
-  const testAddr = 0x02001100; // SCRATCH_BASE
+  const testAddr = 0x00101100; // SCRATCH_BASE
   // Bytes: 0xA5 = 10100101, 0x3C = 00111100, 0xF0 = 11110000, 0x0F = 00001111
   mem[testAddr + 0] = 0xA5;
   mem[testAddr + 1] = 0x3C;
@@ -258,7 +258,7 @@ async function testBitReaderBackward() {
   const mem = new Uint8Array(wasm.memory.buffer);
 
   // Same test data
-  const testAddr = 0x02001100;
+  const testAddr = 0x00101100;
   mem[testAddr + 0] = 0xA5;
   mem[testAddr + 1] = 0x3C;
   mem[testAddr + 2] = 0xF0;
@@ -298,7 +298,7 @@ async function testBitReaderZeroBits() {
   const wasm = await loadWasm();
   const mem = new Uint8Array(wasm.memory.buffer);
 
-  const testAddr = 0x02001100;
+  const testAddr = 0x00101100;
   mem[testAddr] = 0xFF;
   wasm.br_init(testAddr, testAddr + 1);
   wasm.br_refill();
@@ -334,11 +334,18 @@ async function testDecompressVector(name, expectPass = true) {
   }
 
   const wasm = await loadWasm();
-  const mem = new Uint8Array(wasm.memory.buffer);
 
   const inputBase = wasm.getInputBase();
-  const outputBase = wasm.getOutputBase();
+  // Ensure memory is large enough for input + output
+  const outputBase = ((inputBase + compressed.length + 255) & ~255);
+  const needed = outputBase + expected.length + 65536;
+  const currentSize = wasm.memory.buffer.byteLength;
+  if (needed > currentSize) {
+    wasm.memory.grow(Math.ceil((needed - currentSize) / 65536));
+  }
+  wasm.setOutputBase(outputBase);
 
+  const mem = new Uint8Array(wasm.memory.buffer);
   mem.set(compressed, inputBase);
 
   const result = wasm.decompress(compressed.length);
@@ -351,10 +358,8 @@ async function testDecompressVector(name, expectPass = true) {
   }
 
   if (result < 0) {
-    const dbg = wasm.getDbgCounter ? wasm.getDbgCounter() : '?';
-    const mem32 = new Uint32Array(wasm.memory.buffer);
-    const extra = mem32[0x58 >> 2];
-    console.log(`  FAIL: ${name}: decompress returned ${result} (dbg=0x${(dbg>>>0).toString(16)}, extra=0x${(extra>>>0).toString(16)})`);
+    const trace = wasm.getTrace ? wasm.getTrace() : '?';
+    console.log(`  FAIL: ${name}: decompress returned ${result} (trace=${trace})`);
     process.exit(1);
   }
 

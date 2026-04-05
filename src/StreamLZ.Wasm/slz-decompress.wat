@@ -5,18 +5,17 @@
   ;; ============================================================
   ;;
   ;; Memory layout (64 KB pages):
-  ;;   0x00000000 .. 0x000000FF  —  Scratch / parsed header (256 B)
-  ;;   0x00000100 .. INPUT_END   —  Input buffer (dynamic size)
+  ;;   0x00000000 .. 0x000000FF  —  Header globals, bit readers, LZ table
+  ;;   0x00100000 .. 0x003FFFFF  —  Scratch, LUTs, tANS, High LZ (~3 MB)
+  ;;   0x00400000 .. INPUT_END   —  Input buffer (dynamic size)
   ;;   OUTPUT_BASE .. OUTPUT_END —  Output buffer (dynamic size)
-  ;;   0x0C000100+               —  Scratch, LUTs, tANS, High LZ
   ;;
-  ;; INPUT_BASE is fixed at 0x100. OUTPUT_BASE is set by JS via
-  ;; setOutputBase() before calling decompress(). For files > 128MB
-  ;; output, JS grows memory and moves OUTPUT_BASE past the scratch
-  ;; region (0x0D000000+).
+  ;; INPUT_BASE is fixed at 0x400000 (4 MB). OUTPUT_BASE is set by
+  ;; JS via setOutputBase() before calling decompress(). JS grows
+  ;; memory as needed for large files.
   ;; ============================================================
 
-  (memory (export "memory") 3200 65536)  ;; 3200 pages initial (200 MB), max 4 GB
+  (memory (export "memory") 128 65536)  ;; 128 pages initial (8 MB), max 4 GB
 
   ;; ── Constants ──────────────────────────────────────────────
   ;; Frame magic: 'S','L','Z','1' = 0x534C5A31 written as LE bytes 31 5A 4C 53
@@ -27,15 +26,15 @@
   (func (export "getTrace") (result i32) (global.get $TRACE))
 
   ;; Memory region base addresses
-  (global $INPUT_BASE  i32 (i32.const 0x00000100))
-  (global $OUTPUT_BASE (mut i32) (i32.const 0x04000100))
+  (global $INPUT_BASE  i32 (i32.const 0x00400000))
+  (global $OUTPUT_BASE (mut i32) (i32.const 0x00800000))
 
   ;; Set output base address (called by JS for large files)
   (func (export "setOutputBase") (param $base i32)
     (global.set $OUTPUT_BASE (local.get $base))
   )
-  (global $LUT_BASE    i32 (i32.const 0x0C000100))
-  (global $SCRATCH_BASE i32 (i32.const 0x0C001100))
+  (global $LUT_BASE    i32 (i32.const 0x00100100))
+  (global $SCRATCH_BASE i32 (i32.const 0x00101100))
 
   ;; Parsed header fields (stored at address 0x00..0xFF)
   ;; Offsets within the scratch/header region:
@@ -817,8 +816,8 @@
     (if (i32.ne (i32.load8_u (local.get $src)) (i32.const 0))
       (then
         ;; Decode the entropy-coded prefix into a scratch buffer
-        ;; Use a scratch area past DECODE_SCRATCH + 256KB = 0x0C041100
-        (local.set $cmdPtr (i32.const 0x0C081100))
+        ;; Use a scratch area past DECODE_SCRATCH + 256KB = 0x00141100
+        (local.set $cmdPtr (i32.const 0x00181100))
         (global.set $TRACE (i32.const 0xE0))
         (local.set $data  ;; reuse $data as temp for decoded count
           (call $high_decode_bytes
@@ -1503,13 +1502,13 @@
   (global $LZ_CMD2_END    i32 (i32.const 0x98))
 
   ;; Scratch memory for decoded sub-streams.
-  ;; SCRATCH_BASE (0x0C001100) is used:
+  ;; SCRATCH_BASE (0x00101100) is used:
   ;;   +0x0000 .. +0x3FFFF: decoded literal/command streams (256KB)
   ;;   +0x40000 .. +0x5FFFF: off32 backing stores (128KB)
   ;; This is enough for chunks up to 128KB decompressed.
 
-  (global $DECODE_SCRATCH i32 (i32.const 0x0C001100))
-  (global $OFF32_SCRATCH  i32 (i32.const 0x0C041100))
+  (global $DECODE_SCRATCH i32 (i32.const 0x00101100))
+  (global $OFF32_SCRATCH  i32 (i32.const 0x00141100))
 
   ;; ── fast_decode_chunk ──────────────────────────────────────
   ;; Decode one Fast LZ chunk: ReadLzTable + ProcessLzRuns.
@@ -2178,7 +2177,7 @@
   ;; Huffman Decoder
   ;; ============================================================
   ;;
-  ;; Memory layout (at 0x0C100000+):
+  ;; Memory layout (at 0x00200000+):
   ;;   +0x0000: Forward LUT Bits2Len (2064 bytes)
   ;;   +0x0810: Forward LUT Bits2Sym (2064 bytes)
   ;;   +0x1020: Reverse LUT Bits2Len (2064 bytes)
@@ -2187,24 +2186,24 @@
   ;;   +0x2540: CodePrefixOrg (48 bytes)
   ;;   +0x2570: CodePrefixCur (48 bytes)
 
-  (global $HUFF_LUT_LEN i32 (i32.const 0x0C100000))
-  (global $HUFF_LUT_SYM i32 (i32.const 0x0C100810))
-  (global $HUFF_REV_LEN i32 (i32.const 0x0C101020))
-  (global $HUFF_REV_SYM i32 (i32.const 0x0C101830))
-  (global $HUFF_SYMS    i32 (i32.const 0x0C102040))
-  (global $HUFF_PFXORG  i32 (i32.const 0x0C102540))
-  (global $HUFF_PFXCUR  i32 (i32.const 0x0C102570))
+  (global $HUFF_LUT_LEN i32 (i32.const 0x00200000))
+  (global $HUFF_LUT_SYM i32 (i32.const 0x00200810))
+  (global $HUFF_REV_LEN i32 (i32.const 0x00201020))
+  (global $HUFF_REV_SYM i32 (i32.const 0x00201830))
+  (global $HUFF_SYMS    i32 (i32.const 0x00202040))
+  (global $HUFF_PFXORG  i32 (i32.const 0x00202540))
+  (global $HUFF_PFXCUR  i32 (i32.const 0x00202570))
 
   ;; CodePrefixOrg data segment
-  (data (i32.const 0x0C102540) "\00\00\00\00\00\00\00\00\02\00\00\00\06\00\00\00\0e\00\00\00\1e\00\00\00\3e\00\00\00\7e\00\00\00\fe\00\00\00\fe\01\00\00\fe\02\00\00\fe\03\00\00")
+  (data (i32.const 0x00202540) "\00\00\00\00\00\00\00\00\02\00\00\00\06\00\00\00\0e\00\00\00\1e\00\00\00\3e\00\00\00\7e\00\00\00\fe\00\00\00\fe\01\00\00\fe\02\00\00\fe\03\00\00")
 
-  ;; Golomb-Rice value table at 0x0C103000 (256 * 4 = 1024 bytes)
-  (global $RICE_VALUE i32 (i32.const 0x0C103000))
-  (data (i32.const 0x0C103000) "\00\00\00\80\07\00\00\00\06\00\00\10\06\00\00\00\05\00\00\20\05\01\00\00\05\00\00\10\05\00\00\00\04\00\00\30\04\02\00\00\04\01\00\10\04\01\00\00\04\00\00\20\04\00\01\00\04\00\00\10\04\00\00\00\03\00\00\40\03\03\00\00\03\02\00\10\03\02\00\00\03\01\00\20\03\01\01\00\03\01\00\10\03\01\00\00\03\00\00\30\03\00\02\00\03\00\01\10\03\00\01\00\03\00\00\20\03\00\00\01\03\00\00\10\03\00\00\00\02\00\00\50\02\04\00\00\02\03\00\10\02\03\00\00\02\02\00\20\02\02\01\00\02\02\00\10\02\02\00\00\02\01\00\30\02\01\02\00\02\01\01\10\02\01\01\00\02\01\00\20\02\01\00\01\02\01\00\10\02\01\00\00\02\00\00\40\02\00\03\00\02\00\02\10\02\00\02\00\02\00\01\20\02\00\01\01\02\00\01\10\02\00\01\00\02\00\00\30\02\00\00\02\02\00\00\11\02\00\00\01\02\00\00\20\12\00\00\00\02\00\00\10\02\00\00\00\01\00\00\60\01\05\00\00\01\04\00\10\01\04\00\00\01\03\00\20\01\03\01\00\01\03\00\10\01\03\00\00\01\02\00\30\01\02\02\00\01\02\01\10\01\02\01\00\01\02\00\20\01\02\00\01\01\02\00\10\01\02\00\00\01\01\00\40\01\01\03\00\01\01\02\10\01\01\02\00\01\01\01\20\01\01\01\01\01\01\01\10\01\01\01\00\01\01\00\30\01\01\00\02\01\01\00\11\01\01\00\01\01\01\00\20\11\01\00\00\01\01\00\10\01\01\00\00\01\00\00\50\01\00\04\00\01\00\03\10\01\00\03\00\01\00\02\20\01\00\02\01\01\00\02\10\01\00\02\00\01\00\01\30\01\00\01\02\01\00\01\11\01\00\01\01\01\00\01\20\11\00\01\00\01\00\01\10\01\00\01\00\01\00\00\40\01\00\00\03\01\00\00\12\01\00\00\02\01\00\00\21\11\00\00\01\01\00\00\11\01\00\00\01\01\00\00\30\21\00\00\00\11\00\00\10\11\00\00\00\01\00\00\20\01\10\00\00\01\00\00\10\01\00\00\00\00\00\00\70\00\06\00\00\00\05\00\10\00\05\00\00\00\04\00\20\00\04\01\00\00\04\00\10\00\04\00\00\00\03\00\30\00\03\02\00\00\03\01\10\00\03\01\00\00\03\00\20\00\03\00\01\00\03\00\10\00\03\00\00\00\02\00\40\00\02\03\00\00\02\02\10\00\02\02\00\00\02\01\20\00\02\01\01\00\02\01\10\00\02\01\00\00\02\00\30\00\02\00\02\00\02\00\11\00\02\00\01\00\02\00\20\10\02\00\00\00\02\00\10\00\02\00\00\00\01\00\50\00\01\04\00\00\01\03\10\00\01\03\00\00\01\02\20\00\01\02\01\00\01\02\10\00\01\02\00\00\01\01\30\00\01\01\02\00\01\01\11\00\01\01\01\00\01\01\20\10\01\01\00\00\01\01\10\00\01\01\00\00\01\00\40\00\01\00\03\00\01\00\12\00\01\00\02\00\01\00\21\10\01\00\01\00\01\00\11\00\01\00\01\00\01\00\30\20\01\00\00\10\01\00\10\10\01\00\00\00\01\00\20\00\11\00\00\00\01\00\10\00\01\00\00\00\00\00\60\00\00\05\00\00\00\04\10\00\00\04\00\00\00\03\20\00\00\03\01\00\00\03\10\00\00\03\00\00\00\02\30\00\00\02\02\00\00\02\11\00\00\02\01\00\00\02\20\10\00\02\00\00\00\02\10\00\00\02\00\00\00\01\40\00\00\01\03\00\00\01\12\00\00\01\02\00\00\01\21\10\00\01\01\00\00\01\11\00\00\01\01\00\00\01\30\20\00\01\00\10\00\01\10\10\00\01\00\00\00\01\20\00\10\01\00\00\00\01\10\00\00\01\00\00\00\00\50\00\00\00\04\00\00\00\13\00\00\00\03\00\00\00\22\10\00\00\02\00\00\00\12\00\00\00\02\00\00\00\31\20\00\00\01\10\00\00\11\10\00\00\01\00\00\00\21\00\10\00\01\00\00\00\11\00\00\00\01\00\00\00\40\30\00\00\00\20\00\00\10\20\00\00\00\10\00\00\20\10\10\00\00\10\00\00\10\10\00\00\00\00\00\00\30\00\20\00\00\00\10\00\10\00\10\00\00\00\00\00\20\00\00\10\00\00\00\00\10\00\00\00\00")
+  ;; Golomb-Rice value table at 0x00203000 (256 * 4 = 1024 bytes)
+  (global $RICE_VALUE i32 (i32.const 0x00203000))
+  (data (i32.const 0x00203000) "\00\00\00\80\07\00\00\00\06\00\00\10\06\00\00\00\05\00\00\20\05\01\00\00\05\00\00\10\05\00\00\00\04\00\00\30\04\02\00\00\04\01\00\10\04\01\00\00\04\00\00\20\04\00\01\00\04\00\00\10\04\00\00\00\03\00\00\40\03\03\00\00\03\02\00\10\03\02\00\00\03\01\00\20\03\01\01\00\03\01\00\10\03\01\00\00\03\00\00\30\03\00\02\00\03\00\01\10\03\00\01\00\03\00\00\20\03\00\00\01\03\00\00\10\03\00\00\00\02\00\00\50\02\04\00\00\02\03\00\10\02\03\00\00\02\02\00\20\02\02\01\00\02\02\00\10\02\02\00\00\02\01\00\30\02\01\02\00\02\01\01\10\02\01\01\00\02\01\00\20\02\01\00\01\02\01\00\10\02\01\00\00\02\00\00\40\02\00\03\00\02\00\02\10\02\00\02\00\02\00\01\20\02\00\01\01\02\00\01\10\02\00\01\00\02\00\00\30\02\00\00\02\02\00\00\11\02\00\00\01\02\00\00\20\12\00\00\00\02\00\00\10\02\00\00\00\01\00\00\60\01\05\00\00\01\04\00\10\01\04\00\00\01\03\00\20\01\03\01\00\01\03\00\10\01\03\00\00\01\02\00\30\01\02\02\00\01\02\01\10\01\02\01\00\01\02\00\20\01\02\00\01\01\02\00\10\01\02\00\00\01\01\00\40\01\01\03\00\01\01\02\10\01\01\02\00\01\01\01\20\01\01\01\01\01\01\01\10\01\01\01\00\01\01\00\30\01\01\00\02\01\01\00\11\01\01\00\01\01\01\00\20\11\01\00\00\01\01\00\10\01\01\00\00\01\00\00\50\01\00\04\00\01\00\03\10\01\00\03\00\01\00\02\20\01\00\02\01\01\00\02\10\01\00\02\00\01\00\01\30\01\00\01\02\01\00\01\11\01\00\01\01\01\00\01\20\11\00\01\00\01\00\01\10\01\00\01\00\01\00\00\40\01\00\00\03\01\00\00\12\01\00\00\02\01\00\00\21\11\00\00\01\01\00\00\11\01\00\00\01\01\00\00\30\21\00\00\00\11\00\00\10\11\00\00\00\01\00\00\20\01\10\00\00\01\00\00\10\01\00\00\00\00\00\00\70\00\06\00\00\00\05\00\10\00\05\00\00\00\04\00\20\00\04\01\00\00\04\00\10\00\04\00\00\00\03\00\30\00\03\02\00\00\03\01\10\00\03\01\00\00\03\00\20\00\03\00\01\00\03\00\10\00\03\00\00\00\02\00\40\00\02\03\00\00\02\02\10\00\02\02\00\00\02\01\20\00\02\01\01\00\02\01\10\00\02\01\00\00\02\00\30\00\02\00\02\00\02\00\11\00\02\00\01\00\02\00\20\10\02\00\00\00\02\00\10\00\02\00\00\00\01\00\50\00\01\04\00\00\01\03\10\00\01\03\00\00\01\02\20\00\01\02\01\00\01\02\10\00\01\02\00\00\01\01\30\00\01\01\02\00\01\01\11\00\01\01\01\00\01\01\20\10\01\01\00\00\01\01\10\00\01\01\00\00\01\00\40\00\01\00\03\00\01\00\12\00\01\00\02\00\01\00\21\10\01\00\01\00\01\00\11\00\01\00\01\00\01\00\30\20\01\00\00\10\01\00\10\10\01\00\00\00\01\00\20\00\11\00\00\00\01\00\10\00\01\00\00\00\00\00\60\00\00\05\00\00\00\04\10\00\00\04\00\00\00\03\20\00\00\03\01\00\00\03\10\00\00\03\00\00\00\02\30\00\00\02\02\00\00\02\11\00\00\02\01\00\00\02\20\10\00\02\00\00\00\02\10\00\00\02\00\00\00\01\40\00\00\01\03\00\00\01\12\00\00\01\02\00\00\01\21\10\00\01\01\00\00\01\11\00\00\01\01\00\00\01\30\20\00\01\00\10\00\01\10\10\00\01\00\00\00\01\20\00\10\01\00\00\00\01\10\00\00\01\00\00\00\00\50\00\00\00\04\00\00\00\13\00\00\00\03\00\00\00\22\10\00\00\02\00\00\00\12\00\00\00\02\00\00\00\31\20\00\00\01\10\00\00\11\10\00\00\01\00\00\00\21\00\10\00\01\00\00\00\11\00\00\00\01\00\00\00\40\30\00\00\00\20\00\00\10\20\00\00\00\10\00\00\20\10\10\00\00\10\00\00\10\10\00\00\00\00\00\00\30\00\20\00\00\00\10\00\10\00\10\00\00\00\00\00\20\00\00\10\00\00\00\00\10\00\00\00\00")
 
-  ;; Golomb-Rice length table at 0x0C103400 (256 bytes)
-  (global $RICE_LEN i32 (i32.const 0x0C103400))
-  (data (i32.const 0x0C103400) "\00\01\01\02\01\02\02\03\01\02\02\03\02\03\03\04\01\02\02\03\02\03\03\04\02\03\03\04\03\04\04\05\01\02\02\03\02\03\03\04\02\03\03\04\03\04\04\05\02\03\03\04\03\04\04\05\03\04\04\05\04\05\05\06\01\02\02\03\02\03\03\04\02\03\03\04\03\04\04\05\02\03\03\04\03\04\04\05\03\04\04\05\04\05\05\06\02\03\03\04\03\04\04\05\03\04\04\05\04\05\05\06\03\04\04\05\04\05\05\06\04\05\05\06\05\06\06\07\01\02\02\03\02\03\03\04\02\03\03\04\03\04\04\05\02\03\03\04\03\04\04\05\03\04\04\05\04\05\05\06\02\03\03\04\03\04\04\05\03\04\04\05\04\05\05\06\03\04\04\05\04\05\05\06\04\05\05\06\05\06\06\07\02\03\03\04\03\04\04\05\03\04\04\05\04\05\05\06\03\04\04\05\04\05\05\06\04\05\05\06\05\06\06\07\03\04\04\05\04\05\05\06\04\05\05\06\05\06\06\07\04\05\05\06\05\06\06\07\05\06\06\07\06\07\07\08")
+  ;; Golomb-Rice length table at 0x00203400 (256 bytes)
+  (global $RICE_LEN i32 (i32.const 0x00203400))
+  (data (i32.const 0x00203400) "\00\01\01\02\01\02\02\03\01\02\02\03\02\03\03\04\01\02\02\03\02\03\03\04\02\03\03\04\03\04\04\05\01\02\02\03\02\03\03\04\02\03\03\04\03\04\04\05\02\03\03\04\03\04\04\05\03\04\04\05\04\05\05\06\01\02\02\03\02\03\03\04\02\03\03\04\03\04\04\05\02\03\03\04\03\04\04\05\03\04\04\05\04\05\05\06\02\03\03\04\03\04\04\05\03\04\04\05\04\05\05\06\03\04\04\05\04\05\05\06\04\05\05\06\05\06\06\07\01\02\02\03\02\03\03\04\02\03\03\04\03\04\04\05\02\03\03\04\03\04\04\05\03\04\04\05\04\05\05\06\02\03\03\04\03\04\04\05\03\04\04\05\04\05\05\06\03\04\04\05\04\05\05\06\04\05\05\06\05\06\06\07\02\03\03\04\03\04\04\05\03\04\04\05\04\05\05\06\03\04\04\05\04\05\05\06\04\05\05\06\05\06\06\07\03\04\04\05\04\05\05\06\04\05\05\06\05\06\06\07\04\05\05\06\05\06\06\07\05\06\06\07\06\07\07\08")
 
   ;; ── huff_init_prefix ───────────────────────────────────────
   ;; Copy CodePrefixOrg to CodePrefixCur (reset before each table build).
@@ -2413,8 +2412,8 @@
   )
 
   ;; Scratch for Huffman NEW path
-  (global $HUFF_NEW_CODELEN i32 (i32.const 0x0C104000))  ;; 528 bytes
-  (global $HUFF_NEW_RANGE   i32 (i32.const 0x0C104210))  ;; 532 bytes
+  (global $HUFF_NEW_CODELEN i32 (i32.const 0x00204000))  ;; 528 bytes
+  (global $HUFF_NEW_RANGE   i32 (i32.const 0x00204210))  ;; 532 bytes
 
   ;; ── huff_read_code_lengths_new ─────────────────────────────
   ;; Read Huffman code lengths using NEW (Golomb-Rice) format.
@@ -2979,7 +2978,7 @@
     ;; Initialize prefix arrays
     (call $huff_init_prefix)
     ;; Also copy org to a separate location for MakeLut
-    (memory.copy (global.get $HUFF_PFXORG) (i32.const 0x0C102540) (i32.const 48))
+    (memory.copy (global.get $HUFF_PFXORG) (i32.const 0x00202540) (i32.const 48))
 
     ;; Read first bit: 0 = old path
     (if (i32.eqz (call $br_read_bits_no_refill (i32.const 1)))
@@ -3106,19 +3105,19 @@
   ;; tANS Decoder
   ;; ============================================================
   ;;
-  ;; Memory layout (at 0x0C110000+):
+  ;; Memory layout (at 0x00210000+):
   ;;   +0x0000: TansData.AUsed (4), BUsed (4), A[256] (256), B[256] (1024) = 1288 bytes
   ;;   +0x0508: reserved
   ;;   +0x0600: TansLut (up to 4096 * 8 = 32768 bytes for logTableBits=12)
   ;;   +0x8600: seen array (256 bytes)
 
-  (global $TANS_DATA   i32 (i32.const 0x0C110000))
-  (global $TANS_AUSED  i32 (i32.const 0x0C110000))
-  (global $TANS_BUSED  i32 (i32.const 0x0C110004))
-  (global $TANS_A      i32 (i32.const 0x0C110008))
-  (global $TANS_B      i32 (i32.const 0x0C110108))
-  (global $TANS_LUT    i32 (i32.const 0x0C110600))
-  (global $TANS_SEEN   i32 (i32.const 0x0C118600))
+  (global $TANS_DATA   i32 (i32.const 0x00210000))
+  (global $TANS_AUSED  i32 (i32.const 0x00210000))
+  (global $TANS_BUSED  i32 (i32.const 0x00210004))
+  (global $TANS_A      i32 (i32.const 0x00210008))
+  (global $TANS_B      i32 (i32.const 0x00210108))
+  (global $TANS_LUT    i32 (i32.const 0x00210600))
+  (global $TANS_SEEN   i32 (i32.const 0x00218600))
 
   ;; TansLutEnt: { X:u32, BitsX:u8, Symbol:u8, W:u16 } = 8 bytes
   ;; Stored as: [0-3]=X, [4]=BitsX, [5]=Symbol, [6-7]=W
@@ -4262,9 +4261,9 @@
   ;; ============================================================
   ;; Extends tans_decode_table_sparse to handle format bit=1 (Golomb-Rice)
 
-  ;; Scratch for tANS GR: rice buffer at 0x0C120000 (528 bytes), range at 0x0C120210 (532 bytes)
-  (global $TANS_GR_RICE  i32 (i32.const 0x0C120000))
-  (global $TANS_GR_RANGE i32 (i32.const 0x0C120210))
+  ;; Scratch for tANS GR: rice buffer at 0x00220000 (528 bytes), range at 0x00220210 (532 bytes)
+  (global $TANS_GR_RICE  i32 (i32.const 0x00220000))
+  (global $TANS_GR_RANGE i32 (i32.const 0x00220210))
 
   (func $tans_decode_table_gr (param $logTableBits i32) (result i32)
     (local $Q i32) (local $numSymbols i32) (local $fluff i32) (local $totalRice i32)
@@ -4454,28 +4453,28 @@
   ;; High LZ Decoder — stub for L6 support
   ;; ============================================================
   ;;
-  ;; Memory layout for High LZ working space (at 0x0C130000):
+  ;; Memory layout for High LZ working space (at 0x00230000):
   ;;   HighLzTable: CmdStream(4), CmdStreamSize(4), OffsStream(4), OffsStreamSize(4),
   ;;                LitStream(4), LitStreamSize(4), LenStream(4), LenStreamSize(4) = 32 bytes
   ;;   Token array: up to 128KB / 4 = 32K tokens * 16 bytes = 512KB
   ;;   Offset/Length unpacked arrays: up to 128KB entries * 4 = 512KB each
 
-  (global $HIGH_LZ_TABLE i32 (i32.const 0x0C130000))
+  (global $HIGH_LZ_TABLE i32 (i32.const 0x00230000))
   ;; HighLzTable fields (32 bytes)
-  (global $HLZ_CMD       i32 (i32.const 0x0C130000))  ;; CmdStream ptr
-  (global $HLZ_CMD_SIZE  i32 (i32.const 0x0C130004))  ;; CmdStreamSize
-  (global $HLZ_OFFS      i32 (i32.const 0x0C130008))  ;; OffsStream ptr (int*)
-  (global $HLZ_OFFS_SIZE i32 (i32.const 0x0C13000C))  ;; OffsStreamSize
-  (global $HLZ_LIT       i32 (i32.const 0x0C130010))  ;; LitStream ptr
-  (global $HLZ_LIT_SIZE  i32 (i32.const 0x0C130014))  ;; LitStreamSize
-  (global $HLZ_LEN       i32 (i32.const 0x0C130018))  ;; LenStream ptr (int*)
-  (global $HLZ_LEN_SIZE  i32 (i32.const 0x0C13001C))  ;; LenStreamSize
+  (global $HLZ_CMD       i32 (i32.const 0x00230000))  ;; CmdStream ptr
+  (global $HLZ_CMD_SIZE  i32 (i32.const 0x00230004))  ;; CmdStreamSize
+  (global $HLZ_OFFS      i32 (i32.const 0x00230008))  ;; OffsStream ptr (int*)
+  (global $HLZ_OFFS_SIZE i32 (i32.const 0x0023000C))  ;; OffsStreamSize
+  (global $HLZ_LIT       i32 (i32.const 0x00230010))  ;; LitStream ptr
+  (global $HLZ_LIT_SIZE  i32 (i32.const 0x00230014))  ;; LitStreamSize
+  (global $HLZ_LEN       i32 (i32.const 0x00230018))  ;; LenStream ptr (int*)
+  (global $HLZ_LEN_SIZE  i32 (i32.const 0x0023001C))  ;; LenStreamSize
 
   ;; Scratch areas
-  (global $HLZ_SCRATCH    i32 (i32.const 0x0C130020))  ;; entropy decode scratch (256KB)
-  (global $HLZ_OFFS_BUF   i32 (i32.const 0x0C170020))  ;; unpacked offsets (128K * 4 = 512KB)
-  (global $HLZ_LEN_BUF    i32 (i32.const 0x0C1F0020))  ;; unpacked lengths (128K * 4 = 512KB)
-  (global $HLZ_TOKEN_BUF  i32 (i32.const 0x0C270020))  ;; token array (32K * 16 = 512KB)
+  (global $HLZ_SCRATCH    i32 (i32.const 0x00230020))  ;; entropy decode scratch (256KB)
+  (global $HLZ_OFFS_BUF   i32 (i32.const 0x00270020))  ;; unpacked offsets (128K * 4 = 512KB)
+  (global $HLZ_LEN_BUF    i32 (i32.const 0x002F0020))  ;; unpacked lengths (128K * 4 = 512KB)
+  (global $HLZ_TOKEN_BUF  i32 (i32.const 0x00370020))  ;; token array (32K * 16 = 512KB)
 
   ;; ── high_decode_chunk_lz ───────────────────────────────────
   ;; High LZ decoder: ReadLzTable + ResolveTokens + ExecuteTokens.
@@ -4603,13 +4602,13 @@
       )
     )
 
-    ;; Save lowBits to a safe location (0x0C1E0000) before litlen decode can corrupt them
+    ;; Save lowBits to a safe location (0x002E0000) before litlen decode can corrupt them
     (if (i32.and (i32.ne (local.get $offsScaling) (i32.const 0))
                  (i32.ne (local.get $offsScaling) (i32.const 1)))
       (then
-        (memory.copy (i32.const 0x0C1E0000) (local.get $n)
+        (memory.copy (i32.const 0x002E0000) (local.get $n)
           (i32.load (global.get $HLZ_OFFS_SIZE)))
-        (local.set $n (i32.const 0x0C1E0000))
+        (local.set $n (i32.const 0x002E0000))
       )
     )
 
@@ -4964,11 +4963,11 @@
         (i32.store (i32.const 0xF0) (i32.load (i32.add (global.get $HLZ_OFFS_BUF) (i32.const 0))))
         (i32.store (i32.const 0xF4) (i32.load (i32.add (global.get $HLZ_OFFS_BUF) (i32.const 4))))
         ;; Store first 10 lowBits at 0x100 -- wait, that's INPUT_BASE!
-        ;; Use a safe address like 0x0C129000
-        (i32.store (i32.const 0x0C129000) (i32.load8_u (local.get $n)))
-        (i32.store (i32.const 0x0C129004) (i32.load8_u (i32.add (local.get $n) (i32.const 1))))
-        (i32.store (i32.const 0x0C129008) (i32.load8_u (i32.add (local.get $n) (i32.const 2))))
-        (i32.store (i32.const 0x0C12900C) (local.get $offsScaling))
+        ;; Use a safe address like 0x00229000
+        (i32.store (i32.const 0x00229000) (i32.load8_u (local.get $n)))
+        (i32.store (i32.const 0x00229004) (i32.load8_u (i32.add (local.get $n) (i32.const 1))))
+        (i32.store (i32.const 0x00229008) (i32.load8_u (i32.add (local.get $n) (i32.const 2))))
+        (i32.store (i32.const 0x0022900C) (local.get $offsScaling))
       )
     )
 
@@ -5001,7 +5000,7 @@
     (i32.store (i32.const 0xE4) (local.get $u32LenStreamSize))
 
     ;; Unpack u32 length stream (alternating forward/backward ReadLength)
-    ;; u32LenStream stored at 0x0C128000 (up to 512 entries * 4 = 2048 bytes)
+    ;; u32LenStream stored at 0x00228000 (up to 512 entries * 4 = 2048 bytes)
     (if (i32.or (i32.lt_s (local.get $u32LenStreamSize) (i32.const 0))
                 (i32.gt_s (local.get $u32LenStreamSize) (i32.const 512)))
       (then (global.set $TRACE (i32.const -3012)) (return (i32.const -1)))
@@ -5028,7 +5027,7 @@
           (br $rLAL)))
         ;; totalBits = leadingZeros + 7
         (local.set $nb (i32.add (local.get $decSize) (i32.const 7)))
-        (i32.store (i32.add (i32.const 0x0C128000) (i32.shl (local.get $i) (i32.const 2)))
+        (i32.store (i32.add (i32.const 0x00228000) (i32.shl (local.get $i) (i32.const 2)))
           (i32.sub (i32.shr_u (local.get $bitsA_bits) (i32.sub (i32.const 32) (local.get $nb))) (i32.const 64)))
         (local.set $bitsA_bitpos (i32.add (local.get $bitsA_bitpos) (local.get $nb)))
         (local.set $bitsA_bits (i32.shl (local.get $bitsA_bits) (local.get $nb)))
@@ -5059,7 +5058,7 @@
           (local.set $bitsB_bitpos (i32.sub (local.get $bitsB_bitpos) (i32.const 8)))
           (br $rLBL)))
         (local.set $nb (i32.add (local.get $decSize) (i32.const 7)))
-        (i32.store (i32.add (i32.const 0x0C128000) (i32.shl (local.get $i) (i32.const 2)))
+        (i32.store (i32.add (i32.const 0x00228000) (i32.shl (local.get $i) (i32.const 2)))
           (i32.sub (i32.shr_u (local.get $bitsB_bits) (i32.sub (i32.const 32) (local.get $nb))) (i32.const 64)))
         (local.set $bitsB_bitpos (i32.add (local.get $bitsB_bitpos) (local.get $nb)))
         (local.set $bitsB_bits (i32.shl (local.get $bitsB_bits) (local.get $nb)))
@@ -5092,7 +5091,7 @@
           (local.set $bitsA_p (i32.add (local.get $bitsA_p) (i32.const 1)))
           (br $rLAOL)))
         (local.set $nb (i32.add (local.get $decSize) (i32.const 7)))
-        (i32.store (i32.add (i32.const 0x0C128000) (i32.shl (local.get $i) (i32.const 2)))
+        (i32.store (i32.add (i32.const 0x00228000) (i32.shl (local.get $i) (i32.const 2)))
           (i32.sub (i32.shr_u (local.get $bitsA_bits) (i32.sub (i32.const 32) (local.get $nb))) (i32.const 64)))
         (local.set $bitsA_bitpos (i32.add (local.get $bitsA_bitpos) (local.get $nb)))
         (local.set $bitsA_bits (i32.shl (local.get $bitsA_bits) (local.get $nb)))
@@ -5111,7 +5110,7 @@
           (then
             ;; Overflow: read from u32LenStream
             (local.set $nb (i32.add (local.get $nb)
-              (i32.load (i32.add (i32.const 0x0C128000) (i32.shl (local.get $n) (i32.const 2))))))
+              (i32.load (i32.add (i32.const 0x00228000) (i32.shl (local.get $n) (i32.const 2))))))
             (local.set $n (i32.add (local.get $n) (i32.const 1)))
           )
         )
