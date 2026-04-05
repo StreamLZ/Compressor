@@ -1,19 +1,31 @@
-// StreamLZ WASM Decompressor — Production API
-// Supports L1 (Fast), L6 (High SC), and L9 (High non-SC).
-// L6 SC automatically uses parallel workers when SharedArrayBuffer is available.
+// StreamLZ WASM Decompressor — Universal API (Node + Browser)
+// Supports L1-L11. L6-L8 SC auto-parallelized when SharedArrayBuffer available.
 
-import { readFileSync } from 'fs';
-import { Worker } from 'worker_threads';
-import { resolve, dirname } from 'path';
-import { fileURLToPath } from 'url';
+// ── Environment detection ────────────────────────────────────
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const WASM_PATH = resolve(__dirname, 'slz-decompress.wasm');
+const isNode = typeof process !== 'undefined' && process.versions && process.versions.node;
+const hasSharedArrayBuffer = typeof SharedArrayBuffer !== 'undefined';
 
 let _wasmBytes = null;
-function getWasmBytes() {
-  if (!_wasmBytes) _wasmBytes = readFileSync(WASM_PATH);
-  return _wasmBytes;
+let _wasmBytesPromise = null;
+
+async function getWasmBytes() {
+  if (_wasmBytes) return _wasmBytes;
+  if (_wasmBytesPromise) return _wasmBytesPromise;
+  _wasmBytesPromise = (async () => {
+    if (isNode) {
+      const { readFileSync } = await import('fs');
+      const { resolve, dirname } = await import('path');
+      const { fileURLToPath } = await import('url');
+      const __dirname = dirname(fileURLToPath(import.meta.url));
+      _wasmBytes = readFileSync(resolve(__dirname, 'slz-decompress.wasm'));
+    } else {
+      const resp = await fetch(new URL('slz-decompress.wasm', import.meta.url));
+      _wasmBytes = new Uint8Array(await resp.arrayBuffer());
+    }
+    return _wasmBytes;
+  })();
+  return _wasmBytesPromise;
 }
 
 // ── Frame scanner ────────────────────────────────────────────
@@ -34,11 +46,9 @@ function scanFrame(data) {
   const blockCompSize = (data[headerSize] | (data[headerSize+1]<<8) | (data[headerSize+2]<<16) | (data[headerSize+3]<<24)) & 0x7FFFFFFF;
   const blockDecompSize = data[headerSize+4] | (data[headerSize+5]<<8) | (data[headerSize+6]<<16) | (data[headerSize+7]<<24);
 
-  // Scan StreamLZ header for SC flag
   const slzPos = headerSize + 8;
   const isSC = !!(data[slzPos] & 0x10);
 
-  // Scan chunks for SC parallel decompression
   let chunks = null;
   let prefixBase = 0;
   if (isSC && codec === 0) {
@@ -79,25 +89,20 @@ function scanFrame(data) {
 function getError(wasm, code) {
   const trace = wasm.getTrace ? wasm.getTrace() : 0;
   const errors = {
-    '-2001': 'Sub-chunk header truncated (src exhausted)',
-    '-2010': 'Entropy decoder failed on sub-chunk',
+    '-2001': 'Sub-chunk header truncated',
+    '-2010': 'Entropy decoder failed',
     '-2011': 'Entropy decoded size mismatch',
-    '-2020': 'Compressed sub-chunk source data truncated',
-    '-2021': 'Stored sub-chunk size mismatch',
+    '-2020': 'Compressed sub-chunk data truncated',
     '-2030': 'Fast LZ decoder failed',
     '-2031': 'High LZ decoder failed',
-    '-3001': 'High LZ: invalid mode (must be 0 or 1)',
-    '-3002': 'High LZ: invalid input size',
-    '-3003': 'High LZ: source too short',
     '-3004': 'High LZ: literal entropy decode failed',
     '-3005': 'High LZ: command entropy decode failed',
     '-3008': 'High LZ: unsupported offset scaling mode',
-    '-3009': 'High LZ: packed length entropy decode failed',
-    '-3010': 'High LZ: u32 length stream gamma decode failed',
-    '-3011': 'High LZ: traditional offset mode failed',
+    '-3009': 'High LZ: length entropy decode failed',
+    '-3010': 'High LZ: u32 length stream decode failed',
+    '-3011': 'High LZ: traditional offset decode failed',
   };
-  const msg = errors[String(trace)] || `unknown error (trace=${trace})`;
-  return `StreamLZ decompress failed (code ${code}): ${msg}`;
+  return `StreamLZ decompress failed: ${errors[String(trace)] || `error ${trace}`}`;
 }
 
 // ── Worker pool ──────────────────────────────────────────────
@@ -114,27 +119,40 @@ class WorkerPool {
   }
 
   async init() {
-    const wasmModule = getWasmBytes();
+    const wasmBytes = await getWasmBytes();
     this._readyPromise = new Promise(r => { this._readyResolve = r; });
 
     for (let i = 0; i < this.size; i++) {
-      const worker = new Worker(resolve(__dirname, 'worker-shared.mjs'), {
-        workerData: { wasmModule }
-      });
+      let worker;
+      if (isNode) {
+        const { Worker } = await import('worker_threads');
+        const { resolve, dirname } = await import('path');
+        const { fileURLToPath } = await import('url');
+        worker = new Worker(resolve(dirname(fileURLToPath(import.meta.url)), 'slz-worker.js'), {
+          workerData: { wasmModule: wasmBytes }
+        });
+      } else {
+        worker = new globalThis.Worker(new URL('slz-worker.js', import.meta.url));
+        worker.postMessage({ type: 'init', wasmBytes });
+      }
       this.workers.push(worker);
 
-      worker.on('message', (msg) => {
-        if (msg.type === 'ready') {
+      const onMsg = (msg) => {
+        const data = msg.data || msg; // Browser wraps in .data
+        if (data.type === 'ready') {
           this.ready++;
           if (this.ready === this.size) this._readyResolve();
-        } else if (msg.type === 'done') {
+        } else if (data.type === 'done') {
           const cb = worker._callback;
           worker._callback = null;
           this.available.push(worker);
-          if (cb) cb(msg);
+          if (cb) cb(data);
           this._drain();
         }
-      });
+      };
+
+      if (isNode) worker.on('message', onMsg);
+      else worker.addEventListener('message', onMsg);
     }
 
     await this._readyPromise;
@@ -161,22 +179,24 @@ class WorkerPool {
     for (const w of this.workers) w.terminate();
     this.workers = [];
     this.available = [];
+    this.ready = 0;
   }
 }
 
 // ── Single-threaded decompress ───────────────────────────────
 
 let _singleInstance = null;
+
 async function getSingleInstance() {
   if (!_singleInstance) {
-    const { instance } = await WebAssembly.instantiate(getWasmBytes());
+    const bytes = await getWasmBytes();
+    const { instance } = await WebAssembly.instantiate(bytes);
     _singleInstance = instance.exports;
   }
   return _singleInstance;
 }
 
-// Scratch region ends at ~0x0C300000 (195MB). Output can go above that for large files.
-const SCRATCH_END = 0x0D000000; // 208MB — safe margin above all scratch/LUT/tANS/HighLZ
+const SCRATCH_END = 0x0D000000;
 const DEFAULT_OUTPUT_BASE = 0x04000100;
 const PAGE_SIZE = 65536;
 
@@ -184,22 +204,16 @@ function ensureCapacity(wasm, inputSize, outputSize) {
   const inputBase = wasm.getInputBase();
   const inputEnd = inputBase + inputSize;
 
-  // If input fits before default output and output fits before scratch: use defaults
   if (inputEnd <= DEFAULT_OUTPUT_BASE && outputSize <= SCRATCH_END - DEFAULT_OUTPUT_BASE) {
     wasm.setOutputBase(DEFAULT_OUTPUT_BASE);
     return;
   }
 
-  // Large file: place output AFTER scratch region
-  const outputBase = SCRATCH_END;
-  wasm.setOutputBase(outputBase);
-
-  // Grow memory if needed
-  const needed = outputBase + outputSize + PAGE_SIZE; // +1 page safety
+  wasm.setOutputBase(SCRATCH_END);
+  const needed = SCRATCH_END + outputSize + PAGE_SIZE;
   const currentSize = wasm.memory.buffer.byteLength;
   if (needed > currentSize) {
-    const pagesToGrow = Math.ceil((needed - currentSize) / PAGE_SIZE);
-    wasm.memory.grow(pagesToGrow);
+    wasm.memory.grow(Math.ceil((needed - currentSize) / PAGE_SIZE));
   }
 }
 
@@ -207,15 +221,14 @@ function decompressSingle(data, contentSize) {
   const wasm = _singleInstance;
   ensureCapacity(wasm, data.length, contentSize || data.length * 4);
   const mem = new Uint8Array(wasm.memory.buffer);
-  const inputBase = wasm.getInputBase();
-  mem.set(data, inputBase);
+  mem.set(data, wasm.getInputBase());
   const result = wasm.decompress(data.length);
   if (result < 0) throw new Error(getError(wasm, result));
   const outputBase = wasm.getOutputBase();
   return new Uint8Array(wasm.memory.buffer.slice(outputBase, outputBase + result));
 }
 
-// ── Parallel decompress (L6 SC) ─────────────────────────────
+// ── Parallel decompress (L6-L8 SC) ──────────────────────────
 
 async function decompressParallel(data, frame, pool) {
   const { chunks, contentSize, prefixBase } = frame;
@@ -241,16 +254,15 @@ async function decompressParallel(data, frame, pool) {
       outputSAB, outputOffset: c.dstOffset, dstSize: c.dstSize,
       chunkIndex: i
     }).then(result => {
-      if (!result.ok) throw new Error(`Chunk ${i} failed: ${result.error}`);
+      if (!result.ok) throw new Error(`Chunk ${i} failed (code ${result.error})`);
     }));
   }
   await Promise.all(promises);
 
-  // Restore SC prefix bytes for chunks 1..N
+  // Restore SC prefix bytes
   for (let i = 0; i < chunks.length - 1; i++) {
     const c = chunks[i + 1];
-    const copySize = Math.min(8, c.dstSize);
-    output.set(data.subarray(prefixBase + i * 8, prefixBase + i * 8 + copySize), c.dstOffset);
+    output.set(data.subarray(prefixBase + i * 8, prefixBase + i * 8 + Math.min(8, c.dstSize)), c.dstOffset);
   }
 
   return new Uint8Array(outputSAB);
@@ -259,16 +271,24 @@ async function decompressParallel(data, frame, pool) {
 // ── Public API ───────────────────────────────────────────────
 
 let _pool = null;
-const hasSharedArrayBuffer = typeof SharedArrayBuffer !== 'undefined';
+
+async function getCoreCount() {
+  if (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) {
+    return navigator.hardwareConcurrency;
+  }
+  if (isNode) {
+    return (await import('os')).default.cpus().length;
+  }
+  return 4;
+}
 
 /**
  * Decompress SLZ1-framed data.
  *
  * @param {Uint8Array|Buffer} data - Compressed SLZ1 data
  * @param {Object} [options]
- * @param {number} [options.threads=0] - Worker count for L6 SC parallel decompression.
- *   0 = auto (use navigator.hardwareConcurrency or 4).
- *   1 = force single-threaded.
+ * @param {number} [options.threads=0] - Worker count for L6-L8 SC parallel decompression.
+ *   0 = auto (use hardware concurrency). 1 = force single-threaded.
  * @returns {Promise<Uint8Array>} Decompressed data
  */
 export async function decompress(data, options = {}) {
@@ -278,12 +298,9 @@ export async function decompress(data, options = {}) {
   const frame = scanFrame(data);
   if (!frame) throw new Error('Not a valid SLZ1 stream');
 
-  // L6 SC with threads > 1 and SharedArrayBuffer available → parallel
+  // L6-L8 SC with threads > 1 and SharedArrayBuffer available → parallel
   if (frame.isSC && frame.chunks && threads !== 1 && hasSharedArrayBuffer) {
-    const numWorkers = threads > 0 ? threads :
-      (typeof navigator !== 'undefined' && navigator.hardwareConcurrency
-        ? navigator.hardwareConcurrency
-        : (await import('os')).default.cpus().length);
+    const numWorkers = threads > 0 ? threads : await getCoreCount();
 
     if (!_pool || _pool.size !== numWorkers) {
       if (_pool) _pool.terminate();
@@ -294,7 +311,7 @@ export async function decompress(data, options = {}) {
     return decompressParallel(data, frame, _pool);
   }
 
-  // Single-threaded fallback (L1, L9, small files, no SharedArrayBuffer)
+  // Single-threaded fallback
   await getSingleInstance();
   return decompressSingle(data, frame.contentSize);
 }

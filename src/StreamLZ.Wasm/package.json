@@ -1,0 +1,33 @@
+{
+  "name": "streamlz",
+  "version": "1.0.0",
+  "description": "High-performance LZ decompressor for the browser and Node.js. Hand-coded WebAssembly with SIMD128 and parallel decompression.",
+  "type": "module",
+  "main": "slz.mjs",
+  "exports": {
+    ".": "./slz.mjs"
+  },
+  "files": [
+    "slz.mjs",
+    "slz-worker.js",
+    "slz-decompress.wasm",
+    "slz-decompress.wat"
+  ],
+  "keywords": [
+    "compression",
+    "decompression",
+    "lz",
+    "wasm",
+    "webassembly",
+    "simd",
+    "parallel",
+    "streaming",
+    "high-performance"
+  ],
+  "author": "StreamLZ Contributors",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/StreamLZ/Compressor"
+  }
+}
