@@ -432,15 +432,15 @@
         (local.set $cmd (i32.load8_u (local.get $cmdStream)))
         (local.set $cmdStream (i32.add (local.get $cmdStream) (i32.const 1)))
 
-        ;; ── cmd >= 24: Short token ──
+        ;; ── cmd >= 24: Short token (with fast-path loop) ──
         (if (i32.ge_u (local.get $cmd) (i32.const 24))
-          (then
+          (then (block $shortToken (loop $shortLoop
             ;; Bounds check
             (if (i32.ge_u (local.get $dstCur) (local.get $dstEnd))
               (then (return (i32.const -1)))
             )
 
-            ;; litLen = cmd & 7
+            ;; litLen = cmd & 7 (cmd is set by main loop or by fast-path peek)
             (local.set $litLen (i32.and (local.get $cmd) (i32.const 7)))
 
             ;; Copy literals
@@ -498,7 +498,17 @@
             )
             (local.set $dstCur (i32.add (local.get $dstCur) (local.get $matchLen)))
 
-            (br $cmdLoop)
+            ;; Fast-path: peek next cmd; if also short token, read and loop
+            (br_if $shortToken (i32.ge_u (local.get $cmdStream) (local.get $cmdStreamEnd)))
+            (if (i32.ge_u (i32.load8_u (local.get $cmdStream)) (i32.const 24))
+              (then
+                (local.set $cmd (i32.load8_u (local.get $cmdStream)))
+                (local.set $cmdStream (i32.add (local.get $cmdStream) (i32.const 1)))
+                (br $shortLoop)
+              )
+            )
+          ))
+          (br $cmdLoop)
           )
         )
 
