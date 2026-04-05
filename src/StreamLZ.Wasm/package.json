@@ -4,15 +4,22 @@
   "description": "High-performance LZ decompressor for the browser and Node.js. Hand-coded WebAssembly with SIMD128 and parallel decompression.",
   "type": "module",
   "main": "slz.mjs",
+  "types": "index.d.ts",
   "exports": {
-    ".": "./slz.mjs"
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./slz.mjs"
+    }
   },
   "files": [
     "slz.mjs",
     "slz-worker.js",
     "slz-decompress.wasm",
-    "slz-decompress.wat"
+    "index.d.ts",
+    "README.md",
+    "CodeWiki.md"
   ],
+  "sideEffects": false,
   "keywords": [
     "compression",
     "decompression",
