@@ -979,6 +979,26 @@
     (i64.store (local.get $dst) (i64.load (local.get $src)))
   )
 
+  ;; ── copy128 ────────────────────────────────────────────────
+  ;; Copy 16 bytes using SIMD v128.
+  (func $copy128 (param $dst i32) (param $src i32)
+    (v128.store (local.get $dst) (v128.load (local.get $src)))
+  )
+
+  ;; ── wildcopy16 ─────────────────────────────────────────────
+  ;; Copy bytes in 16-byte chunks until dst >= dstEnd.
+  (func $wildcopy16 (param $dst i32) (param $src i32) (param $dstEnd i32)
+    (block $done
+      (loop $loop
+        (br_if $done (i32.ge_u (local.get $dst) (local.get $dstEnd)))
+        (v128.store (local.get $dst) (v128.load (local.get $src)))
+        (local.set $dst (i32.add (local.get $dst) (i32.const 16)))
+        (local.set $src (i32.add (local.get $src) (i32.const 16)))
+        (br $loop)
+      )
+    )
+  )
+
   ;; ── decode_far_offsets ─────────────────────────────────────
   ;; Decode 32-bit far offsets from source stream.
   ;; 3 bytes per offset; offsets >= 0xC00000 have a 4th byte.
@@ -1906,12 +1926,18 @@
             ;; matches may reference the initial 8 literal bytes at negative
             ;; offsets from dstCur (valid within the output buffer region).
 
-            ;; Match copy: matchLen = (cmd >> 3) & 0xF
+            ;; Match copy: matchLen = (cmd >> 3) & 0xF (max 15 bytes)
             (local.set $matchLen (i32.and (i32.shr_u (local.get $cmd) (i32.const 3)) (i32.const 0xF)))
             (local.set $match (i32.add (local.get $dstCur) (local.get $recentOffs)))
-            (call $copy64 (local.get $dstCur) (local.get $match))
-            (call $copy64 (i32.add (local.get $dstCur) (i32.const 8))
-                          (i32.add (local.get $match) (i32.const 8)))
+            ;; Use SIMD only if offset >= 16 (no overlap)
+            (if (i32.ge_u (i32.sub (i32.const 0) (local.get $recentOffs)) (i32.const 16))
+              (then (call $copy128 (local.get $dstCur) (local.get $match)))
+              (else
+                (call $copy64 (local.get $dstCur) (local.get $match))
+                (call $copy64 (i32.add (local.get $dstCur) (i32.const 8))
+                              (i32.add (local.get $match) (i32.const 8)))
+              )
+            )
             (local.set $dstCur (i32.add (local.get $dstCur) (local.get $matchLen)))
 
             (br $cmdLoop)
@@ -1937,14 +1963,20 @@
               (then (return (i32.const -1)))
             )
 
-            ;; Copy match (up to 32 bytes via 4x copy64)
-            (call $copy64 (local.get $dstCur) (local.get $match))
-            (call $copy64 (i32.add (local.get $dstCur) (i32.const 8))
-                          (i32.add (local.get $match) (i32.const 8)))
-            (call $copy64 (i32.add (local.get $dstCur) (i32.const 16))
-                          (i32.add (local.get $match) (i32.const 16)))
-            (call $copy64 (i32.add (local.get $dstCur) (i32.const 24))
-                          (i32.add (local.get $match) (i32.const 24)))
+            ;; Copy match (up to 32 bytes)
+            (if (i32.ge_u (i32.sub (local.get $dstCur) (local.get $match)) (i32.const 16))
+              (then
+                (call $copy128 (local.get $dstCur) (local.get $match))
+                (call $copy128 (i32.add (local.get $dstCur) (i32.const 16))
+                               (i32.add (local.get $match) (i32.const 16)))
+              )
+              (else
+                (call $copy64 (local.get $dstCur) (local.get $match))
+                (call $copy64 (i32.add (local.get $dstCur) (i32.const 8)) (i32.add (local.get $match) (i32.const 8)))
+                (call $copy64 (i32.add (local.get $dstCur) (i32.const 16)) (i32.add (local.get $match) (i32.const 16)))
+                (call $copy64 (i32.add (local.get $dstCur) (i32.const 24)) (i32.add (local.get $match) (i32.const 24)))
+              )
+            )
             (local.set $dstCur (i32.add (local.get $dstCur) (local.get $length)))
             (br $cmdLoop)
           )
@@ -2050,20 +2082,22 @@
             )
             (local.set $recentOffs (i32.sub (local.get $match) (local.get $dstCur)))
 
-            ;; Copy match (long)
-            (block $matchLongDone
-              (loop $matchLongLoop
-                (br_if $matchLongDone (i32.le_s (local.get $length) (i32.const 0)))
-                (call $copy64 (local.get $dstCur) (local.get $match))
-                (call $copy64 (i32.add (local.get $dstCur) (i32.const 8))
-                              (i32.add (local.get $match) (i32.const 8)))
-                (local.set $dstCur (i32.add (local.get $dstCur) (i32.const 16)))
-                (local.set $match (i32.add (local.get $match) (i32.const 16)))
-                (local.set $length (i32.sub (local.get $length) (i32.const 16)))
-                (br $matchLongLoop)
+            ;; Copy match (long) — SIMD if offset >= 16, else byte-at-a-time
+            (if (i32.ge_u (i32.sub (local.get $dstCur) (local.get $match)) (i32.const 16))
+              (then
+                (call $wildcopy16 (local.get $dstCur) (local.get $match)
+                  (i32.add (local.get $dstCur) (local.get $length)))
+              )
+              (else
+                (local.set $litLen (i32.const 0))
+                (block $mlDone (loop $mlLoop
+                  (br_if $mlDone (i32.ge_u (local.get $litLen) (local.get $length)))
+                  (i32.store8 (i32.add (local.get $dstCur) (local.get $litLen))
+                    (i32.load8_u (i32.add (local.get $match) (local.get $litLen))))
+                  (local.set $litLen (i32.add (local.get $litLen) (i32.const 1)))
+                  (br $mlLoop)))
               )
             )
-            ;; Correct overshoot
             (local.set $dstCur (i32.add (local.get $dstCur) (local.get $length)))
             (br $cmdLoop)
           )
@@ -2098,17 +2132,20 @@
         (local.set $off32Stream (i32.add (local.get $off32Stream) (i32.const 4)))
         (local.set $recentOffs (i32.sub (local.get $match) (local.get $dstCur)))
 
-        ;; Copy match (long)
-        (block $matchLong2Done
-          (loop $matchLong2Loop
-            (br_if $matchLong2Done (i32.le_s (local.get $length) (i32.const 0)))
-            (call $copy64 (local.get $dstCur) (local.get $match))
-            (call $copy64 (i32.add (local.get $dstCur) (i32.const 8))
-                          (i32.add (local.get $match) (i32.const 8)))
-            (local.set $dstCur (i32.add (local.get $dstCur) (i32.const 16)))
-            (local.set $match (i32.add (local.get $match) (i32.const 16)))
-            (local.set $length (i32.sub (local.get $length) (i32.const 16)))
-            (br $matchLong2Loop)
+        ;; Copy match (long) — SIMD if offset >= 16
+        (if (i32.ge_u (i32.sub (local.get $dstCur) (local.get $match)) (i32.const 16))
+          (then
+            (call $wildcopy16 (local.get $dstCur) (local.get $match)
+              (i32.add (local.get $dstCur) (local.get $length)))
+          )
+          (else
+            (local.set $litLen (i32.const 0))
+            (block $ml2Done (loop $ml2Loop
+              (br_if $ml2Done (i32.ge_u (local.get $litLen) (local.get $length)))
+              (i32.store8 (i32.add (local.get $dstCur) (local.get $litLen))
+                (i32.load8_u (i32.add (local.get $match) (local.get $litLen))))
+              (local.set $litLen (i32.add (local.get $litLen) (i32.const 1)))
+              (br $ml2Loop)))
           )
         )
         (local.set $dstCur (i32.add (local.get $dstCur) (local.get $length)))
@@ -5228,30 +5265,9 @@
         ;; ── Execute: copy literals ──
         (if (i32.eq (local.get $mode) (i32.const 1))
           (then
-            ;; Raw literals
-            (local.set $i (i32.const 0))
-            (block $litDone
-              (loop $litLoop
-                (br_if $litDone (i32.ge_u (local.get $i) (local.get $litLen)))
-                (if (i32.ge_s (local.get $i) (i32.const 8))
-                  (then)
-                  (else
-                    ;; Copy up to 8 bytes
-                    (if (i32.and (i32.eqz (local.get $i)) (i32.ge_u (local.get $litLen) (i32.const 8)))
-                      (then
-                        (call $copy64 (local.get $dst) (local.get $litStream))
-                        (local.set $i (i32.const 8))
-                        (br $litLoop)
-                      )
-                    )
-                  )
-                )
-                (i32.store8 (i32.add (local.get $dst) (local.get $i))
-                  (i32.load8_u (i32.add (local.get $litStream) (local.get $i))))
-                (local.set $i (i32.add (local.get $i) (i32.const 1)))
-                (br $litLoop)
-              )
-            )
+            ;; Raw literals — SIMD wildcopy
+            (call $wildcopy16 (local.get $dst) (local.get $litStream)
+              (i32.add (local.get $dst) (local.get $litLen)))
           )
           (else
             ;; Delta literals (mode 0) — add byte at PREVIOUS match offset
@@ -5275,14 +5291,25 @@
 
         ;; ── Execute: copy match ──
         (local.set $match (i32.add (local.get $dst) (local.get $tokOffset)))
-        (local.set $i (i32.const 0))
-        (block $matchDone
-          (loop $matchLoop
-            (br_if $matchDone (i32.ge_u (local.get $i) (local.get $matchLen)))
-            (i32.store8 (i32.add (local.get $dst) (local.get $i))
-              (i32.load8_u (i32.add (local.get $match) (local.get $i))))
-            (local.set $i (i32.add (local.get $i) (i32.const 1)))
-            (br $matchLoop)
+        ;; If offset >= 16, use SIMD wildcopy; else byte-at-a-time (overlap-safe)
+        (if (i32.ge_u (i32.sub (i32.const 0) (local.get $tokOffset)) (i32.const 16))
+          (then
+            ;; Non-overlapping: SIMD 16-byte copies
+            (call $wildcopy16 (local.get $dst) (local.get $match)
+              (i32.add (local.get $dst) (local.get $matchLen)))
+          )
+          (else
+            ;; Overlapping: byte-at-a-time
+            (local.set $i (i32.const 0))
+            (block $matchDone
+              (loop $matchLoop
+                (br_if $matchDone (i32.ge_u (local.get $i) (local.get $matchLen)))
+                (i32.store8 (i32.add (local.get $dst) (local.get $i))
+                  (i32.load8_u (i32.add (local.get $match) (local.get $i))))
+                (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                (br $matchLoop)
+              )
+            )
           )
         )
         (local.set $dst (i32.add (local.get $dst) (local.get $matchLen)))
