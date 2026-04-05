@@ -482,13 +482,13 @@
               )
             )
 
-            ;; NOTE: offset validation skipped — WASM memory is flat and
-            ;; matches may reference the initial 8 literal bytes at negative
-            ;; offsets from dstCur (valid within the output buffer region).
-
             ;; Match copy: matchLen = (cmd >> 3) & 0xF (max 15 bytes)
             (local.set $matchLen (i32.and (i32.shr_u (local.get $cmd) (i32.const 3)) (i32.const 0xF)))
             (local.set $match (i32.add (local.get $dstCur) (local.get $recentOffs)))
+            ;; Validate match source is within output buffer
+            (if (i32.lt_u (local.get $match) (local.get $dstStart))
+              (then (return (i32.const -1)))
+            )
             ;; Use SIMD only if offset >= 16 (no overlap)
             (if (i32.ge_u (i32.sub (i32.const 0) (local.get $recentOffs)) (i32.const 16))
               (then (call $copy128 (local.get $dstCur) (local.get $match)))
@@ -527,6 +527,9 @@
               (i32.sub (local.get $dst)
                 (i32.load (local.get $off32Stream))))
             (local.set $off32Stream (i32.add (local.get $off32Stream) (i32.const 4)))
+            (if (i32.lt_u (local.get $match) (local.get $dstStart))
+              (then (return (i32.const -1)))
+            )
             (local.set $recentOffs (i32.sub (local.get $match) (local.get $dstCur)))
 
             (if (i32.lt_s (i32.sub (local.get $dstEnd) (local.get $dstCur)) (local.get $length))
@@ -669,6 +672,12 @@
           (i32.sub (local.get $dst)
             (i32.load (local.get $off32Stream))))
         (local.set $off32Stream (i32.add (local.get $off32Stream) (i32.const 4)))
+        (if (i32.lt_u (local.get $match) (local.get $dstStart))
+          (then (return (i32.const -1)))
+        )
+        (if (i32.lt_s (i32.sub (local.get $dstEnd) (local.get $dstCur)) (local.get $length))
+          (then (return (i32.const -1)))
+        )
         (local.set $recentOffs (i32.sub (local.get $match) (local.get $dstCur)))
 
         (call $match_copy (local.get $dstCur) (local.get $match) (local.get $length))

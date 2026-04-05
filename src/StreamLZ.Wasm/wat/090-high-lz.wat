@@ -770,6 +770,13 @@
           )
         )
 
+        ;; Bounds check: ensure dst + litLen + matchLen <= dstEnd
+        (if (i32.gt_u
+              (i32.add (local.get $dst) (i32.add (local.get $litLen) (local.get $matchLen)))
+              (i32.add (local.get $dstStart) (i32.add (local.get $offset) (local.get $dstCount))))
+          (then (global.set $TRACE (i32.const -3020)) (return (i32.const -1)))
+        )
+
         ;; ── Execute: copy literals ──
         (if (i32.eq (local.get $mode) (i32.const 1))
           (then
@@ -799,6 +806,10 @@
 
         ;; ── Execute: copy match ──
         (local.set $match (i32.add (local.get $dst) (local.get $tokOffset)))
+        ;; Validate match source is within output buffer
+        (if (i32.lt_u (local.get $match) (local.get $dstStart))
+          (then (global.set $TRACE (i32.const -3021)) (return (i32.const -1)))
+        )
         (call $match_copy (local.get $dst) (local.get $match) (local.get $matchLen))
         (local.set $dst (i32.add (local.get $dst) (local.get $matchLen)))
 
