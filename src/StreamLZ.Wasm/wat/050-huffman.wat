@@ -1,6 +1,10 @@
-  ;; ============================================================
-  ;; Huffman Decoder
-  ;; ============================================================
+  ;; ── 050-huffman: Huffman decoder (old + new paths) ──────────
+  ;; Functions: $huff_init_prefix, $huff_read_code_lengths_old (gamma),
+  ;;   $huff_read_code_lengths_new (Golomb-Rice), $huff_make_lut,
+  ;;   $huff_reverse_lut, $huff_bswap32, $huff_decode_3stream,
+  ;;   $high_decode_huff
+  ;; LUTs at 0x200000: fwd len/sym (2×2048), rev len/sym (2×2048)
+  ;; Data segments: CodePrefixOrg (0x202540), GR tables (0x203000)
   ;;
   ;; Memory layout (at 0x00200000+):
   ;;   +0x0000: Forward LUT Bits2Len (2064 bytes)

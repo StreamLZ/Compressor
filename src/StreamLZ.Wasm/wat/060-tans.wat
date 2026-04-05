@@ -1,6 +1,8 @@
-  ;; ============================================================
-  ;; tANS Decoder
-  ;; ============================================================
+  ;; ── 060-tans: tANS decoder (sparse + Golomb-Rice tables) ───
+  ;; Functions: $tans_decode_table_sparse, $sort_bytes, $sort_u32s,
+  ;;   $tans_init_lut, $tans_decode, $high_decode_tans
+  ;; State: TANS_DATA at 0x210000, TANS_LUT at 0x210600 (32KB)
+  ;; 5-state forward/backward interleaved decode
   ;;
   ;; Memory layout (at 0x00210000+):
   ;;   +0x0000: TansData.AUsed (4), BUsed (4), A[256] (256), B[256] (1024) = 1288 bytes

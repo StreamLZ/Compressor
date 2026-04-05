@@ -1,6 +1,8 @@
-  ;; ============================================================
-  ;; FastLzTable — stored at fixed addresses 0x60..0xBF
-  ;; ============================================================
+  ;; ── 080-fast-lz: Fast codec decoder (L1-L5) ────────────────
+  ;; Functions: $fast_decode_chunk, $process_lz_runs, $process_mode
+  ;; FastLzTable at 0x60-0x98 (stream pointers)
+  ;; State: savedDist at 0x9C (persisted across 64KB iterations)
+  ;; Scratch: DECODE_SCRATCH at 0x101100, OFF32_SCRATCH at 0x141100
   ;; 0x60: litStart      (i32)
   ;; 0x64: litEnd        (i32)
   ;; 0x68: cmdStart      (i32)

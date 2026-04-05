@@ -1,6 +1,6 @@
-  ;; ============================================================
-  ;; Phase 4: Fast LZ Decoder
-  ;; ============================================================
+  ;; ── 030-copy: SIMD copy primitives and helpers ─────────────
+  ;; Functions: $copy64, $copy128, $wildcopy16, $read_be24,
+  ;;            $match_copy, $decode_far_offsets, $combine_off16
 
   ;; ── copy64 ─────────────────────────────────────────────────
   ;; Copy 8 bytes (may overlap for match copies with offset >= 8).

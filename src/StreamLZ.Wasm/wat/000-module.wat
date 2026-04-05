@@ -1,7 +1,7 @@
 (module
   ;; ============================================================
-  ;; StreamLZ WASM Decompressor — L1 (Fast) only
-  ;; Hand-coded WAT for minimum size and maximum performance.
+  ;; StreamLZ WASM Decompressor
+  ;; Hand-coded WAT — all levels L1-L11, SIMD128, parallel L6-L8
   ;; ============================================================
   ;;
   ;; Memory layout (64 KB pages):

@@ -1,6 +1,8 @@
-  ;; ============================================================
-  ;; Full frame decompressor (L1 only)
-  ;; ============================================================
+  ;; ── 100-decompress: Top-level entry points ─────────────────
+  ;; Functions: decompress (export), decompressChunk (export), $decode_block
+  ;; decompress: parses SLZ1 frame, iterates blocks
+  ;; decompressChunk: direct SC chunk decode (used by parallel workers)
+  ;; decode_block: decodes one block's 256KB chunks with sub-chunk loop
   ;;
   ;; decompress(inputLen) → decompressed size, or -1 on error.
   ;; Input is at INPUT_BASE, output at OUTPUT_BASE.

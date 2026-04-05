@@ -1,6 +1,8 @@
-  ;; ============================================================
-  ;; Phase 3: Entropy Decoder (High_DecodeBytes)
-  ;; ============================================================
+  ;; ── 040-entropy: Entropy stream dispatcher ─────────────────
+  ;; Functions: $high_decode_bytes (dispatcher), $high_decode_recursive,
+  ;;            $high_decode_rle
+  ;; Dispatches: type 0=memcopy, 1=tANS, 2/4=Huffman, 3=RLE, 5=recursive
+  ;; Writes: ENT_DECODED_SIZE at 0x50
   ;;
   ;; Entropy block header format:
   ;;   chunkType = (byte0 >> 4) & 7

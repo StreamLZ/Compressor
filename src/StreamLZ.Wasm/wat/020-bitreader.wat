@@ -1,6 +1,8 @@
-  ;; ============================================================
-  ;; Phase 2: Bit Reader
-  ;; ============================================================
+  ;; ── 020-bitreader: Forward/backward MSB-first bit readers ───
+  ;; Functions: $br_init, $br_refill, $br_read_bits[_no_refill][_zero],
+  ;;            $br_read_bit, $br2_init, $br2_refill, $br2_read_bits[_no_refill]
+  ;; State: BR forward 0x30-0x3C (p, pEnd, bits, bitPos)
+  ;;         BR2 backward 0x40-0x4C (p, pEnd, bits, bitPos)
   ;; State stored at fixed addresses (0x30..0x4F):
   ;;   0x30: p      (i32) — current read position (byte address)
   ;;   0x34: pEnd   (i32) — end of stream (byte address)

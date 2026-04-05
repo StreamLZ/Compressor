@@ -1,6 +1,8 @@
-  ;; ============================================================
-  ;; Golomb-Rice Decoder
-  ;; ============================================================
+  ;; ── 070-golomb-rice: Golomb-Rice decoders + range builders ──
+  ;; Functions: $decode_golomb_rice_lengths, $decode_golomb_rice_bits,
+  ;;   $br_read_fluff, $huff_convert_to_ranges, $tans_decode_table_gr
+  ;; Uses: GR BitReader2 at 0xC0-0xC8
+  ;; Scratch: TANS_GR_RICE at 0x220000, TANS_GR_RANGE at 0x220210
   ;; Uses BitReader2 state at addresses 0xC0..0xCB:
   ;;   0xC0: P (i32), 0xC4: PEnd (i32), 0xC8: Bitpos (i32)
 

@@ -1,4 +1,9 @@
 
+  ;; ── 010-frame: SLZ1 frame and block header parsing ──────────
+  ;; Functions: $parseFrameHeader, $parseBlockHeader
+  ;; Reads: INPUT_BASE (0x400000)
+  ;; Writes: header fields at 0x00-0x1F, block info at 0x20-0x24
+
   (func $parseFrameHeader (export "parseFrameHeader") (param $inputLen i32) (result i32)
     (local $pos i32)
     (local $base i32)
