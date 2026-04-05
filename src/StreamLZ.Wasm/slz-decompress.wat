@@ -576,12 +576,7 @@
             (if (i32.lt_s (i32.sub (local.get $srcEnd) (local.get $src)) (i32.const 3))
               (then (return (i32.const -1)))
             )
-            (local.set $srcSize
-              (i32.or
-                (i32.or
-                  (i32.shl (i32.load8_u (local.get $src)) (i32.const 16))
-                  (i32.shl (i32.load8_u (i32.add (local.get $src) (i32.const 1))) (i32.const 8)))
-                (i32.load8_u (i32.add (local.get $src) (i32.const 2)))))
+            (local.set $srcSize (call $read_be24 (local.get $src)))
             (local.set $src (i32.add (local.get $src) (i32.const 3)))
           )
         )
@@ -614,12 +609,7 @@
         (if (i32.lt_s (i32.sub (local.get $srcEnd) (local.get $src)) (i32.const 3))
           (then (return (i32.const -1)))
         )
-        (local.set $bits
-          (i32.or
-            (i32.or
-              (i32.shl (i32.load8_u (local.get $src)) (i32.const 16))
-              (i32.shl (i32.load8_u (i32.add (local.get $src) (i32.const 1))) (i32.const 8)))
-            (i32.load8_u (i32.add (local.get $src) (i32.const 2)))))
+        (local.set $bits (call $read_be24 (local.get $src)))
         (local.set $srcSize (i32.and (local.get $bits) (i32.const 0x3FF)))
         (local.set $dstSize
           (i32.add
@@ -1003,6 +993,13 @@
     )
   )
 
+  ;; ── read_be24 ────────────────────────────────────────────────
+  ;; Read 3-byte big-endian value from memory address.
+  ;; Loads 4 bytes LE, byte-swaps to BE, shifts right 8 to get top 3 bytes.
+  (func $read_be24 (param $addr i32) (result i32)
+    (i32.shr_u (call $huff_bswap32 (i32.load (local.get $addr))) (i32.const 8))
+  )
+
   ;; ── match_copy ───────────────────────────────────────────────
   ;; Copy match bytes: SIMD wildcopy if offset >= 16, else byte-at-a-time
   ;; for overlapping matches. Used by both Fast and High decoders.
@@ -1365,12 +1362,7 @@
           (then (global.set $TRACE (i32.const -2001)) (return (i32.const -1)))
         )
 
-        (local.set $subHdr
-          (i32.or
-            (i32.or
-              (i32.shl (i32.load8_u (local.get $src)) (i32.const 16))
-              (i32.shl (i32.load8_u (i32.add (local.get $src) (i32.const 1))) (i32.const 8)))
-            (i32.load8_u (i32.add (local.get $src) (i32.const 2)))))
+        (local.set $subHdr (call $read_be24 (local.get $src)))
 
         ;; Check compressed flag (bit 23)
         (if (i32.eqz (i32.and (local.get $subHdr) (i32.const 0x800000)))
