@@ -2029,26 +2029,10 @@
                 )
               )
               (else
-                (block $litLongRawDone
-                  (loop $litLongRawLoop
-                    (br_if $litLongRawDone (i32.le_s (local.get $length) (i32.const 0)))
-                    (if (i32.ge_s (local.get $length) (i32.const 8))
-                      (then
-                        (call $copy64 (local.get $dstCur) (local.get $litStream))
-                        (local.set $dstCur (i32.add (local.get $dstCur) (i32.const 8)))
-                        (local.set $litStream (i32.add (local.get $litStream) (i32.const 8)))
-                        (local.set $length (i32.sub (local.get $length) (i32.const 8)))
-                      )
-                      (else
-                        (i32.store8 (local.get $dstCur) (i32.load8_u (local.get $litStream)))
-                        (local.set $dstCur (i32.add (local.get $dstCur) (i32.const 1)))
-                        (local.set $litStream (i32.add (local.get $litStream) (i32.const 1)))
-                        (local.set $length (i32.sub (local.get $length) (i32.const 1)))
-                      )
-                    )
-                    (br $litLongRawLoop)
-                  )
-                )
+                ;; Raw long literal: bulk copy via memory.copy
+                (memory.copy (local.get $dstCur) (local.get $litStream) (local.get $length))
+                (local.set $dstCur (i32.add (local.get $dstCur) (local.get $length)))
+                (local.set $litStream (i32.add (local.get $litStream) (local.get $length)))
               )
             )
             (br $cmdLoop)
@@ -2182,26 +2166,10 @@
         )
       )
       (else
-        (block $tailRawDone
-          (loop $tailRawLoop
-            (br_if $tailRawDone (i32.le_s (local.get $remaining) (i32.const 0)))
-            (if (i32.ge_s (local.get $remaining) (i32.const 8))
-              (then
-                (call $copy64 (local.get $dstCur) (local.get $litStream))
-                (local.set $dstCur (i32.add (local.get $dstCur) (i32.const 8)))
-                (local.set $litStream (i32.add (local.get $litStream) (i32.const 8)))
-                (local.set $remaining (i32.sub (local.get $remaining) (i32.const 8)))
-              )
-              (else
-                (i32.store8 (local.get $dstCur) (i32.load8_u (local.get $litStream)))
-                (local.set $dstCur (i32.add (local.get $dstCur) (i32.const 1)))
-                (local.set $litStream (i32.add (local.get $litStream) (i32.const 1)))
-                (local.set $remaining (i32.sub (local.get $remaining) (i32.const 1)))
-              )
-            )
-            (br $tailRawLoop)
-          )
-        )
+        ;; Raw trailing literals: bulk copy via memory.copy
+        (memory.copy (local.get $dstCur) (local.get $litStream) (local.get $remaining))
+        (local.set $dstCur (i32.add (local.get $dstCur) (local.get $remaining)))
+        (local.set $litStream (i32.add (local.get $litStream) (local.get $remaining)))
       )
     )
 
@@ -5272,7 +5240,7 @@
         ;; ── Execute: copy literals ──
         (if (i32.eq (local.get $mode) (i32.const 1))
           (then
-            ;; Raw literals — SIMD wildcopy
+            ;; Raw literals — SIMD wildcopy (faster than memory.copy for small litLen 0-3)
             (call $wildcopy16 (local.get $dst) (local.get $litStream)
               (i32.add (local.get $dst) (local.get $litLen)))
           )
@@ -5334,17 +5302,10 @@
       (local.get $dst)))
     (if (i32.eq (local.get $mode) (i32.const 1))
       (then
-        ;; Raw trailing literals
-        (block $trailDone
-          (loop $trailLoop
-            (br_if $trailDone (i32.le_s (local.get $remaining) (i32.const 0)))
-            (i32.store8 (local.get $dst) (i32.load8_u (local.get $litStream)))
-            (local.set $dst (i32.add (local.get $dst) (i32.const 1)))
-            (local.set $litStream (i32.add (local.get $litStream) (i32.const 1)))
-            (local.set $remaining (i32.sub (local.get $remaining) (i32.const 1)))
-            (br $trailLoop)
-          )
-        )
+        ;; Raw trailing literals: bulk copy via memory.copy
+        (memory.copy (local.get $dst) (local.get $litStream) (local.get $remaining))
+        (local.set $dst (i32.add (local.get $dst) (local.get $remaining)))
+        (local.set $litStream (i32.add (local.get $litStream) (local.get $remaining)))
       )
       (else
         ;; Delta trailing literals
