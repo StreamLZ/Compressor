@@ -728,36 +728,30 @@
           )
         )
 
-        ;; Resolve offset from carousel
-        ;; offIdx 0 = recent3 (MRU), 1 = recent4, 2 = recent5, 3 = new from stream
-        (if (i32.eq (local.get $offIdx) (i32.const 0))
-          (then (local.set $tokOffset (local.get $recent3)))
-        )
-        (if (i32.eq (local.get $offIdx) (i32.const 1))
-          (then
-            (local.set $tokOffset (local.get $recent4))
-            ;; Rotate: 4→temp, 3→4
-            (local.set $recent4 (local.get $recent3))
-            (local.set $recent3 (local.get $tokOffset))
-          )
-        )
-        (if (i32.eq (local.get $offIdx) (i32.const 2))
-          (then
-            (local.set $tokOffset (local.get $recent5))
-            (local.set $recent5 (local.get $recent4))
-            (local.set $recent4 (local.get $recent3))
-            (local.set $recent3 (local.get $tokOffset))
-          )
-        )
-        (if (i32.eq (local.get $offIdx) (i32.const 3))
-          (then
-            (local.set $tokOffset (i32.load (local.get $offsStream)))
-            (local.set $offsStream (i32.add (local.get $offsStream) (i32.const 4)))
-            (local.set $recent5 (local.get $recent4))
-            (local.set $recent4 (local.get $recent3))
-            (local.set $recent3 (local.get $tokOffset))
-          )
-        )
+        ;; Resolve offset from carousel via br_table (offIdx 0-3)
+        (block $offDone (block $off3 (block $off2 (block $off1 (block $off0
+          (br_table $off0 $off1 $off2 $off3 (local.get $offIdx))
+        ) ;; off0: MRU (most common ~60%)
+          (local.set $tokOffset (local.get $recent3))
+          (br $offDone)
+        ) ;; off1: swap recent3/recent4
+          (local.set $tokOffset (local.get $recent4))
+          (local.set $recent4 (local.get $recent3))
+          (local.set $recent3 (local.get $tokOffset))
+          (br $offDone)
+        ) ;; off2: rotate recent5→3
+          (local.set $tokOffset (local.get $recent5))
+          (local.set $recent5 (local.get $recent4))
+          (local.set $recent4 (local.get $recent3))
+          (local.set $recent3 (local.get $tokOffset))
+          (br $offDone)
+        ) ;; off3: new from stream
+          (local.set $tokOffset (i32.load (local.get $offsStream)))
+          (local.set $offsStream (i32.add (local.get $offsStream) (i32.const 4)))
+          (local.set $recent5 (local.get $recent4))
+          (local.set $recent4 (local.get $recent3))
+          (local.set $recent3 (local.get $tokOffset))
+        ) ;; offDone
 
         ;; Resolve match length (15 = read from length stream + 14)
         (if (i32.eq (local.get $matchLen) (i32.const 15))
@@ -1569,36 +1563,30 @@
           )
         )
 
-        ;; Resolve offset from carousel
-        ;; offIdx 0 = recent3 (MRU), 1 = recent4, 2 = recent5, 3 = new from stream
-        (if (i32.eq (local.get $offIdx) (i32.const 0))
-          (then (local.set $tokOffset (local.get $recent3)))
-        )
-        (if (i32.eq (local.get $offIdx) (i32.const 1))
-          (then
-            (local.set $tokOffset (local.get $recent4))
-            ;; Rotate: 4→temp, 3→4
-            (local.set $recent4 (local.get $recent3))
-            (local.set $recent3 (local.get $tokOffset))
-          )
-        )
-        (if (i32.eq (local.get $offIdx) (i32.const 2))
-          (then
-            (local.set $tokOffset (local.get $recent5))
-            (local.set $recent5 (local.get $recent4))
-            (local.set $recent4 (local.get $recent3))
-            (local.set $recent3 (local.get $tokOffset))
-          )
-        )
-        (if (i32.eq (local.get $offIdx) (i32.const 3))
-          (then
-            (local.set $tokOffset (i32.load (local.get $offsStream)))
-            (local.set $offsStream (i32.add (local.get $offsStream) (i32.const 4)))
-            (local.set $recent5 (local.get $recent4))
-            (local.set $recent4 (local.get $recent3))
-            (local.set $recent3 (local.get $tokOffset))
-          )
-        )
+        ;; Resolve offset from carousel via br_table (offIdx 0-3)
+        (block $offDone (block $off3 (block $off2 (block $off1 (block $off0
+          (br_table $off0 $off1 $off2 $off3 (local.get $offIdx))
+        ) ;; off0: MRU (most common ~60%)
+          (local.set $tokOffset (local.get $recent3))
+          (br $offDone)
+        ) ;; off1: swap recent3/recent4
+          (local.set $tokOffset (local.get $recent4))
+          (local.set $recent4 (local.get $recent3))
+          (local.set $recent3 (local.get $tokOffset))
+          (br $offDone)
+        ) ;; off2: rotate recent5→3
+          (local.set $tokOffset (local.get $recent5))
+          (local.set $recent5 (local.get $recent4))
+          (local.set $recent4 (local.get $recent3))
+          (local.set $recent3 (local.get $tokOffset))
+          (br $offDone)
+        ) ;; off3: new from stream
+          (local.set $tokOffset (i32.load (local.get $offsStream)))
+          (local.set $offsStream (i32.add (local.get $offsStream) (i32.const 4)))
+          (local.set $recent5 (local.get $recent4))
+          (local.set $recent4 (local.get $recent3))
+          (local.set $recent3 (local.get $tokOffset))
+        ) ;; offDone
 
         ;; Resolve match length (15 = read from length stream + 14)
         (if (i32.eq (local.get $matchLen) (i32.const 15))
