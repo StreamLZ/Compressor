@@ -2,6 +2,7 @@
 
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
 
 namespace StreamLZ.Decompression.High;
@@ -28,6 +29,20 @@ internal static unsafe partial class LzDecoder
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void CopyLiteralAddExact(byte* dst, byte* src, byte* delta, int length)
     {
+        if (Avx2.IsSupported)
+        {
+            while (length >= 32)
+            {
+                var vs = Vector256.Load(src);
+                var vd = Vector256.Load(delta);
+                Avx2.Add(vs, vd).Store(dst);
+                dst += 32;
+                src += 32;
+                delta += 32;
+                length -= 32;
+            }
+        }
+
         while (length >= 8)
         {
             CopyHelpers.Copy64Add(dst, src, delta);
