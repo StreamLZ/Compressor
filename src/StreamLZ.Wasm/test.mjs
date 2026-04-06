@@ -46,7 +46,8 @@ function compressWithDotnet(data, level) {
 
 async function loadWasm() {
   const wasmBytes = readFileSync(WASM_PATH);
-  const { instance } = await WebAssembly.instantiate(wasmBytes);
+  const memory = new WebAssembly.Memory({ initial: 128, maximum: 65536, shared: true });
+  const { instance } = await WebAssembly.instantiate(wasmBytes, { env: { memory } });
   return instance.exports;
 }
 

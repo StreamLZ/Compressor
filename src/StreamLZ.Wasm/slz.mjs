@@ -103,7 +103,45 @@ function scanFrame(data) {
     prefixBase = headerSize + 8 + blockCompSize - (chunks.length - 1) * 8;
   }
 
-  return { contentSize: blockDecompSize, codec, isSC, chunks, prefixBase, headerSize };
+  // Non-SC High: scan sub-chunks for two-phase parallel
+  let subChunks = null;
+  // Non-SC High: scan 256KB chunk boundaries for two-phase parallel
+  // Each chunk: 2-byte block header + 4-byte chunk header (contains total compressed size)
+  // Phase 1 workers process entire chunks (both sub-chunks within)
+  let twoPhaseChunks = null;
+  if (!isSC && codec === 0 && blockDecompSize > 262144) {
+    twoPhaseChunks = [];
+    let p = slzPos;
+    let dstOff = 0;
+    while (dstOff < blockDecompSize && p + 6 <= data.length) {
+      const b0 = data[p];
+      if ((b0 & 0x0F) !== 5) break;
+      const chunkDstSize = Math.min(262144, blockDecompSize - dstOff);
+      if (b0 & 0x80) {
+        // Uncompressed chunk
+        twoPhaseChunks.push({ srcOffset: p, srcLen: 2 + chunkDstSize, dstOffset: dstOff, dstSize: chunkDstSize, isUncomp: true });
+        p += 2 + chunkDstSize;
+      } else {
+        // Compressed chunk: read 4-byte chunk header after 2-byte block header
+        const chunkHdr = data[p+2] | (data[p+3] << 8) | (data[p+4] << 16) | (data[p+5] << 24);
+        const compSz = (chunkHdr & 0x3FFFF) + 1;
+        const chunkType = (chunkHdr >> 18) & 3;
+        if (chunkType === 1) {
+          // Memset
+          twoPhaseChunks.push({ srcOffset: p, srcLen: 7, dstOffset: dstOff, dstSize: chunkDstSize, isMemset: true, fillByte: data[p + 6] });
+          p += 7;
+        } else {
+          // Normal compressed: block hdr(2) + chunk hdr(4) + payload(compSz)
+          twoPhaseChunks.push({ srcOffset: p, srcLen: 2 + 4 + compSz, dstOffset: dstOff, dstSize: chunkDstSize });
+          p += 2 + 4 + compSz;
+        }
+      }
+      dstOff += chunkDstSize;
+    }
+    if (twoPhaseChunks.length < 2) twoPhaseChunks = null;
+  }
+
+  return { contentSize: blockDecompSize, codec, isSC, chunks, prefixBase, headerSize, twoPhaseChunks };
 }
 
 // ── Error messages ───────────────────────────────────────────
@@ -211,11 +249,20 @@ class WorkerPool {
 // ── Single-threaded decompress ───────────────────────────────
 
 let _singleInstance = null;
+let _sharedMemory = null;
+
+function getSharedMemory() {
+  if (!_sharedMemory) {
+    _sharedMemory = new WebAssembly.Memory({ initial: 128, maximum: 65536, shared: true });
+  }
+  return _sharedMemory;
+}
 
 async function getSingleInstance() {
   if (!_singleInstance) {
     const module = await getWasmModule();
-    const instance = await WebAssembly.instantiate(module);
+    const memory = getSharedMemory();
+    const instance = await WebAssembly.instantiate(module, { env: { memory } });
     _singleInstance = instance.exports;
   }
   return _singleInstance;
@@ -291,6 +338,153 @@ async function decompressParallel(data, frame, pool) {
   return new Uint8Array(outputSAB);
 }
 
+// ── Two-phase parallel decompress (L9-L11 non-SC) ───────────
+// Phase 1 (parallel): workers run hlzPhase1 (entropy decode + offset unpack)
+// Phase 2 (serial): main thread runs hlzPhase2 (token resolve + match copy)
+
+const HLZ_SCRATCH_BASE = 0x00230000;
+const HLZ_SCRATCH_SIZE = 0x00140020; // 0x230000 to 0x370020
+
+async function decompressTwoPhase(data, frame, pool) {
+  const { subChunks, contentSize } = frame;
+  await getSingleInstance();
+  const wasm = _singleInstance;
+
+  // Ensure main thread WASM has enough memory for full output
+  ensureCapacity(wasm, data.length, contentSize);
+  const inputBase = wasm.getInputBase();
+  const outputBase = wasm.getOutputBase();
+
+  // Copy compressed data to main WASM input buffer (for initial 8 bytes + stored sub-chunks)
+  let mem = new Uint8Array(wasm.memory.buffer);
+  mem.set(data, inputBase);
+
+  // Shared input buffer for workers
+  const inputSAB = new SharedArrayBuffer(data.length);
+  new Uint8Array(inputSAB).set(data);
+
+  // Partition sub-chunks into exactly coreCount groups (one dispatch per core)
+  const _t = { setup: 0, p1: 0, p2copy: 0, p2run: 0 };
+  const coreCount = pool.size;
+  const lzSubChunks = subChunks.filter(sc => !sc.isUncomp && !sc.isStored);
+  const groupSize = Math.ceil(lzSubChunks.length / coreCount);
+  const numGroups = Math.min(coreCount, Math.ceil(lzSubChunks.length / groupSize));
+
+  // Handle special sub-chunks on main thread first
+  for (const sc of subChunks) {
+    if (sc.isStored) {
+      mem = new Uint8Array(wasm.memory.buffer);
+      mem.copyWithin(outputBase + sc.dstOffset, inputBase + sc.srcOffset, inputBase + sc.srcOffset + sc.dstSize);
+    } else if (sc.isUncomp) {
+      mem = new Uint8Array(wasm.memory.buffer);
+      mem.copyWithin(outputBase + sc.dstOffset, inputBase + sc.srcOffset + 2, inputBase + sc.srcOffset + 2 + sc.dstSize);
+    }
+  }
+
+  // Allocate scratch SAB: one slot per LZ sub-chunk
+  const maxGroupSC = groupSize;
+  const scratchSAB = new SharedArrayBuffer(numGroups * maxGroupSC * HLZ_SCRATCH_SIZE);
+
+  // Phase 1: dispatch one message per core, each with a group of sub-chunks
+  let _t0 = performance.now();
+  const phase1Promises = [];
+  const groupMeta = []; // track which sub-chunks are in each group
+
+  for (let g = 0; g < numGroups; g++) {
+    const start = g * groupSize;
+    const end = Math.min(start + groupSize, lzSubChunks.length);
+    const group = [];
+    for (let k = start; k < end; k++) {
+      const sc = lzSubChunks[k];
+      group.push({
+        inputOffset: sc.srcOffset,
+        inputLen: sc.srcLen,
+        dstSize: sc.dstSize,
+        dstOffset: sc.dstOffset,
+        mode: sc.mode
+      });
+    }
+    groupMeta.push({ start, count: end - start });
+
+    phase1Promises.push(pool.dispatch({
+      type: 'phase1_batch',
+      inputSAB,
+      subChunks: group,
+      scratchSAB,
+      scratchBaseOffset: g * maxGroupSC * HLZ_SCRATCH_SIZE,
+      batchIndex: g
+    }).then(result => {
+      if (!result.ok) throw new Error(`Phase1 group ${g} failed (${result.error})`);
+      return result;
+    }));
+  }
+  await Promise.all(phase1Promises);
+  _t.p1 = performance.now() - _t0;
+
+  // Phase 2: serial resolve on main thread, processing ALL sub-chunks in order
+  _t0 = performance.now();
+  const scratchView = new Uint8Array(scratchSAB);
+  mem = new Uint8Array(wasm.memory.buffer);
+
+  for (let g = 0; g < numGroups; g++) {
+    const { start, count } = groupMeta[g];
+    for (let k = 0; k < count; k++) {
+      const sc = lzSubChunks[start + k];
+      const tableOff = (g * maxGroupSC + k) * HLZ_SCRATCH_SIZE;
+
+      // Read stream sizes from compact scratch
+      const dv32 = new DataView(scratchSAB, tableOff, 32);
+      const cmdSize = dv32.getInt32(0x04, true);
+      const offsSize = dv32.getInt32(0x0C, true);
+      const litSize = dv32.getInt32(0x14, true);
+      const lenSize = dv32.getInt32(0x1C, true);
+
+      // Copy decoded streams to main WASM's HLZ scratch area
+      const HLZ_SCRATCH_DATA = HLZ_SCRATCH_BASE + 0x20;
+      let dataOff = tableOff + 32;
+      const litDst = HLZ_SCRATCH_DATA;
+      mem = new Uint8Array(wasm.memory.buffer);
+      mem.set(scratchView.subarray(dataOff, dataOff + litSize), litDst);
+      dataOff += litSize;
+      const cmdDst = litDst + litSize;
+      mem.set(scratchView.subarray(dataOff, dataOff + cmdSize), cmdDst);
+      dataOff += cmdSize;
+      mem.set(scratchView.subarray(dataOff, dataOff + offsSize * 4), 0x00270020);
+      dataOff += offsSize * 4;
+      mem.set(scratchView.subarray(dataOff, dataOff + lenSize * 4), 0x002F0020);
+
+      // Write HLZ_TABLE with corrected pointers
+      const dv = new DataView(wasm.memory.buffer);
+      dv.setInt32(HLZ_SCRATCH_BASE + 0x00, cmdDst, true);
+      dv.setInt32(HLZ_SCRATCH_BASE + 0x04, cmdSize, true);
+      dv.setInt32(HLZ_SCRATCH_BASE + 0x08, 0x00270020, true);
+      dv.setInt32(HLZ_SCRATCH_BASE + 0x0C, offsSize, true);
+      dv.setInt32(HLZ_SCRATCH_BASE + 0x10, litDst, true);
+      dv.setInt32(HLZ_SCRATCH_BASE + 0x14, litSize, true);
+      dv.setInt32(HLZ_SCRATCH_BASE + 0x18, 0x002F0020, true);
+      dv.setInt32(HLZ_SCRATCH_BASE + 0x1C, lenSize, true);
+
+      // Initial 8 literal bytes for first sub-chunk
+      if (sc.dstOffset === 0) {
+        mem.copyWithin(outputBase, inputBase + sc.srcOffset, inputBase + sc.srcOffset + 8);
+      }
+
+      // Run Phase 2 on main thread
+      const result = wasm.hlzPhase2(
+        outputBase + sc.dstOffset,
+        sc.dstSize,
+        sc.mode,
+        outputBase
+      );
+      if (result < 0) throw new Error(`Phase2 sub-chunk failed (trace: ${wasm.getTrace()})`);
+    }
+  }
+
+  _t.p2run = performance.now() - _t0;
+  console.log(`TwoPhase: P1=${_t.p1.toFixed(1)}ms P2=${_t.p2run.toFixed(1)}ms groups=${numGroups} subChunks=${lzSubChunks.length} groupSize=${groupSize}`);
+  return new Uint8Array(wasm.memory.buffer.slice(outputBase, outputBase + contentSize));
+}
+
 // ── Public API ───────────────────────────────────────────────
 
 let _pool = null;
@@ -348,6 +542,23 @@ export async function decompress(data, options = {}) {
     }
 
     return decompressParallel(data, frame, _pool);
+  }
+
+  // L9-L11 non-SC High with multiple chunks → two-phase parallel
+  if (frame.twoPhaseChunks && threads !== 1 && hasSharedArrayBuffer) {
+    const lzChunks = frame.twoPhaseChunks.filter(c => !c.isUncomp && !c.isMemset);
+    if (lzChunks.length >= 2) {
+      const coreCount = threads > 0 ? threads : await getCoreCount();
+      const numWorkers = Math.min(coreCount, lzSubChunks.length);
+
+      if (!_pool || _pool.size < numWorkers) {
+        if (_pool) _pool.terminate();
+        _pool = new WorkerPool(numWorkers);
+        await _pool.init();
+      }
+
+      return decompressTwoPhase(data, frame, _pool);
+    }
   }
 
   // Single-threaded fallback

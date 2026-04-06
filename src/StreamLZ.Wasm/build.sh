@@ -22,5 +22,5 @@ cat \
   "$WAT_DIR"/900-data.wat \
   > "$OUT_WAT"
 
-wat2wasm "$OUT_WAT" -o "$OUT_WASM" --debug-names
+wat2wasm "$OUT_WAT" -o "$OUT_WASM" --debug-names --enable-threads
 echo "Built slz-decompress.wasm ($(wc -c < "$OUT_WASM") bytes)"

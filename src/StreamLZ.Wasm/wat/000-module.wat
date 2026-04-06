@@ -15,7 +15,8 @@
   ;; memory as needed for large files.
   ;; ============================================================
 
-  (memory (export "memory") 128 65536)  ;; 128 pages initial (8 MB), max 4 GB
+  (memory (import "env" "memory") 128 65536 shared)  ;; shared, JS-created, 8 MB initial, 4 GB max
+  (export "memory" (memory 0))
 
   ;; ── Constants ──────────────────────────────────────────────
   ;; Frame magic: 'S','L','Z','1' = 0x534C5A31 written as LE bytes 31 5A 4C 53
