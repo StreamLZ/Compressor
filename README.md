@@ -44,19 +44,25 @@ byte[] max = Slz.CompressFramed(data, SlzCompressionLevel.Maximum);
 
 ## Compression Levels
 
-| Level | Compress | Decompress | Ratio (enwik8) | Description |
-|-------|----------|------------|----------------|-------------|
-| 1 | 378 MB/s | 5.6 GB/s | 58.6% | Fastest |
-| 2 | 294 MB/s | 5.3 GB/s | 56.9% | |
-| 3 | 276 MB/s | 5.0 GB/s | 56.5% | |
-| 4 | 283 MB/s | 5.0 GB/s | 54.0% | |
-| 5 | 60 MB/s | 4.8 GB/s | 42.2% | |
-| **6** | **58 MB/s** | **5.3 GB/s** | **33.7%** | **Default** |
-| 7 | 41 MB/s | 5.6 GB/s | 33.6% | |
-| 8 | 33 MB/s | 5.6 GB/s | 33.7% | |
-| 9 | 5.9 MB/s | 1.3 GB/s | 27.4% | |
-| 10 | 5.7 MB/s | 1.3 GB/s | 27.2% | |
-| 11 | 5.4 MB/s | 1.2 GB/s | 27.3% | Maximum ratio |
+| Level | Compress | Decompress | Ratio (enwik8) | Threading |
+|-------|----------|------------|----------------|-----------|
+| 1 | 378 MB/s | 5.6 GB/s | 58.6% | Compress: single, Decompress: single |
+| 2 | 294 MB/s | 5.3 GB/s | 56.9% | " |
+| 3 | 276 MB/s | 5.0 GB/s | 56.5% | " |
+| 4 | 283 MB/s | 5.0 GB/s | 54.0% | " |
+| 5 | 60 MB/s | 4.8 GB/s | 42.2% | " |
+| **6** | **58 MB/s** | **5.3 GB/s** | **33.7%** | **Compress: parallel, Decompress: parallel** |
+| 7 | 41 MB/s | 5.6 GB/s | 33.6% | " |
+| 8 | 33 MB/s | 5.6 GB/s | 33.7% | " |
+| 9 | 5.9 MB/s | 1.3 GB/s | 27.4% | Compress: single, Decompress: parallel (entropy) |
+| 10 | 5.7 MB/s | 1.3 GB/s | 27.2% | " |
+| 11 | 5.4 MB/s | 1.2 GB/s | 27.3% | " |
+
+### Threading Model
+
+- **L1-L5 (Fast codec):** Single-threaded compress and decompress. The high decompress throughput (5+ GB/s) comes from the simple token format, not parallelism.
+- **L6-L8 (High codec, self-contained):** Fully parallel. Each 256KB chunk is compressed and decompressed independently via `Parallel.For`. This is why L6 decompresses at 5.3 GB/s despite using a more complex codec than L1.
+- **L9-L11 (High codec, sliding window):** Compression is single-threaded (chunks reference previous output). Decompression uses two-phase parallelism: entropy decoding (Huffman/tANS) runs in parallel across chunks, then match resolution runs serially since matches can cross chunk boundaries.
 
 ## API
 
@@ -194,7 +200,7 @@ Slz.WarmUp();
 | Zstd 19 | 24.9% | 3.5 MB/s | 1,109 MB/s |
 | **SLZ L11** | **24.7%** | **7.3 MB/s** | **1,650 MB/s** |
 
-*All benchmarks on Intel Arrow Lake-S (Ultra 9 285K), .NET 10, multi-threaded.*
+*All benchmarks on Intel Arrow Lake-S (Ultra 9 285K), .NET 10. L6-L8 use parallel compress/decompress; L9-L11 use parallel entropy decode; L1-L5 are single-threaded.*
 
 ## License
 
