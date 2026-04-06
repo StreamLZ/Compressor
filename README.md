@@ -44,25 +44,21 @@ byte[] max = Slz.CompressFramed(data, SlzCompressionLevel.Maximum);
 
 ## Compression Levels
 
-| Level | Compress | Decompress | Ratio (enwik8) | Threading |
-|-------|----------|------------|----------------|-----------|
-| 1 | 378 MB/s | 5.6 GB/s | 58.6% | Compress: single, Decompress: single |
-| 2 | 294 MB/s | 5.3 GB/s | 56.9% | " |
-| 3 | 276 MB/s | 5.0 GB/s | 56.5% | " |
-| 4 | 283 MB/s | 5.0 GB/s | 54.0% | " |
-| 5 | 60 MB/s | 4.8 GB/s | 42.2% | " |
-| **6** | **58 MB/s** | **5.3 GB/s** | **33.7%** | **Compress: parallel, Decompress: parallel** |
-| 7 | 41 MB/s | 5.6 GB/s | 33.6% | " |
-| 8 | 33 MB/s | 5.6 GB/s | 33.7% | " |
-| 9 | 5.9 MB/s | 1.3 GB/s | 27.4% | Compress: single, Decompress: parallel (entropy) |
-| 10 | 5.7 MB/s | 1.3 GB/s | 27.2% | " |
-| 11 | 5.4 MB/s | 1.2 GB/s | 27.3% | " |
+| Level | Compress | Decompress | Ratio (enwik8) | MT Compress | MT Decompress |
+|-------|----------|------------|----------------|:-----------:|:-------------:|
+| 1 | 378 MB/s | 5.6 GB/s | 58.6% | | |
+| 2 | 294 MB/s | 5.3 GB/s | 56.9% | | |
+| 3 | 276 MB/s | 5.0 GB/s | 56.5% | | |
+| 4 | 283 MB/s | 5.0 GB/s | 54.0% | | |
+| 5 | 60 MB/s | 4.8 GB/s | 42.2% | | |
+| **6** | **58 MB/s** | **5.3 GB/s** | **33.7%** | **yes** | **yes** |
+| 7 | 41 MB/s | 5.6 GB/s | 33.6% | yes | yes |
+| 8 | 33 MB/s | 5.6 GB/s | 33.7% | yes | yes |
+| 9 | 5.9 MB/s | 1.3 GB/s | 27.4% | | yes |
+| 10 | 5.7 MB/s | 1.3 GB/s | 27.2% | | yes |
+| 11 | 5.4 MB/s | 1.2 GB/s | 27.3% | | yes |
 
-### Threading Model
-
-- **L1-L5 (Fast codec):** Single-threaded compress and decompress. The high decompress throughput (5+ GB/s) comes from the simple token format, not parallelism.
-- **L6-L8 (High codec, self-contained):** Fully parallel. Each 256KB chunk is compressed and decompressed independently via `Parallel.For`. This is why L6 decompresses at 5.3 GB/s despite using a more complex codec than L1.
-- **L9-L11 (High codec, sliding window):** Compression is single-threaded (chunks reference previous output). Decompression uses two-phase parallelism: entropy decoding (Huffman/tANS) runs in parallel across chunks, then match resolution runs serially since matches can cross chunk boundaries.
+See [Threading Model](#threading-model) below for details on how parallelism works at each level.
 
 ## API
 
@@ -180,10 +176,10 @@ Slz.WarmUp();
 | LZ4 Max | 41.9% | 23 MB/s | 4,541 MB/s | 1T |
 | **SLZ L5** | **42.2%** | **58 MB/s** | **4,768 MB/s** | **1T** |
 | Zstd 3 | 35.5% | 287 MB/s | 935 MB/s | 1T |
-| **SLZ L6** | **33.7%** | **60 MB/s** | **5,610 MB/s** | **MT compress + decompress** |
+| **SLZ L6** | **33.7%** | **60 MB/s** | **5,610 MB/s** | **MT** |
 | Zstd 9 | 31.1% | 66 MB/s | 1,343 MB/s | 1T |
 | Zstd 19 | 26.9% | 2.1 MB/s | 1,109 MB/s | 1T |
-| **SLZ L11** | **27.3%** | **5.3 MB/s** | **1,272 MB/s** | **MT decompress (entropy)** |
+| **SLZ L11** | **27.3%** | **5.3 MB/s** | **1,272 MB/s** | **MT decompress** |
 
 ### silesia (212 MB mixed, 3-run median)
 
@@ -195,12 +191,22 @@ Slz.WarmUp();
 | Zstd 1 | 34.5% | 533 MB/s | 1,409 MB/s | 1T |
 | LZ4 Max | 36.3% | 17 MB/s | 4,832 MB/s | 1T |
 | **SLZ L5** | **36.4%** | **81 MB/s** | **5,204 MB/s** | **1T** |
-| **SLZ L6** | **28.2%** | **85 MB/s** | **8,824 MB/s** | **MT compress + decompress** |
+| **SLZ L6** | **28.2%** | **85 MB/s** | **8,824 MB/s** | **MT** |
 | Zstd 9 | 27.9% | 90 MB/s | 1,561 MB/s | 1T |
 | Zstd 19 | 24.9% | 3.5 MB/s | 1,109 MB/s | 1T |
-| **SLZ L11** | **24.7%** | **7.3 MB/s** | **1,650 MB/s** | **MT decompress (entropy)** |
+| **SLZ L11** | **24.7%** | **7.3 MB/s** | **1,650 MB/s** | **MT decompress** |
 
-*1T = single-threaded. MT = multi-threaded (24-core). All benchmarks on Intel Arrow Lake-S (Ultra 9 285K), .NET 10. See [Threading Model](#threading-model) above for details.*
+*1T = single-threaded. MT = multi-threaded (24-core). All benchmarks on Intel Arrow Lake-S (Ultra 9 285K), .NET 10.*
+
+## Threading Model
+
+StreamLZ uses different threading strategies depending on the compression level:
+
+- **L1-L5 (Fast codec):** Single-threaded compress and decompress. The high decompress throughput (5+ GB/s) comes from the simple token format, not parallelism.
+- **L6-L8 (High codec, self-contained):** Fully parallel. Each 256KB chunk is compressed and decompressed independently across all available cores. This is why L6 decompresses at 5.3 GB/s despite using a more complex codec than L1.
+- **L9-L11 (High codec, sliding window):** Compression is single-threaded because chunks reference previous output via a sliding window. Decompression is multi-threaded using a batched two-phase approach: entropy decoding (Huffman/tANS) runs in parallel across a batch of chunks on all cores, then match resolution runs serially since matches can cross chunk boundaries. This yields ~47% faster decompression than fully serial.
+
+Compression thread count can be limited with the `maxThreads` parameter (e.g. for server workloads). Decompression threading is automatic and cannot be disabled.
 
 ## License
 
