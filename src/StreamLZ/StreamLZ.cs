@@ -251,7 +251,7 @@ public static class Slz
                         if (pos + compSize > compressed.Length)
                             throw new InvalidDataException("Unexpected end of data in compressed block.");
                         int written = StreamLZDecoder.Decompress(
-                            pSrc + pos, compSize, pDst + dstOff, decompSize, dstOffset: dstOff);
+                            pSrc + pos, compSize, pDst, decompSize, dstOffset: dstOff);
                         if (written < 0)
                             throw new InvalidDataException("Block decompression failed.");
                         decompSize = written;
@@ -330,7 +330,7 @@ public static class Slz
                     else
                     {
                         int written = StreamLZDecoder.Decompress(
-                            pSrc + pos, compSize, pDst + dstOff, decompSize, dstOffset: dstOff);
+                            pSrc + pos, compSize, pDst, decompSize, dstOffset: dstOff);
                         if (written < 0)
                             throw new InvalidDataException("Block decompression failed.");
                         decompSize = written;
