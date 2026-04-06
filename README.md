@@ -4,7 +4,7 @@ High-performance LZ compression library for .NET with streaming support.
 
 ## Features
 
-- **Up to 8.8 GB/s decompress** (L6, silesia), **down to 27% ratio** (L11, enwik8)
+- **Up to 8.8 GB/s decompress** (level 6, silesia), **down to 27% ratio** (level 11, enwik8)
 - **Simple level scale** (1-11) — higher = better ratio, slower
 - **Streaming** — SLZ1 frame format supports files of any size
 - **Sliding window** — cross-block match references for better ratio
