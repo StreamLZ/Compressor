@@ -204,7 +204,11 @@ StreamLZ uses different threading strategies depending on the compression level:
 
 - **L1-L5 (Fast codec):** Single-threaded compress and decompress. The high decompress throughput (5+ GB/s) comes from the simple token format, not parallelism.
 - **L6-L8 (High codec, self-contained):** Fully parallel. Each 256KB chunk is compressed and decompressed independently across all available cores. This is why L6 decompresses at 5.3 GB/s despite using a more complex codec than L1.
-- **L9-L11 (High codec, sliding window):** Compression is single-threaded because chunks reference previous output via a sliding window. Decompression is multi-threaded using a batched two-phase approach: entropy decoding (Huffman/tANS) runs in parallel across a batch of chunks on all cores, then match resolution runs serially since matches can cross chunk boundaries. This yields ~47% faster decompression than fully serial.
+- **L9-L11 (High codec, sliding window):** Compression is single-threaded because chunks reference previous output via a sliding window. Decompression uses a batched two-phase approach that processes chunks in batches of `ProcessorCount` (e.g. 24 on a 24-core machine). For each batch:
+  1. **Phase 1 (parallel):** `ReadLzTable` runs on all chunks in the batch simultaneously — this decodes the entropy streams (Huffman/tANS) and unpacks offsets, which is the most CPU-intensive part.
+  2. **Phase 2 (serial):** `ProcessLzRuns` resolves tokens and copies literals/matches for each chunk in order, since match copies can reference output from earlier chunks.
+
+  Then the next batch starts. This yields ~47% faster decompression than fully serial on a 24-core machine.
 
 Compression thread count can be limited with the `maxThreads` parameter (e.g. for server workloads). Decompression threading is automatic and cannot be disabled.
 
