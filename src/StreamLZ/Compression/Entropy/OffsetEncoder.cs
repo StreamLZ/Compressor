@@ -27,6 +27,19 @@ internal static unsafe class OffsetEncoder
     [SkipLocalsInit]
     public static void SubtractBytes(byte* dst, byte* src, nuint len, nuint negOffset)
     {
+        if (Vector256.IsHardwareAccelerated)
+        {
+            while (len >= 32)
+            {
+                var a = Vector256.Load(src);
+                var b = Vector256.Load(src + negOffset);
+                Vector256.Store(a - b, dst);
+                src += 32;
+                dst += 32;
+                len -= 32;
+            }
+        }
+
         if (Vector128.IsHardwareAccelerated)
         {
             while (len >= 16)
@@ -57,33 +70,37 @@ internal static unsafe class OffsetEncoder
     [SkipLocalsInit]
     public static void SubtractBytesUnsafe(byte* dst, byte* src, nuint len, nuint negOffset)
     {
+        if (Vector256.IsHardwareAccelerated)
+        {
+            while (len >= 32)
+            {
+                var a = Vector256.Load(src);
+                var b = Vector256.Load(src + negOffset);
+                Vector256.Store(a - b, dst);
+                src += 32;
+                dst += 32;
+                len -= 32;
+            }
+        }
+
         if (Vector128.IsHardwareAccelerated)
         {
-            if (len > 8)
+            while (len >= 16)
             {
-                nuint loops = (len + 7) / 16;
-                do
-                {
-                    var a = Vector128.Load(src);
-                    var b = Vector128.Load(src + negOffset);
-                    Vector128.Store(a - b, dst);
-                    src += 16;
-                    dst += 16;
-                } while (--loops != 0);
+                var a = Vector128.Load(src);
+                var b = Vector128.Load(src + negOffset);
+                Vector128.Store(a - b, dst);
+                src += 16;
+                dst += 16;
+                len -= 16;
             }
-
-            // Final 8-byte tail: scalar subtraction (8 bytes is below Vector128 width,
-            // and there's no cross-platform 64-bit vector load)
-            for (nuint i = 0; i < 8; i++)
-                dst[i] = (byte)(src[i] - src[i + negOffset]);
         }
-        else
+
+        while (len > 0)
         {
-            // Scalar fallback
-            for (nuint i = 0; i < len; i++)
-            {
-                dst[i] = (byte)(src[i] - src[i + negOffset]);
-            }
+            *dst++ = (byte)(*src - src[negOffset]);
+            src++;
+            len--;
         }
     }
 
