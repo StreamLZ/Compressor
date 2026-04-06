@@ -3,12 +3,13 @@
 ## [1.1.0]
 
 ### Fixed
-- **Critical**: Fix crash decompressing L9-L11 files larger than ~400MB.
-  The raw compressor's OOM fallback silently produced self-contained
-  blocks, losing the sliding window advantage and causing the decompressor
-  to read past block boundaries. Now uses the framed compressor for
-  correct multi-block handling at all file sizes.
-- Fix double-offset bug in fast-path `DecompressFramed` that caused
+- Fix CLI `-b` benchmark crash on L9-L11 files larger than ~400MB.
+  The benchmark used the raw `Compress`/`Decompress` API, which on OOM
+  silently fell back to self-contained blocks, losing sliding window
+  context and producing incorrect ratios. The public framed APIs
+  (`CompressFile`, `DecompressFile`, `CompressFramed`) were never
+  affected. CLI now uses the framed API for correct results at all sizes.
+- Fix double-offset bug in new fast-path `DecompressFramed` that caused
   crashes on multi-block framed data (second block onwards).
 
 ### Performance
