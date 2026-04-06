@@ -65,14 +65,14 @@ internal static class ComparisonBenchmark
         string name = $"SLZ L{level}";
 
         // Warmup
-        byte[] compressed = Slz.Compress(src, level);
+        byte[] compressed = Slz.CompressFramed(src, level);
 
         // Compress
         long[] times = new long[runs];
         for (int r = 0; r < runs; r++)
         {
             var sw = Stopwatch.StartNew();
-            compressed = Slz.Compress(src, level);
+            compressed = Slz.CompressFramed(src, level);
             sw.Stop();
             times[r] = sw.ElapsedMilliseconds;
         }
@@ -80,15 +80,14 @@ internal static class ComparisonBenchmark
         double compMbps = (double)src.Length / (times[runs / 2] / 1000.0) / (1024 * 1024);
 
         // Decompress warmup
-        byte[] decompressed = new byte[src.Length + Slz.SafeSpace];
-        Slz.Decompress(compressed, decompressed, src.Length);
+        byte[] decompressed = Slz.DecompressFramed(compressed, maxDecompressedSize: -1);
 
         // Decompress
         times = new long[runs];
         for (int r = 0; r < runs; r++)
         {
             var sw = Stopwatch.StartNew();
-            Slz.Decompress(compressed, decompressed, src.Length);
+            decompressed = Slz.DecompressFramed(compressed, maxDecompressedSize: -1);
             sw.Stop();
             times[r] = sw.ElapsedMilliseconds;
         }

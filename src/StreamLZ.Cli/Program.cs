@@ -304,21 +304,14 @@ unsafe
 
     if (mode == "b")
     {
-        // Benchmark mode — map unified level to internal codec + level
-        var mapped = Slz.MapLevel(level);
-        var codec = mapped.Codec;
-        int codecLevel = mapped.CodecLevel;
-        bool selfContained = mapped.SelfContained;
+        // Benchmark mode — use framed API (handles multi-block correctly for large files)
+        // Pre-JIT hot paths
+        _ = Slz.SafeSpace;
 
-        int compBound = StreamLZCompressor.GetCompressBound(src.Length);
-        byte[] compressed = new byte[compBound];
+        // Warmup compress (framed API handles sliding window properly for all file sizes)
+        byte[] compressed = Slz.CompressFramed(src, level);
 
-        // Warmup compress
-        int compSize;
-        fixed (byte* pSrc = src) fixed (byte* pDst = compressed)
-            compSize = StreamLZCompressor.Compress(pSrc, src.Length, pDst, compressed.Length, codec, codecLevel, threads, selfContained);
-
-        Console.WriteLine($"Level {level}: {src.Length:N0} -> {compSize:N0} bytes ({(double)compSize / src.Length * 100:F1}%)");
+        Console.WriteLine($"Level {level}: {src.Length:N0} -> {compressed.Length:N0} bytes ({(double)compressed.Length / src.Length * 100:F1}%)");
         Console.WriteLine();
 
         // Compress benchmark
@@ -326,8 +319,7 @@ unsafe
         for (int r = 0; r < runs; r++)
         {
             var sw = Stopwatch.StartNew();
-            fixed (byte* pSrc = src) fixed (byte* pDst = compressed)
-                compSize = StreamLZCompressor.Compress(pSrc, src.Length, pDst, compressed.Length, codec, codecLevel, threads, selfContained);
+            compressed = Slz.CompressFramed(src, level);
             sw.Stop();
             compTimes[r] = sw.ElapsedMilliseconds;
             double mbps = (double)src.Length / sw.Elapsed.TotalSeconds / (1024 * 1024);
@@ -340,21 +332,16 @@ unsafe
         Console.WriteLine($"  Compress median: {compMedian:N0}ms ({compMbps:F1} MB/s)");
         Console.WriteLine();
 
-        // Decompress benchmark
-        byte[] decompressed = new byte[src.Length + StreamLZDecoder.SafeSpace];
-
-        // Pre-JIT decompressor hot paths (triggered by touching Slz)
-        _ = Slz.SafeSpace;
+        // Decompress benchmark (framed API — includes frame parsing overhead)
+        byte[] decompressed = Slz.DecompressFramed(compressed, maxDecompressedSize: -1);
 
         long[] decompTimes = new long[runs];
         for (int r = 0; r < runs; r++)
         {
             var sw = Stopwatch.StartNew();
-            int decompSize;
-            fixed (byte* pComp = compressed) fixed (byte* pDecomp = decompressed)
-                decompSize = StreamLZDecoder.Decompress(pComp, compSize, pDecomp, src.Length);
+            decompressed = Slz.DecompressFramed(compressed, maxDecompressedSize: -1);
             sw.Stop();
-            if (decompSize < 0) Console.Error.WriteLine($"[CLI] Decompress FAILED: returned {decompSize}");
+            if (decompressed.Length != src.Length) Console.Error.WriteLine($"[CLI] Decompress size mismatch: {decompressed.Length} != {src.Length}");
             decompTimes[r] = sw.ElapsedMilliseconds;
             double mbps = (double)src.Length / sw.Elapsed.TotalSeconds / (1024 * 1024);
             Console.WriteLine($"  Decompress run {r + 1}: {decompTimes[r]:N0}ms ({mbps:F1} MB/s)");
@@ -367,7 +354,7 @@ unsafe
         Console.WriteLine();
 
         // Verify
-        bool match = new Span<byte>(decompressed, 0, src.Length).SequenceEqual(src);
+        bool match = decompressed != null && decompressed.AsSpan(0, src.Length).SequenceEqual(src);
         Console.WriteLine($"Round-trip: {(match ? "PASS" : "FAIL")}");
         if (!match)
         {
