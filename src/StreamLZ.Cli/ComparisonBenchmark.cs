@@ -68,31 +68,32 @@ internal static class ComparisonBenchmark
         byte[] compressed = Slz.CompressFramed(src, level);
 
         // Compress
-        long[] times = new long[runs];
+        double[] compSec = new double[runs];
         for (int r = 0; r < runs; r++)
         {
             var sw = Stopwatch.StartNew();
             compressed = Slz.CompressFramed(src, level);
             sw.Stop();
-            times[r] = sw.ElapsedMilliseconds;
+            compSec[r] = sw.Elapsed.TotalSeconds;
         }
-        Array.Sort(times);
-        double compMbps = (double)src.Length / (times[runs / 2] / 1000.0) / (1024 * 1024);
+        Array.Sort(compSec);
+        double compMbps = (double)src.Length / compSec[runs / 2] / (1024 * 1024);
 
-        // Decompress warmup
-        byte[] decompressed = Slz.DecompressFramed(compressed, maxDecompressedSize: -1);
+        // Decompress warmup + fast-path (Span overload avoids MemoryStream)
+        byte[] decompBuf = new byte[src.Length + Slz.SafeSpace];
+        Slz.DecompressFramed((ReadOnlySpan<byte>)compressed, (Span<byte>)decompBuf);
 
         // Decompress
-        times = new long[runs];
+        double[] decompSec = new double[runs];
         for (int r = 0; r < runs; r++)
         {
             var sw = Stopwatch.StartNew();
-            decompressed = Slz.DecompressFramed(compressed, maxDecompressedSize: -1);
+            Slz.DecompressFramed((ReadOnlySpan<byte>)compressed, (Span<byte>)decompBuf);
             sw.Stop();
-            times[r] = sw.ElapsedMilliseconds;
+            decompSec[r] = sw.Elapsed.TotalSeconds;
         }
-        Array.Sort(times);
-        double decompMbps = (double)src.Length / (times[runs / 2] / 1000.0) / (1024 * 1024);
+        Array.Sort(decompSec);
+        double decompMbps = (double)src.Length / decompSec[runs / 2] / (1024 * 1024);
 
         Console.WriteLine($"  {name}: {compressed.Length:N0} bytes, compress {compMbps:F1} MB/s, decompress {decompMbps:F1} MB/s");
         return new BenchResult(name, compressed.Length, compMbps, decompMbps);
