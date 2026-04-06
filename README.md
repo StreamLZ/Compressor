@@ -8,7 +8,7 @@ High-performance LZ compression library for .NET with streaming support.
 - **Simple level scale** (1-11) — higher = better ratio, slower
 - **Streaming** — SLZ1 frame format supports files of any size
 - **Sliding window** — cross-block match references for better ratio
-- **Parallel compression** — automatic multi-threading with configurable thread limits
+- **Parallel compress and decompress** — automatic multi-threading at L6+ (see [Threading Model](#threading-model))
 - **Async** — `CompressFileAsync`, `DecompressFileAsync`, `IAsyncDisposable` on `SlzStream`
 - **Validation** — `TryDecompress` (non-throwing), `IsValidFrame`, content checksums
 - **Zero allocations** on the hot path (pooled scratch buffers)

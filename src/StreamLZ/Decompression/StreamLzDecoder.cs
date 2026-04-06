@@ -493,8 +493,9 @@ internal static unsafe class StreamLZDecoder
         }
 
         // Two-phase parallel: High non-SC with multiple chunks.
-        // Overlaps entropy decode of chunk N+1 with match resolution of chunk N.
-        // Benchmarked at +37% on L9 enwik8 (917 → 1255 MB/s).
+        // Batched: parallel ReadLzTable (entropy + offset unpack) for N chunks,
+        // then serial ProcessLzRuns (match resolve) for those N chunks, repeat.
+        // Benchmarked at +47% on L9 enwik8 (891 → 1306 MB/s, 24-core).
         if (srcLen >= 2)
         {
             StreamLZHeader peekHdr2 = default;
