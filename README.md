@@ -44,19 +44,19 @@ byte[] max = Slz.CompressFramed(data, SlzCompressionLevel.Maximum);
 
 ## Compression Levels
 
-| Level | Compress | Decompress | Ratio (enwik8) | MT Compress | MT Decompress |
-|-------|----------|------------|----------------|:-----------:|:-------------:|
+| Level | Compress | Decompress | Ratio (enwik8) | Parallel Compress | Parallel Decompress |
+|-------|----------|------------|----------------|:-----------------:|:-------------------:|
 | 1 | 378 MB/s | 5.6 GB/s | 58.6% | | |
 | 2 | 294 MB/s | 5.3 GB/s | 56.9% | | |
 | 3 | 276 MB/s | 5.0 GB/s | 56.5% | | |
 | 4 | 283 MB/s | 5.0 GB/s | 54.0% | | |
 | 5 | 60 MB/s | 4.8 GB/s | 42.2% | | |
-| **6** | **58 MB/s** | **5.3 GB/s** | **33.7%** | **yes** | **yes** |
-| 7 | 41 MB/s | 5.6 GB/s | 33.6% | yes | yes |
-| 8 | 33 MB/s | 5.6 GB/s | 33.7% | yes | yes |
-| 9 | 5.9 MB/s | 1.3 GB/s | 27.4% | | yes |
-| 10 | 5.7 MB/s | 1.3 GB/s | 27.2% | | yes |
-| 11 | 5.4 MB/s | 1.2 GB/s | 27.3% | | yes |
+| **6** | **58 MB/s** | **5.3 GB/s** | **33.7%** | :white_check_mark: | :white_check_mark: |
+| 7 | 41 MB/s | 5.6 GB/s | 33.6% | :white_check_mark: | :white_check_mark: |
+| 8 | 33 MB/s | 5.6 GB/s | 33.7% | :white_check_mark: | :white_check_mark: |
+| 9 | 5.9 MB/s | 1.3 GB/s | 27.4% | | :white_check_mark: |
+| 10 | 5.7 MB/s | 1.3 GB/s | 27.2% | | :white_check_mark: |
+| 11 | 5.4 MB/s | 1.2 GB/s | 27.3% | | :white_check_mark: |
 
 See [Threading Model](#threading-model) below for details on how parallelism works at each level.
 
@@ -167,36 +167,36 @@ Slz.WarmUp();
 
 ### enwik8 (100 MB text, 3-run median)
 
-| Compressor | Ratio | Compress | Decompress | Notes |
-|---|---|---|---|---|
-| Snappy | 56.7% | 492 MB/s | 1,192 MB/s | 1T |
-| LZ4 Fast | 57.3% | 516 MB/s | 4,335 MB/s | 1T |
-| **SLZ L1** | **58.6%** | **357 MB/s** | **5,298 MB/s** | **1T** |
-| Zstd 1 | 40.7% | 393 MB/s | 1,177 MB/s | 1T |
-| LZ4 Max | 41.9% | 23 MB/s | 4,541 MB/s | 1T |
-| **SLZ L5** | **42.2%** | **58 MB/s** | **4,768 MB/s** | **1T** |
-| Zstd 3 | 35.5% | 287 MB/s | 935 MB/s | 1T |
-| **SLZ L6** | **33.7%** | **60 MB/s** | **5,610 MB/s** | **MT** |
-| Zstd 9 | 31.1% | 66 MB/s | 1,343 MB/s | 1T |
-| Zstd 19 | 26.9% | 2.1 MB/s | 1,109 MB/s | 1T |
-| **SLZ L11** | **27.3%** | **5.3 MB/s** | **1,272 MB/s** | **MT decompress** |
+| Compressor | Ratio | Compress | Decompress | Parallel Compress | Parallel Decompress |
+|---|---|---|---|:-:|:-:|
+| Snappy | 56.7% | 492 MB/s | 1,192 MB/s | | |
+| LZ4 Fast | 57.3% | 516 MB/s | 4,335 MB/s | | |
+| **SLZ L1** | **58.6%** | **357 MB/s** | **5,298 MB/s** | | |
+| Zstd 1 | 40.7% | 393 MB/s | 1,177 MB/s | | |
+| LZ4 Max | 41.9% | 23 MB/s | 4,541 MB/s | | |
+| **SLZ L5** | **42.2%** | **58 MB/s** | **4,768 MB/s** | | |
+| Zstd 3 | 35.5% | 287 MB/s | 935 MB/s | | |
+| **SLZ L6** | **33.7%** | **60 MB/s** | **5,610 MB/s** | :white_check_mark: | :white_check_mark: |
+| Zstd 9 | 31.1% | 66 MB/s | 1,343 MB/s | | |
+| Zstd 19 | 26.9% | 2.1 MB/s | 1,109 MB/s | | |
+| **SLZ L11** | **27.3%** | **5.3 MB/s** | **1,272 MB/s** | | :white_check_mark: |
 
 ### silesia (212 MB mixed, 3-run median)
 
-| Compressor | Ratio | Compress | Decompress | Notes |
-|---|---|---|---|---|
-| Snappy | 48.1% | 700 MB/s | 1,326 MB/s | 1T |
-| LZ4 Fast | 47.4% | 715 MB/s | 4,510 MB/s | 1T |
-| **SLZ L1** | **47.1%** | **546 MB/s** | **6,150 MB/s** | **1T** |
-| Zstd 1 | 34.5% | 533 MB/s | 1,409 MB/s | 1T |
-| LZ4 Max | 36.3% | 17 MB/s | 4,832 MB/s | 1T |
-| **SLZ L5** | **36.4%** | **81 MB/s** | **5,204 MB/s** | **1T** |
-| **SLZ L6** | **28.2%** | **85 MB/s** | **8,824 MB/s** | **MT** |
-| Zstd 9 | 27.9% | 90 MB/s | 1,561 MB/s | 1T |
-| Zstd 19 | 24.9% | 3.5 MB/s | 1,109 MB/s | 1T |
-| **SLZ L11** | **24.7%** | **7.3 MB/s** | **1,650 MB/s** | **MT decompress** |
+| Compressor | Ratio | Compress | Decompress | Parallel Compress | Parallel Decompress |
+|---|---|---|---|:-:|:-:|
+| Snappy | 48.1% | 700 MB/s | 1,326 MB/s | | |
+| LZ4 Fast | 47.4% | 715 MB/s | 4,510 MB/s | | |
+| **SLZ L1** | **47.1%** | **546 MB/s** | **6,150 MB/s** | | |
+| Zstd 1 | 34.5% | 533 MB/s | 1,409 MB/s | | |
+| LZ4 Max | 36.3% | 17 MB/s | 4,832 MB/s | | |
+| **SLZ L5** | **36.4%** | **81 MB/s** | **5,204 MB/s** | | |
+| **SLZ L6** | **28.2%** | **85 MB/s** | **8,824 MB/s** | :white_check_mark: | :white_check_mark: |
+| Zstd 9 | 27.9% | 90 MB/s | 1,561 MB/s | | |
+| Zstd 19 | 24.9% | 3.5 MB/s | 1,109 MB/s | | |
+| **SLZ L11** | **24.7%** | **7.3 MB/s** | **1,650 MB/s** | | :white_check_mark: |
 
-*1T = single-threaded. MT = multi-threaded (24-core). All benchmarks on Intel Arrow Lake-S (Ultra 9 285K), .NET 10.*
+*All benchmarks on Intel Arrow Lake-S (Ultra 9 285K), 24-core, .NET 10.*
 
 ## Threading Model
 
