@@ -54,9 +54,9 @@ byte[] max = Slz.CompressFramed(data, SlzCompressionLevel.Maximum);
 | **6** | **58 MB/s** | **5.3 GB/s** | **33.7%** | :white_check_mark: | :white_check_mark: |
 | 7 | 41 MB/s | 5.6 GB/s | 33.6% | :white_check_mark: | :white_check_mark: |
 | 8 | 33 MB/s | 5.6 GB/s | 33.7% | :white_check_mark: | :white_check_mark: |
-| 9 | 5.9 MB/s | 1.3 GB/s | 27.4% | | :white_check_mark: |
-| 10 | 5.7 MB/s | 1.3 GB/s | 27.2% | | :white_check_mark: |
-| 11 | 5.4 MB/s | 1.2 GB/s | 27.3% | | :white_check_mark: |
+| 9 | 5.9 MB/s | 1.3 GB/s | 27.4% | | partial |
+| 10 | 5.7 MB/s | 1.3 GB/s | 27.2% | | partial |
+| 11 | 5.4 MB/s | 1.2 GB/s | 27.3% | | partial |
 
 See [Threading Model](#threading-model) below for details on how parallelism works at each level.
 
@@ -179,7 +179,7 @@ Slz.WarmUp();
 | **SLZ L6** | **33.7%** | **60 MB/s** | **5,610 MB/s** | :white_check_mark: | :white_check_mark: |
 | Zstd 9 | 31.1% | 66 MB/s | 1,343 MB/s | | |
 | Zstd 19 | 26.9% | 2.1 MB/s | 1,109 MB/s | | |
-| **SLZ L11** | **27.3%** | **5.3 MB/s** | **1,272 MB/s** | | :white_check_mark: |
+| **SLZ L11** | **27.3%** | **5.3 MB/s** | **1,272 MB/s** | | **partial** |
 
 ### silesia (212 MB mixed, 3-run median)
 
@@ -194,7 +194,7 @@ Slz.WarmUp();
 | **SLZ L6** | **28.2%** | **85 MB/s** | **8,824 MB/s** | :white_check_mark: | :white_check_mark: |
 | Zstd 9 | 27.9% | 90 MB/s | 1,561 MB/s | | |
 | Zstd 19 | 24.9% | 3.5 MB/s | 1,109 MB/s | | |
-| **SLZ L11** | **24.7%** | **7.3 MB/s** | **1,650 MB/s** | | :white_check_mark: |
+| **SLZ L11** | **24.7%** | **7.3 MB/s** | **1,650 MB/s** | | **partial** |
 
 *All benchmarks on Intel Arrow Lake-S (Ultra 9 285K), 24-core, .NET 10.*
 
