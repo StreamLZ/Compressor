@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.1.0]
+
+### Fixed
+- **Critical**: Fix crash decompressing L9-L11 files larger than ~400MB.
+  The raw compressor's OOM fallback silently produced self-contained
+  blocks, losing the sliding window advantage and causing the decompressor
+  to read past block boundaries. Now uses the framed compressor for
+  correct multi-block handling at all file sizes.
+- Fix double-offset bug in fast-path `DecompressFramed` that caused
+  crashes on multi-block framed data (second block onwards).
+
+### Performance
+- Add zero-copy fast-path for `DecompressFramed(ReadOnlySpan, Span)`:
+  parses frame/block headers in-place and calls the block decompressor
+  directly without MemoryStream or buffer copies. Restores full
+  benchmark speed for framed API consumers.
+- CLI `-b` and `-bc` benchmarks now use framed compress (correct sliding
+  window) with fast-path framed decompress (no allocation overhead).
+
+### Changed
+- CLI `-b` benchmark switched from raw to framed API. Compression ratios
+  for L9-L11 on large files are now correct (enwik9 L9: was 29.9%
+  incorrect, now 24.2% correct).
+- README: document threading model per level, add Parallel Compress /
+  Parallel Decompress columns to all benchmark tables, fix headline stats.
+
 ## [1.0.9]
 
 ### Fixed
