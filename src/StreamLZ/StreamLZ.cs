@@ -472,6 +472,7 @@ public static class Slz
     /// <param name="input">Source stream containing SLZ1-framed compressed data.</param>
     /// <param name="output">Destination stream for decompressed output.</param>
     /// <param name="progress">Optional progress reporter. Reports total decompressed bytes written after each block.</param>
+    /// <param name="maxDecompressedSize">Maximum allowed decompressed output bytes. Pass -1 to disable the limit (default).</param>
     /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>Total decompressed bytes written.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="input"/> or <paramref name="output"/> is null.</exception>
@@ -483,8 +484,9 @@ public static class Slz
     /// move to the final destination only if no exception is thrown.
     /// </remarks>
     public static long DecompressStream(Stream input, Stream output,
-        IProgress<long>? progress = null, CancellationToken cancellationToken = default,
-        long maxDecompressedSize = -1)
+        IProgress<long>? progress = null,
+        long maxDecompressedSize = -1,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(input);
         ArgumentNullException.ThrowIfNull(output);
@@ -541,6 +543,7 @@ public static class Slz
     /// <param name="input">Source stream containing SLZ1-framed compressed data.</param>
     /// <param name="output">Destination stream for decompressed output.</param>
     /// <param name="progress">Optional progress reporter. Reports total decompressed bytes written after each block.</param>
+    /// <param name="maxDecompressedSize">Maximum allowed decompressed output bytes. Pass -1 to disable the limit (default).</param>
     /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>Total decompressed bytes written.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="input"/> or <paramref name="output"/> is null.</exception>
@@ -548,8 +551,8 @@ public static class Slz
     /// <exception cref="InvalidDataException">Thrown when the frame header is invalid or data is corrupt.</exception>
     public static async Task<long> DecompressStreamAsync(Stream input, Stream output,
         IProgress<long>? progress = null,
-        CancellationToken cancellationToken = default,
-        long maxDecompressedSize = -1)
+        long maxDecompressedSize = -1,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(input);
         ArgumentNullException.ThrowIfNull(output);
@@ -603,6 +606,7 @@ public static class Slz
     /// <param name="inputPath">Path to the compressed input file.</param>
     /// <param name="outputPath">Path to the decompressed output file.</param>
     /// <param name="progress">Optional progress reporter. Reports total decompressed bytes written after each block.</param>
+    /// <param name="maxDecompressedSize">Maximum allowed decompressed output bytes. Pass -1 to disable the limit (default).</param>
     /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>Total decompressed bytes written.</returns>
     /// <remarks>
@@ -611,8 +615,9 @@ public static class Slz
     /// decompress to a temporary path and rename only if no exception is thrown.
     /// </remarks>
     public static long DecompressFile(string inputPath, string outputPath,
-        IProgress<long>? progress = null, CancellationToken cancellationToken = default,
-        long maxDecompressedSize = -1)
+        IProgress<long>? progress = null,
+        long maxDecompressedSize = -1,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(inputPath);
         ArgumentNullException.ThrowIfNull(outputPath);
@@ -672,12 +677,13 @@ public static class Slz
     /// <param name="inputPath">Path to the compressed input file.</param>
     /// <param name="outputPath">Path to the decompressed output file.</param>
     /// <param name="progress">Optional progress reporter. Reports total decompressed bytes written after each block.</param>
+    /// <param name="maxDecompressedSize">Maximum allowed decompressed output bytes. Pass -1 to disable the limit (default).</param>
     /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>Total decompressed bytes written.</returns>
     public static async Task<long> DecompressFileAsync(string inputPath, string outputPath,
         IProgress<long>? progress = null,
-        CancellationToken cancellationToken = default,
-        long maxDecompressedSize = -1)
+        long maxDecompressedSize = -1,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(inputPath);
         ArgumentNullException.ThrowIfNull(outputPath);

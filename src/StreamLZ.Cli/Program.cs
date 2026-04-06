@@ -355,7 +355,7 @@ unsafe
         Console.WriteLine();
 
         // Verify
-        bool match = decompressed != null && decompressed.AsSpan(0, src.Length).SequenceEqual(src);
+        bool match = decompressed.AsSpan(0, src.Length).SequenceEqual(src);
         Console.WriteLine($"Round-trip: {(match ? "PASS" : "FAIL")}");
         if (!match)
         {

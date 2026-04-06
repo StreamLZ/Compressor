@@ -30,6 +30,7 @@ internal static unsafe class StreamLZDecoder
     /// </summary>
     /// <param name="hdr">Header structure to populate.</param>
     /// <param name="p">Pointer to the start of the header bytes.</param>
+    /// <param name="bytesRemaining">Number of valid bytes available at <paramref name="p"/>.</param>
     /// <returns>Pointer advanced past the header, or <c>null</c> if the header is invalid.</returns>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static byte* ParseHeader(ref StreamLZHeader hdr, byte* p, int bytesRemaining = int.MaxValue)
@@ -83,6 +84,7 @@ internal static unsafe class StreamLZDecoder
     /// <param name="hdr">Chunk header structure to populate.</param>
     /// <param name="p">Pointer to the start of the chunk header bytes.</param>
     /// <param name="useChecksum">Whether a 3-byte checksum follows the header.</param>
+    /// <param name="bytesRemaining">Number of valid bytes available at <paramref name="p"/>.</param>
     /// <returns>Pointer advanced past the header, or <c>null</c> if the header is invalid.</returns>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static byte* ParseChunkHeader(ref ChunkHeader hdr, byte* p, bool useChecksum, int bytesRemaining = int.MaxValue)

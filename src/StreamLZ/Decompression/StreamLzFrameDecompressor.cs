@@ -21,13 +21,15 @@ internal static class StreamLzFrameDecompressor
     /// <param name="output">Destination stream to write decompressed data to.</param>
     /// <param name="windowSize">Sliding window size for back-references (default 4MB, must match compressor).</param>
     /// <param name="progress">Optional progress reporter. Reports total decompressed bytes written after each block.</param>
+    /// <param name="maxDecompressedSize">Maximum allowed decompressed output bytes. Pass -1 to disable the limit (default).</param>
     /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>Total number of decompressed bytes written to <paramref name="output"/>.</returns>
     /// <exception cref="InvalidDataException">Thrown if the frame header is invalid or data is corrupt.</exception>
     public static long Decompress(Stream input, Stream output,
         int windowSize = FrameConstants.DefaultWindowSize,
-        IProgress<long>? progress = null, CancellationToken cancellationToken = default,
-        long maxDecompressedSize = -1)
+        IProgress<long>? progress = null,
+        long maxDecompressedSize = -1,
+        CancellationToken cancellationToken = default)
     {
         // Read and parse frame header
         byte[] headerBuf = new byte[FrameConstants.MaxHeaderSize];
@@ -200,6 +202,7 @@ internal static class StreamLzFrameDecompressor
     /// <param name="output">Destination stream to write decompressed data to.</param>
     /// <param name="windowSize">Sliding window size for back-references (default 4MB, must match compressor).</param>
     /// <param name="progress">Optional progress reporter. Reports total decompressed bytes written after each block.</param>
+    /// <param name="maxDecompressedSize">Maximum allowed decompressed output bytes. Pass -1 to disable the limit (default).</param>
     /// <param name="cancellationToken">Token to cancel the operation.</param>
     /// <returns>Total number of decompressed bytes written to <paramref name="output"/>.</returns>
     /// <exception cref="InvalidDataException">Thrown if the frame header is invalid or data is corrupt.</exception>
