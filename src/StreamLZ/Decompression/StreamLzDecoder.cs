@@ -482,31 +482,67 @@ internal static unsafe class StreamLZDecoder
     {
         // Self-contained streams: dispatch to parallel decompressor.
         // Delta prefix bytes at the tail resolve Mode 0 inter-chunk dependency.
-        if (srcLen >= 2)
+        // Multi-piece loop: Compress() may produce concatenated independent blocks
+        // when the input is too large for a single allocation. Each piece is self-contained
+        // or uses the two-phase path. We decompress piece by piece.
+        int totalWritten = 0;
+        byte* curSrc = src;
+        int curSrcLen = srcLen;
+        byte* curDst = dst;
+        int curDstLen = dstLen;
+
+        while (curDstLen > 0 && curSrcLen >= 2)
         {
             StreamLZHeader peekHdr = default;
-            byte* parseResult = ParseHeader(ref peekHdr, src, srcLen);
-            if (parseResult != null && peekHdr.SelfContained)
+            byte* parseResult = ParseHeader(ref peekHdr, curSrc, curSrcLen);
+            if (parseResult == null)
+                break;
+
+            int pieceWritten;
+            if (peekHdr.SelfContained)
             {
-                return DecompressCoreParallel(src, srcLen, dst, dstLen);
+                pieceWritten = DecompressCoreParallel(curSrc, curSrcLen, curDst, curDstLen);
             }
+            else if (peekHdr.DecoderType == CodecType.High && curDstLen > StreamLZConstants.ChunkSize)
+            {
+                pieceWritten = DecompressCoreTwoPhase(curSrc, curSrcLen, curDst, curDstLen);
+            }
+            else
+            {
+                pieceWritten = SerialDecodeLoop(curSrc, curSrcLen, curDst, curDstLen, scratch, scratchSize);
+            }
+
+            if (pieceWritten <= 0)
+                break;
+
+            totalWritten += pieceWritten;
+            curDst += pieceWritten;
+            curDstLen -= pieceWritten;
+
+            // Advance src past the piece we just decompressed.
+            // We need to figure out how many src bytes were consumed.
+            // For SC parallel, scan to find the end of this piece.
+            // For serial/two-phase, the piece consumes all remaining src.
+            if (curDstLen <= 0)
+                break; // done
+
+            // Multi-piece: scan forward to find where this piece's compressed data ends.
+            // Each piece's chunks account for exactly pieceWritten decompressed bytes.
+            // Re-scan to find src consumption.
+            var tmpChunks = new List<ChunkScanInfo>();
+            PreScanChunks(curSrc, curSrcLen, pieceWritten, tmpChunks, out _, requireUniformHighDecoder: false);
+            int srcConsumed = 0;
+            foreach (var c in tmpChunks)
+                srcConsumed = Math.Max(srcConsumed, c.SrcOffset + c.SrcSize);
+            // Add prefix bytes for SC
+            if (peekHdr.SelfContained && tmpChunks.Count > 1)
+                srcConsumed += (tmpChunks.Count - 1) * 8;
+
+            curSrc += srcConsumed;
+            curSrcLen -= srcConsumed;
         }
 
-        // Two-phase parallel: High non-SC with multiple chunks.
-        // Batched: parallel ReadLzTable (entropy + offset unpack) for N chunks,
-        // then serial ProcessLzRuns (match resolve) for those N chunks, repeat.
-        // Benchmarked at +47% on L9 enwik8 (891 → 1306 MB/s, 24-core).
-        if (srcLen >= 2)
-        {
-            StreamLZHeader peekHdr2 = default;
-            byte* pr2 = ParseHeader(ref peekHdr2, src, srcLen);
-            if (pr2 != null && peekHdr2.DecoderType == CodecType.High && dstLen > StreamLZConstants.ChunkSize)
-            {
-                return DecompressCoreTwoPhase(src, srcLen, dst, dstLen);
-            }
-        }
-
-        return SerialDecodeLoop(src, srcLen, dst, dstLen, scratch, scratchSize);
+        return totalWritten > 0 ? totalWritten : SerialDecodeLoop(src, srcLen, dst, dstLen, scratch, scratchSize);
     }
 
     // ----------------------------------------------------------------
@@ -566,10 +602,18 @@ internal static unsafe class StreamLZDecoder
             byte* sBefore = s;
 
             StreamLZHeader blkHdr = default;
-            byte* next = ParseHeader(ref blkHdr, s, (int)(src + srcLen - s));
+            int remaining = (int)(src + srcLen - s);
+            byte* next = ParseHeader(ref blkHdr, s, remaining);
             if (next == null)
             {
-                throw new InvalidDataException("StreamLZ pre-scan encountered invalid block header.");
+                // Multi-piece: hit the boundary of the next concatenated piece.
+                // Return what we've found so far — the caller will handle the next piece.
+                if (chunks.Count > 0)
+                    break;
+                throw new InvalidDataException(
+                    $"StreamLZ pre-scan encountered invalid block header at offset {(int)(s - src)} " +
+                    $"(remaining={remaining}, dstOff={dstOff}, dstRem={dstRem}, chunks={chunks.Count}, " +
+                    $"bytes=[{(remaining >= 4 ? $"0x{s[0]:X2} 0x{s[1]:X2} 0x{s[2]:X2} 0x{s[3]:X2}" : "truncated")}])");
             }
             s = next;
 
@@ -652,12 +696,21 @@ internal static unsafe class StreamLZDecoder
         PreScanChunks(src, srcLen, dstLen, chunks, out _, requireUniformHighDecoder: false);
 
         int numChunks = chunks.Count;
+        // Actual decompressed bytes for this piece (may be less than dstLen in multi-piece)
+        int pieceDstLen = 0;
+        foreach (var c in chunks) pieceDstLen += c.DstSize;
+
         int prefixBytes = (numChunks - 1) * 8;
-        if (prefixBytes > srcLen)
+        // Find the end of this piece's compressed data
+        int pieceSrcEnd = 0;
+        foreach (var c in chunks) pieceSrcEnd = Math.Max(pieceSrcEnd, c.SrcOffset + c.SrcSize);
+        pieceSrcEnd += prefixBytes;
+
+        if (pieceSrcEnd > srcLen)
         {
             throw new InvalidDataException("StreamLZ self-contained prefix table exceeds source length.");
         }
-        byte* prefixBase = src + srcLen - prefixBytes;
+        byte* prefixBase = src + pieceSrcEnd - prefixBytes;
 
         // Phase 2: Parallel decompress
         int scratchSize = StreamLZConstants.ScratchSize;
@@ -705,7 +758,7 @@ internal static unsafe class StreamLZDecoder
             Buffer.MemoryCopy(prefixBase + i * 8, dst + q.DstOffset, copySize, copySize);
         }
 
-        return dstLen;
+        return pieceDstLen;
     }
 
     // ----------------------------------------------------------------
