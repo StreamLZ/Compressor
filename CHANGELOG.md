@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.2.0]
+
+### Performance
+- AVX2 vectorize delta literal copy in High decoder: +12% decompress
+  on mixed data (silesia L6: 10.7 GB/s → 11.9 GB/s on warm runs).
+- AVX2 vectorize raw literal copy and non-overlapping match copy in
+  High decoder (32 bytes per iteration, up from 8).
+- AVX2 vectorize delta literal encoding in compressor (SubtractBytes).
+- Updated benchmark tables in README with correct median precision.
+
+### Changed
+- **Breaking**: Reorder `maxDecompressedSize` before `CancellationToken`
+  on `DecompressStream`, `DecompressStreamAsync`, `DecompressFile`,
+  `DecompressFileAsync`, and `StreamLzFrameDecompressor.Decompress/Async`
+  to comply with CA1068 (CancellationToken must be last parameter).
+- All build warnings resolved (CS1573 missing XML param tags, CA1068,
+  CA1508).
+- CLI `-bc` comparison benchmark uses fast Span-based decompress path.
+- CLI benchmark median uses full-precision timing (was truncating to
+  integer milliseconds).
+
 ## [1.1.0]
 
 ### Fixed
