@@ -171,36 +171,36 @@ Slz.WarmUp();
 
 ### enwik8 (100 MB text, 3-run median)
 
-| Compressor | Ratio | Compress | Decompress |
-|---|---|---|---|
-| Snappy | 56.7% | 492 MB/s | 1,192 MB/s |
-| LZ4 Fast | 57.3% | 516 MB/s | 4,335 MB/s |
-| **SLZ L1** | **58.6%** | **357 MB/s** | **5,298 MB/s** |
-| Zstd 1 | 40.7% | 393 MB/s | 1,177 MB/s |
-| LZ4 Max | 41.9% | 23 MB/s | 4,541 MB/s |
-| **SLZ L5** | **42.2%** | **58 MB/s** | **4,768 MB/s** |
-| Zstd 3 | 35.5% | 287 MB/s | 935 MB/s |
-| **SLZ L6** | **33.7%** | **60 MB/s** | **5,610 MB/s** |
-| Zstd 9 | 31.1% | 66 MB/s | 1,343 MB/s |
-| Zstd 19 | 26.9% | 2.1 MB/s | 1,109 MB/s |
-| **SLZ L11** | **27.3%** | **5.3 MB/s** | **1,272 MB/s** |
+| Compressor | Ratio | Compress | Decompress | Notes |
+|---|---|---|---|---|
+| Snappy | 56.7% | 492 MB/s | 1,192 MB/s | 1T |
+| LZ4 Fast | 57.3% | 516 MB/s | 4,335 MB/s | 1T |
+| **SLZ L1** | **58.6%** | **357 MB/s** | **5,298 MB/s** | **1T** |
+| Zstd 1 | 40.7% | 393 MB/s | 1,177 MB/s | 1T |
+| LZ4 Max | 41.9% | 23 MB/s | 4,541 MB/s | 1T |
+| **SLZ L5** | **42.2%** | **58 MB/s** | **4,768 MB/s** | **1T** |
+| Zstd 3 | 35.5% | 287 MB/s | 935 MB/s | 1T |
+| **SLZ L6** | **33.7%** | **60 MB/s** | **5,610 MB/s** | **MT compress + decompress** |
+| Zstd 9 | 31.1% | 66 MB/s | 1,343 MB/s | 1T |
+| Zstd 19 | 26.9% | 2.1 MB/s | 1,109 MB/s | 1T |
+| **SLZ L11** | **27.3%** | **5.3 MB/s** | **1,272 MB/s** | **MT decompress (entropy)** |
 
 ### silesia (212 MB mixed, 3-run median)
 
-| Compressor | Ratio | Compress | Decompress |
-|---|---|---|---|
-| Snappy | 48.1% | 700 MB/s | 1,326 MB/s |
-| LZ4 Fast | 47.4% | 715 MB/s | 4,510 MB/s |
-| **SLZ L1** | **47.1%** | **546 MB/s** | **6,150 MB/s** |
-| Zstd 1 | 34.5% | 533 MB/s | 1,409 MB/s |
-| LZ4 Max | 36.3% | 17 MB/s | 4,832 MB/s |
-| **SLZ L5** | **36.4%** | **81 MB/s** | **5,204 MB/s** |
-| **SLZ L6** | **28.2%** | **85 MB/s** | **8,824 MB/s** |
-| Zstd 9 | 27.9% | 90 MB/s | 1,561 MB/s |
-| Zstd 19 | 24.9% | 3.5 MB/s | 1,109 MB/s |
-| **SLZ L11** | **24.7%** | **7.3 MB/s** | **1,650 MB/s** |
+| Compressor | Ratio | Compress | Decompress | Notes |
+|---|---|---|---|---|
+| Snappy | 48.1% | 700 MB/s | 1,326 MB/s | 1T |
+| LZ4 Fast | 47.4% | 715 MB/s | 4,510 MB/s | 1T |
+| **SLZ L1** | **47.1%** | **546 MB/s** | **6,150 MB/s** | **1T** |
+| Zstd 1 | 34.5% | 533 MB/s | 1,409 MB/s | 1T |
+| LZ4 Max | 36.3% | 17 MB/s | 4,832 MB/s | 1T |
+| **SLZ L5** | **36.4%** | **81 MB/s** | **5,204 MB/s** | **1T** |
+| **SLZ L6** | **28.2%** | **85 MB/s** | **8,824 MB/s** | **MT compress + decompress** |
+| Zstd 9 | 27.9% | 90 MB/s | 1,561 MB/s | 1T |
+| Zstd 19 | 24.9% | 3.5 MB/s | 1,109 MB/s | 1T |
+| **SLZ L11** | **24.7%** | **7.3 MB/s** | **1,650 MB/s** | **MT decompress (entropy)** |
 
-*All benchmarks on Intel Arrow Lake-S (Ultra 9 285K), .NET 10. L6-L8 use parallel compress/decompress; L9-L11 use parallel entropy decode; L1-L5 are single-threaded.*
+*1T = single-threaded. MT = multi-threaded (24-core). All benchmarks on Intel Arrow Lake-S (Ultra 9 285K), .NET 10. See [Threading Model](#threading-model) above for details.*
 
 ## License
 
