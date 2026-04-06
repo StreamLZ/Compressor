@@ -56,12 +56,15 @@ internal static class StreamLzFrameCompressor
         long totalMemory = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
         long memoryBudget = (totalMemory * 60) / 100;
         long perThreadOverhead = StreamLZConstants.PerThreadMemoryEstimate;
-        long availableForData = memoryBudget - numThreads * perThreadOverhead;
+        long availableForData = Math.Max(0, memoryBudget - numThreads * perThreadOverhead);
         // Double-buffered I/O needs 2x the data allocation (read + compress simultaneously)
         long dataPerThread = Math.Max(StreamLZConstants.ChunkSize,
-            availableForData / numThreads / 2);
+            availableForData / Math.Max(numThreads, 1) / 2);
         // Round down to chunk boundary
         dataPerThread = (dataPerThread / StreamLZConstants.ChunkSize) * StreamLZConstants.ChunkSize;
+        // Cap to actual input size — no point allocating more than needed
+        if (contentSize > 0)
+            dataPerThread = Math.Min(dataPerThread, ((contentSize + StreamLZConstants.ChunkSize - 1) / StreamLZConstants.ChunkSize) * StreamLZConstants.ChunkSize);
 
         // Large-chunk path: read many chunks, compress as one block using the
         // parallel in-memory API. Each block is independently decompressible.
@@ -72,7 +75,9 @@ internal static class StreamLzFrameCompressor
 
         if (useLargeChunks)
         {
-            int chunkSize = (int)Math.Min(numThreads * dataPerThread, int.MaxValue - 1024);
+            long rawChunkSize = numThreads * dataPerThread;
+            if (contentSize > 0) rawChunkSize = Math.Min(rawChunkSize, contentSize);
+            int chunkSize = (int)Math.Min(rawChunkSize, int.MaxValue - 1024);
             // Double-buffered: read next chunk while compressing current one.
             byte[][] srcBufs = [
                 ArrayPool<byte>.Shared.Rent(chunkSize),
@@ -178,7 +183,7 @@ internal static class StreamLzFrameCompressor
         // per iteration so CompressBlock gets maximum context for match finding.
         // Read size is capped by memory budget (window + read + compressed buffers).
         {
-            long serialBudget = memoryBudget - numThreads * perThreadOverhead;
+            long serialBudget = Math.Max(StreamLZConstants.ChunkSize * 4L, memoryBudget - numThreads * perThreadOverhead);
             // Need: windowSize + readSize + compressBound(readSize) ≈ windowSize + 2*readSize
             long maxRead = (serialBudget - windowSize) / 2;
             maxRead = (maxRead / StreamLZConstants.ChunkSize) * StreamLZConstants.ChunkSize;
