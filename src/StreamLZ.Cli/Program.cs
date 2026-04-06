@@ -332,16 +332,17 @@ unsafe
         Console.WriteLine($"  Compress median: {compMedian:N0}ms ({compMbps:F1} MB/s)");
         Console.WriteLine();
 
-        // Decompress benchmark (framed API — includes frame parsing overhead)
-        byte[] decompressed = Slz.DecompressFramed(compressed, maxDecompressedSize: -1);
+        // Decompress benchmark (framed fast-path: in-place block parsing, no MemoryStream)
+        byte[] decompressed = new byte[src.Length + Slz.SafeSpace];
+        Slz.DecompressFramed((ReadOnlySpan<byte>)compressed, (Span<byte>)decompressed);
 
         long[] decompTimes = new long[runs];
         for (int r = 0; r < runs; r++)
         {
             var sw = Stopwatch.StartNew();
-            decompressed = Slz.DecompressFramed(compressed, maxDecompressedSize: -1);
+            int decompSize = Slz.DecompressFramed((ReadOnlySpan<byte>)compressed, (Span<byte>)decompressed);
             sw.Stop();
-            if (decompressed.Length != src.Length) Console.Error.WriteLine($"[CLI] Decompress size mismatch: {decompressed.Length} != {src.Length}");
+            if (decompSize != src.Length) Console.Error.WriteLine($"[CLI] Decompress size mismatch: {decompSize} != {src.Length}");
             decompTimes[r] = sw.ElapsedMilliseconds;
             double mbps = (double)src.Length / sw.Elapsed.TotalSeconds / (1024 * 1024);
             Console.WriteLine($"  Decompress run {r + 1}: {decompTimes[r]:N0}ms ({mbps:F1} MB/s)");
