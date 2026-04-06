@@ -12,6 +12,17 @@ internal static unsafe partial class LzDecoder
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void CopyLiteralExact(byte* dst, byte* src, int length)
     {
+        if (Vector256.IsHardwareAccelerated)
+        {
+            while (length >= 32)
+            {
+                Vector256.Load(src).Store(dst);
+                dst += 32;
+                src += 32;
+                length -= 32;
+            }
+        }
+
         while (length >= 8)
         {
             CopyHelpers.Copy64(dst, src);
@@ -61,6 +72,17 @@ internal static unsafe partial class LzDecoder
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void CopyMatchExact(byte* dst, byte* src, int length)
     {
+        if (Vector256.IsHardwareAccelerated && (dst - src) >= 32)
+        {
+            while (length >= 32)
+            {
+                Vector256.Load(src).Store(dst);
+                dst += 32;
+                src += 32;
+                length -= 32;
+            }
+        }
+
         while (length-- > 0)
         {
             *dst++ = *src++;

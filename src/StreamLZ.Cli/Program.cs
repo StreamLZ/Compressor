@@ -315,21 +315,21 @@ unsafe
         Console.WriteLine();
 
         // Compress benchmark
-        long[] compTimes = new long[runs];
+        double[] compSeconds = new double[runs];
         for (int r = 0; r < runs; r++)
         {
             var sw = Stopwatch.StartNew();
             compressed = Slz.CompressFramed(src, level);
             sw.Stop();
-            compTimes[r] = sw.ElapsedMilliseconds;
-            double mbps = (double)src.Length / sw.Elapsed.TotalSeconds / (1024 * 1024);
+            compSeconds[r] = sw.Elapsed.TotalSeconds;
+            double mbps = (double)src.Length / compSeconds[r] / (1024 * 1024);
             Console.WriteLine($"  Compress run {r + 1}: {sw.ElapsedMilliseconds:N0}ms ({mbps:F1} MB/s)");
         }
 
-        Array.Sort(compTimes);
-        long compMedian = compTimes[runs / 2];
-        double compMbps = (double)src.Length / (compMedian / 1000.0) / (1024 * 1024);
-        Console.WriteLine($"  Compress median: {compMedian:N0}ms ({compMbps:F1} MB/s)");
+        Array.Sort(compSeconds);
+        double compMedianSec = compSeconds[runs / 2];
+        double compMbps = (double)src.Length / compMedianSec / (1024 * 1024);
+        Console.WriteLine($"  Compress median: {compMedianSec * 1000:N0}ms ({compMbps:F1} MB/s)");
         Console.WriteLine();
 
         // Decompress benchmark (framed fast-path: in-place block parsing, no MemoryStream)
@@ -337,21 +337,22 @@ unsafe
         Slz.DecompressFramed((ReadOnlySpan<byte>)compressed, (Span<byte>)decompressed);
 
         long[] decompTimes = new long[runs];
+        double[] decompSeconds = new double[runs];
         for (int r = 0; r < runs; r++)
         {
             var sw = Stopwatch.StartNew();
             int decompSize = Slz.DecompressFramed((ReadOnlySpan<byte>)compressed, (Span<byte>)decompressed);
             sw.Stop();
             if (decompSize != src.Length) Console.Error.WriteLine($"[CLI] Decompress size mismatch: {decompSize} != {src.Length}");
-            decompTimes[r] = sw.ElapsedMilliseconds;
-            double mbps = (double)src.Length / sw.Elapsed.TotalSeconds / (1024 * 1024);
-            Console.WriteLine($"  Decompress run {r + 1}: {decompTimes[r]:N0}ms ({mbps:F1} MB/s)");
+            decompSeconds[r] = sw.Elapsed.TotalSeconds;
+            double mbps = (double)src.Length / decompSeconds[r] / (1024 * 1024);
+            Console.WriteLine($"  Decompress run {r + 1}: {sw.ElapsedMilliseconds:N0}ms ({mbps:F1} MB/s)");
         }
 
-        Array.Sort(decompTimes);
-        long decompMedian = decompTimes[runs / 2];
-        double decompMbps = (double)src.Length / (decompMedian / 1000.0) / (1024 * 1024);
-        Console.WriteLine($"  Decompress median: {decompMedian:N0}ms ({decompMbps:F1} MB/s)");
+        Array.Sort(decompSeconds);
+        double decompMedianSec = decompSeconds[runs / 2];
+        double decompMbps = (double)src.Length / decompMedianSec / (1024 * 1024);
+        Console.WriteLine($"  Decompress median: {decompMedianSec * 1000:N0}ms ({decompMbps:F1} MB/s)");
         Console.WriteLine();
 
         // Verify
