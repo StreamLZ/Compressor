@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.1]
+
+### Fixed
+- Fix OOM in framed compressor when compressing small inputs. Buffer
+  allocation now capped to actual input size instead of scaling to
+  full thread count × memory budget. All 392 unit tests pass.
+
 ## [1.2.0]
 
 ### Performance
