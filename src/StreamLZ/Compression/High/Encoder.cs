@@ -10,11 +10,18 @@ namespace StreamLZ.Compression.High;
 
 internal static unsafe partial class Compressor
 {
+    // The HighStreamWriter writes to 7 separate output streams (literals, delta-literals,
+    // tokens, near offsets, far offsets, run-lengths, overflow lengths). Each stream is a
+    // contiguous region within a single allocation. This split-stream layout is critical:
+    // the decoder reads each stream sequentially, giving perfect L1 cache behavior.
+    // Interleaving them into a single stream would cause random access patterns.
     internal static void InitializeStreamWriter(ref HighStreamWriter writer, LzTemp lztemp, int sourceLength, byte* srcBase, int encodeFlags)
     {
         writer.SrcPtr = srcBase;
         writer.SrcLen = sourceLength;
 
+        // Capacity estimates are generous worst-cases (all-literals, all-matches, etc.).
+        // Over-allocating is fine — this is scratch memory reused across chunks.
         int literalCapacity = sourceLength + 8;
         int tokenCapacity = sourceLength / 2 + 8;
         int u8OffsetCapacity = sourceLength / 3;
@@ -44,6 +51,11 @@ internal static unsafe partial class Compressor
         writer.EncodeFlags = encodeFlags;
     }
 
+    // Match length encoding: the command byte has a 4-bit matchLen field (bits 5:2).
+    // Values 0-14 encode lengths 2-16 inline. Value 15 is a sentinel that signals
+    // "read the real length from the run-length stream." Lengths >= 255+17 overflow
+    // into a separate 32-bit stream to keep the u8 run-length stream compact.
+    // Returns the matchLen contribution to the command byte, pre-shifted to bits 5:2.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int WriteMatchLength(ref HighStreamWriter writer, int matchLength)
     {
@@ -92,6 +104,15 @@ internal static unsafe partial class Compressor
         }
     }
 
+    // Literal length encoding mirrors match length: the command byte has a 2-bit litLen
+    // field (bits 1:0). Values 0-2 encode lengths 0-2 inline. Value 3 is a sentinel
+    // meaning "read from the run-length stream." This method returns the litLen bits
+    // for the command byte (0, 1, 2, or 3).
+    //
+    // Short literals (<= 8 bytes) are copied with a single 8-byte unaligned write,
+    // which may overshoot but is safe because the literal buffer has headroom.
+    // The run-length byte is speculatively written and the pointer conditionally advanced
+    // to avoid a branch on the common len < 3 case.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int WriteLiterals(ref HighStreamWriter writer, byte* p, nint len, bool doSubtract)
     {
@@ -106,6 +127,9 @@ internal static unsafe partial class Compressor
             return 3;
         }
 
+        // Branchless run-length write: always write (len - 3), but only advance the
+        // pointer when len >= 3. When len < 3, the written byte is harmlessly overwritten
+        // by the next call. This saves a branch on every short-literal token.
         byte* lrl8 = writer.LiteralRunLengths;
         *lrl8 = (byte)(len - 3);
         writer.LiteralRunLengths = (len >= 3) ? lrl8 + 1 : lrl8;
@@ -155,6 +179,14 @@ internal static unsafe partial class Compressor
         }
     }
 
+    // AddToken assembles one command byte from three fields: litLen (bits 1:0),
+    // matchLen (bits 5:2), and offsetIndex (bits 7:6). The command byte is written
+    // last because WriteLiterals and WriteMatchLength may emit overflow bytes to
+    // their respective side streams, and the token byte must reflect whether those
+    // overflows occurred (litLen==3 or matchLen==15 sentinels).
+    //
+    // offsOrRecent > 0 means "new offset" (index 3 in the decoder's carousel);
+    // offsOrRecent <= 0 means "reuse recent offset" at index -offsOrRecent (0, 1, or 2).
     internal static void AddToken(ref HighStreamWriter writer, ref HighRecentOffs recent,
         byte* litstart, nint litlen, int matchlen, int offsOrRecent,
         bool doRecent, bool doSubtract)
@@ -206,6 +238,11 @@ internal static unsafe partial class Compressor
         }
     }
 
+    // AssembleCompressedOutput entropy-encodes each of the 5 sub-streams (literals, tokens,
+    // offsets, run-lengths, overflow-bits) and concatenates them into the final compressed
+    // output. It also decides between raw literals (Type1) and delta-coded literals (Type0)
+    // based on estimated entropy cost, and falls back to memcpy if compression doesn't help.
+    // Returns sourceLength (uncompressed) if compression is not worthwhile.
     internal static int AssembleCompressedOutput(float* costPtr, int* chunkTypePtr, Stats* stats,
         byte* dst, byte* destinationEnd,
         LzCoder lzcoder, LzTemp lztemp,

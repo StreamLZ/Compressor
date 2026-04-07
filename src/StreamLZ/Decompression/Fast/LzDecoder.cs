@@ -38,6 +38,9 @@ internal static unsafe class LzDecoder
     {
         byte* srcCur = src;
 
+        // Two separate loops instead of one with a conditional 4th-byte read:
+        // when the current chunk offset is below LargeOffsetThreshold, no offset can
+        // possibly need a 4th byte, so the inner loop is tighter (no branch per offset).
         if (offset < (LargeOffsetThreshold - 1))
         {
             for (uint i = 0; i != outputSize; i++)
@@ -334,6 +337,14 @@ internal static unsafe class LzDecoder
     /// (delta literals: dst = lit + prev_match_byte). Otherwise literals are
     /// copied raw.
     /// </summary>
+    // ProcessMode is the hot inner loop of the Fast/Turbo decoder.
+    // It dispatches each command byte into one of four paths: short token (cmd >= 24),
+    // medium off32 match (cmd 3..23), long literal (cmd 0), long off16 match (cmd 1),
+    // or long off32 match (cmd 2). The short token path handles ~90% of commands.
+    //
+    // isDelta is a compile-time-like bool: the JIT specializes the two callsites
+    // (mode 0 and mode 1), so the isDelta branches compile away into separate copies
+    // of the method body — no runtime branch cost for the literal copy type selection.
     [SkipLocalsInit]
     public static byte* ProcessMode(
         bool isDelta,
@@ -382,8 +393,13 @@ internal static unsafe class LzDecoder
                 {
                     return null;
                 }
+                // Branchless offset selection: bit 7 of cmd indicates new vs recent offset.
+                // (cmd >> 7) - 1 yields 0 when bit 7 is set (use new), all-ones when clear (keep recent).
+                // The XOR-mask trick below swaps recentOffs with -newDist only when useDistance != 0.
+                // The off16Stream pointer is advanced by 2 bytes only when a new offset is consumed.
+                // This eliminates a branch on every short token — critical at ~90% command frequency.
                 nint newDist = *off16Stream;
-                nuint useDistance = (cmd >> 7) - 1; // 0 = recent offset, 0xFFFF..FF = new offset
+                nuint useDistance = (cmd >> 7) - 1;
                 nuint literalLength = cmd & 7;
                 if (isDelta)
                 {
@@ -404,6 +420,9 @@ internal static unsafe class LzDecoder
                 {
                     return null;
                 }
+                // Short match copy: two unconditional 8-byte copies cover up to 15 bytes
+                // (the max match length encodable in a short token's 4-bit field).
+                // No length variable — the advance is computed directly from the command byte.
                 match = dst + recentOffs;
                 CopyHelpers.Copy64(dst, match);
                 CopyHelpers.Copy64(dst + 8, match + 8);
@@ -411,7 +430,9 @@ internal static unsafe class LzDecoder
             }
             else if (cmd > 2)
             {
-                // Medium match: 32-bit far offset, length = cmd + 5 (range 8..28).
+                // ── Medium match: 32-bit far offset, length = cmd + 5 (range 8..28) ──
+                // Four unconditional Copy64 calls cover the max 28-byte length without a loop.
+                // off32 offsets are absolute (from dstBegin), unlike off16 which are relative to dst.
                 length = (nint)cmd + 5;
 
                 if (off32Stream == off32StreamEnd)
@@ -430,7 +451,8 @@ internal static unsafe class LzDecoder
                 CopyHelpers.Copy64(dst + 16, match + 16);
                 CopyHelpers.Copy64(dst + 24, match + 24);
                 dst += length;
-                // Prefetch the match source for an upcoming off32 token to hide DRAM latency.
+                // Prefetch 3 entries ahead: off32 tokens are less frequent than short tokens,
+                // so looking 3 ahead gives ~enough lead time to hide a DRAM miss (~60ns).
                 if (Sse.IsSupported)
                 {
                     Sse.Prefetch0(dstBegin - off32Stream[3]);
@@ -463,6 +485,10 @@ internal static unsafe class LzDecoder
                     return null;
                 }
 
+                // Duplicated delta vs raw loop bodies: the JIT cannot hoist isDelta out of
+                // a unified loop because it's a runtime bool. Separate loops let each path
+                // be branch-free inside the loop body. The 16-byte stride balances ILP
+                // (two independent 8-byte ops per iteration) against loop overhead.
                 if (isDelta)
                 {
                     do
@@ -485,8 +511,8 @@ internal static unsafe class LzDecoder
                         length -= 16;
                     } while (length > 0);
                 }
-                // The 16-byte copy loop overshoots; length is now <= 0.
-                // Adding negative length back corrects dst/litStream to exact positions.
+                // The 16-byte copy loop overshoots when length isn't a multiple of 16.
+                // length is now <= 0; adding it back corrects dst/litStream to exact positions.
                 dst += length;
                 litStream += length;
             }
@@ -579,7 +605,10 @@ internal static unsafe class LzDecoder
             }
         }
 
-        // Copy remaining literals
+        // ── Trailing literal copy ──
+        // Bytes between the last match and dstEnd. Again duplicated for delta vs raw
+        // to keep branches out of the inner loop. The 8-byte then 1-byte tiers ensure
+        // exact output length without overshoot past dstEnd.
         length = (nint)(dstEnd - dst);
         if (isDelta)
         {
@@ -635,6 +664,10 @@ internal static unsafe class LzDecoder
     /// <summary>
     /// Execute the Fast LZ match-copy loop over up to two 64 KB chunks.
     /// </summary>
+    // Fast format processes data in up to two 64 KB sub-chunks per 128 KB chunk.
+    // Each sub-chunk has its own off32 backing array and command stream slice,
+    // but shares the off16, literal, and length streams. The two-iteration loop
+    // swaps between the first and second sub-chunk's off32 and command ranges.
     [SkipLocalsInit]
     public static bool ProcessLzRuns(
         int mode,

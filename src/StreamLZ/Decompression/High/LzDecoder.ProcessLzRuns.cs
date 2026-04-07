@@ -9,6 +9,11 @@ namespace StreamLZ.Decompression.High;
 
 internal static unsafe partial class LzDecoder
 {
+    // Exact-length copy helpers used in the slow tail path near dstEnd.
+    // These must NOT overshoot — unlike Copy64/WildCopy16 which may write
+    // up to 15 bytes past the logical end. Separate methods to keep the
+    // fast path free of per-byte branch overhead.
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void CopyLiteralExact(byte* dst, byte* src, int length)
     {
@@ -72,6 +77,8 @@ internal static unsafe partial class LzDecoder
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void CopyMatchExact(byte* dst, byte* src, int length)
     {
+        // Match copies read from the output buffer itself. The (dst - src) >= 32 guard
+        // prevents SIMD loads from reading bytes we haven't written yet (overlapping copies).
         if (Vector256.IsHardwareAccelerated && (dst - src) >= 32)
         {
             while (length >= 32)
@@ -270,7 +277,10 @@ internal static unsafe partial class LzDecoder
             int matchLength = tokens[i].MatchLen;
             int offset = tokens[i].Offset;
 
-            // Copy literals (raw, no delta) — cascading 8-byte copies
+            // Cascading literal copy: most literals are <= 8 bytes (inline in the command token),
+            // so the first Copy64 handles ~80% of cases with zero branches taken.
+            // The nested ifs avoid a loop setup cost for the common short-literal path.
+            // Only literals > 24 bytes fall through to the do/while loop.
             CopyHelpers.Copy64(dst, litStream);
             if (literalLength > 8)
             {
@@ -296,7 +306,10 @@ internal static unsafe partial class LzDecoder
             dst += literalLength;
             litStream += literalLength;
 
-            // Copy match — offset is negative, matchSource points back into output
+            // Match copy: offset is negative, so matchSource points back into already-decoded output.
+            // Two unconditional Copy64 calls cover matches up to 16 bytes (the vast majority:
+            // min match = 2, max inline match = 16). WildCopy16 handles the long-match tail
+            // and may overshoot — safe because we're in the fast path (dst + matchLength < dstSafeEnd).
             byte* matchSource = dst + offset;
             if (matchSource < dstStart) return false;
             CopyHelpers.Copy64(dst, matchSource);
@@ -341,6 +354,12 @@ internal static unsafe partial class LzDecoder
     /// byte at <c>dst[last_offset]</c> to produce the output.
     /// </summary>
     [SkipLocalsInit]
+    // Type0 is a single-pass decoder: it walks the command stream, resolving offsets and
+    // lengths inline, then immediately copying literals and matches. This is simpler than
+    // Type1's two-pass approach but cannot prefetch match sources ahead of time.
+    // The delta-add literal transform (dst = litStream + dst[lastOffset]) makes prefetch
+    // less valuable here because the literal copy itself touches the dst[lastOffset] cache
+    // line, warming it for the next literal run.
     public static bool ProcessLzRuns_Type0(
         HighLzTable* lzTable,
         byte* dst,
@@ -443,7 +462,10 @@ internal static unsafe partial class LzDecoder
             }
             else
             {
-                // Fast path: wide copies (using PREVIOUS token's offset for delta)
+                // ── Fast path: wide copies with delta-add literals ──
+                // Match bounds check is hoisted before literal copy to fail early on corrupt data.
+                // The cascading Copy64Add pattern mirrors ExecuteTokens_Type1's literal copy:
+                // nested ifs avoid loop overhead for the dominant short-literal case.
                 matchSource = dst + literalLengthInt + offset;
                 if (matchSource < dstStart) return LzError();
 
@@ -469,6 +491,9 @@ internal static unsafe partial class LzDecoder
                 dst += literalLength;
                 litStream += literalLength;
 
+                // Match copy: two unconditional 8-byte copies cover matches up to 16 bytes.
+                // WildCopy16 is only needed when matchLength == 15 (the long-match sentinel),
+                // which means actualMatchLen >= 14 + lenStream value, potentially very long.
                 matchSource = dst + offset;
                 CopyHelpers.Copy64(dst, matchSource);
                 CopyHelpers.Copy64(dst + 8, matchSource + 8);
@@ -480,19 +505,23 @@ internal static unsafe partial class LzDecoder
             dst += actualMatchLength;
         }
 
-        // Verify all streams consumed correctly
+        // ── Post-loop validation ──
+        // All sub-streams must be fully consumed. Any leftover bytes indicate a malformed
+        // bitstream or a bug in the command/offset/length resolution logic above.
         if (offsStream != offsStreamEnd || lenStream != lenStreamEnd)
         {
             return LzError();
         }
 
+        // Trailing literals: bytes after the last match, not covered by any command token.
+        // The remaining output space must exactly equal the remaining literal stream.
         uint trailingLiteralCount = (uint)(dstEnd - dst);
         if (trailingLiteralCount != (uint)(litStreamEnd - litStream))
         {
             return LzError();
         }
 
-        // Copy remaining literals with delta add
+        // Copy trailing literals with delta-add (no SafeSpace concern — these are exact copies)
         if (trailingLiteralCount >= 8)
         {
             do
@@ -600,7 +629,9 @@ internal static unsafe partial class LzDecoder
             return LzError();
         }
 
-        // Copy remaining trailing literals (raw)
+        // ── Trailing literal copy (raw, no delta) ──
+        // Three-tier copy: 64-byte blocks for bulk, 8-byte for medium, byte-by-byte for remainder.
+        // This avoids overshoot — trailing literals extend to the exact end of the output buffer.
         if (trailingLiteralCount >= 64)
         {
             do

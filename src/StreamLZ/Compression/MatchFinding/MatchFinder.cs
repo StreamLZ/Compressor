@@ -260,12 +260,30 @@ internal static class MatchFinder
     /// <param name="mls">Match storage to populate.</param>
     /// <param name="maxNumMatches">Maximum matches to keep per position.</param>
     /// <param name="preloadSize">Number of bytes already in the hash from a prior window.</param>
+    // FindMatchesHashBased is the hot inner loop of the compressor. For each source position,
+    // it probes a 16-entry dual-hash table for candidate matches, extends them, and stores
+    // the best results. The dual-hash design (two independent 16-slot buckets per position)
+    // reduces collision rates vs a single larger bucket, improving match quality at the same
+    // memory cost.
+    //
+    // The loop is structured for throughput:
+    //  - Hash computation for position curPos+1 is done BEFORE probing curPos's buckets,
+    //    so the hash table loads for the next iteration can overlap with match extension work.
+    //  - Prefetch for curPos+8 is issued early to warm the hash table entries 8 positions ahead.
+    //  - SSE2 vectorized tag comparison checks all 16 entries in 4 rounds (4 entries each),
+    //    reducing branch mispredictions vs scalar per-entry checks.
+    //  - Long matches (>= 77 bytes) trigger a skip: the compressor inserts synthetic
+    //    sub-matches at stride-4 positions and advances curPos past the match, avoiding
+    //    redundant probing of positions that the optimal parser will never use.
     public static void FindMatchesHashBased(
         byte[] srcBase, int srcSize, ManagedMatchLenStorage mls,
         int maxNumMatches, int preloadSize)
     {
         var hasher = new MatchHasher16Dual();
 
+        // Hash table size: 2^bits entries, clamped to [2^18, 2^24].
+        // Larger tables reduce collisions but waste cache; 2^24 is the practical cap
+        // (64 MB hash table at 4 bytes/entry) beyond which cache misses dominate.
         int bits = Math.Min(
             Math.Max(BitOperations.Log2((uint)Math.Max(Math.Min(srcSize, int.MaxValue), 2) - 1) + 1, 18),
             24);
@@ -283,29 +301,45 @@ internal static class MatchFinder
 
         for (int curPos = preloadSize; curPos < srcSizeSafe; curPos++)
         {
+            // Read the 4-byte prefix at curPos for fast rejection of hash collisions.
             uint u32ToScanFor = Unsafe.ReadUnaligned<uint>(ref srcBase[curPos]);
 
+            // Capture this position's hash results (computed by the previous iteration's
+            // SetHashPos call, or the initial call above for the first iteration).
             int cur1 = hasher.HashEntryPtrNextIndex;
             int cur2 = hasher.HashEntry2PtrNextIndex;
             uint curHashTag = hasher.CurrentHashTag;
 
+            // Prefetch hash table entries for curPos+8: the hash computation touches two
+            // cache lines (primary and dual bucket). Issuing prefetch 8 iterations ahead
+            // gives the memory subsystem ~40-80 cycles to fetch before we need the data.
             if (curPos + 8 < srcSizeSafe)
             {
                 hasher.SetHashPosPrefetch(srcBase, curPos + 8);
             }
+            // Compute hash for curPos+1 now so its hash table entries begin loading
+            // while we probe curPos's buckets below.
             hasher.SetHashPos(srcBase, curPos + 1);
 
             int numMatch = 0;
 
             uint[] hashTable = hasher.HashTable;
 
-            // Process both hash buckets (primary and dual)
+            // ── Probe both hash buckets for candidate matches ──
+            // Two passes: primary bucket (cur1) then dual bucket (cur2). If both point
+            // to the same bucket, the second pass is skipped via the break below.
             int hashCurIdx = cur1;
             for (int pass = 0; pass < 2; pass++)
             {
                 int bestMl = 0;
 
-                // Check 16 hash entries in groups of 4 using SSE2 where available
+                // SSE2 vectorized hash probe: processes 16 entries in 4 groups of 4.
+                // Each hash entry stores [tag:6][position:26]. The SIMD code:
+                //   1. Extracts the offset (curPos - storedPos) from the low 26 bits
+                //   2. Checks the high 6-bit tag matches curHashTag
+                //   3. Checks the offset is within MaxDictionarySize
+                // All 16 results are packed into a single 16-bit mask via MoveMask.
+                // This replaces 16 scalar branches with one bitmask + BSF loop.
                 if (Sse2.IsSupported)
                 {
                     unsafe
@@ -321,7 +355,9 @@ internal static class MatchFinder
                             Vector128<int> vZero = Vector128<int>.Zero;
                             Vector128<int> vHighMask = Vector128.Create(unchecked((int)StreamLZConstants.HashTagMask));
 
-                            // Compute all 4 rounds upfront (vectorised HASHROUND)
+                            // All 4 rounds are unrolled rather than looped: each round loads
+                            // 4 hash entries, computes offsets, and builds a match mask. Unrolling
+                            // lets the CPU pipeline all 4 loads simultaneously (no loop-carried dependency).
                             Vector128<int> v0 = Sse2.LoadVector128((int*)(hPtr + 0));
                             Vector128<int> u0 = Sse2.Add(Sse2.And(Sse2.Subtract(vMaxPos, v0), vMask26), vOne);
                             Sse2.Store((int*)(oPtr + 0), u0);
@@ -350,18 +386,24 @@ internal static class MatchFinder
                                 Sse2.Or(Sse2.CompareGreaterThan(u3, vMaxOffset),
                                     Sse2.And(Sse2.Xor(v3, vHashHigh), vHighMask)));
 
-                            // Combine into single 16-bit mask
+                            // Pack 4x 32-bit masks into a 16-bit mask for BSF iteration below.
                             uint matchingOffsets = (uint)Sse2.MoveMask(
                                 Sse2.PackSignedSaturate(
                                     Sse2.PackSignedSaturate(m0, m1),
                                     Sse2.PackSignedSaturate(m2, m3)).AsByte());
 
-                            // Process only the matching entries using BSF
+                            // Iterate only set bits (BSF + clear lowest): typically 0-3 candidates
+                            // pass the tag+range filter, so this loop is very short.
                             while (matchingOffsets != 0)
                             {
                                 int bit = BitOperations.TrailingZeroCount(matchingOffsets);
                                 matchingOffsets &= matchingOffsets - 1;
                                 uint offset = offsets[bit];
+                                // Three-stage filter before expensive CountMatchingBytes:
+                                //   1. Bounds check (curPos >= offset)
+                                //   2. 4-byte prefix match (rejects ~99.6% of hash collisions)
+                                //   3. Quick check at bestMl position (rejects candidates shorter
+                                //      than the current best without a full scan)
                                 if (curPos >= (int)offset &&
                                     Unsafe.ReadUnaligned<uint>(ref srcBase[curPos - (int)offset]) == u32ToScanFor &&
                                     (bestMl < 4 || (curPos + bestMl < srcSafe4 &&
@@ -414,11 +456,14 @@ internal static class MatchFinder
                 hashCurIdx = cur2;
             }
 
+            // Insert curPos into both hash buckets AFTER probing, so we never match against ourselves.
             hasher.Insert(cur1, cur2, MatchHasherBase.MakeHashValue(curHashTag, (uint)curPos));
 
             if (numMatch > 0)
             {
-                // Sort matches (longest first, then by offset ascending)
+                // Sort longest-first so the optimal parser sees the best matches first.
+                // RemoveIdentical deduplicates entries with equal lengths (keeping the one
+                // with the smallest offset, which is cheaper to encode).
                 var matchSlice = match.Slice(0, numMatch);
                 matchSlice.Sort();
                 numMatch = RemoveIdentical(matchSlice, numMatch);
@@ -428,6 +473,13 @@ internal static class MatchFinder
 
                 int bestMlTotal = match[0].Length;
 
+                // ── Long match skip optimization ──
+                // When the best match is >= 77 bytes, the optimal parser will almost certainly
+                // use it. Rather than probing every position inside the match (expensive and
+                // wasteful), we insert synthetic sub-matches at stride-4 positions so the
+                // parser has fallback options, then skip curPos ahead past the match.
+                // InsertRange updates the hash table for skipped positions so future matches
+                // can still reference bytes inside this long match.
                 if (bestMlTotal >= 77)
                 {
                     match[0].Length = bestMlTotal - 1;
