@@ -4,7 +4,7 @@ High-performance LZ compression library for .NET with streaming support.
 
 ## Features
 
-- **Up to 8.7 GB/s decompress** (level 6, silesia), **down to 25.5% ratio** (level 11, enwik8)
+- **Up to 10.4 GB/s decompress** (level 7, enwik9), **down to 22.2% ratio** (level 11, enwik9)
 - **Simple level scale** (1-11) — higher = better ratio, slower
 - **Streaming** — SLZ1 frame format supports files of any size
 - **Sliding window** — cross-block match references for better ratio
@@ -44,19 +44,19 @@ byte[] max = Slz.CompressFramed(data, SlzCompressionLevel.Maximum);
 
 ## Compression Levels
 
-| Level | Codec | Matcher | Compress | Decompress | Ratio (enwik8) | Parallel Compress | Parallel Decompress |
-|-------|-------|---------|----------|------------|----------------|:-----------------:|:-------------------:|
-| 1 | Fast | Hash | 287 MB/s | 5.4 GB/s | 58.6% | | |
-| 2 | Fast | Hash | 243 MB/s | 5.4 GB/s | 56.9% | | |
-| 3 | Fast | Hash | 225 MB/s | 5.3 GB/s | 56.5% | | |
-| 4 | Fast | Hash | 231 MB/s | 4.4 GB/s | 54.0% | | |
-| 5 | Fast | Hash | 58 MB/s | 4.6 GB/s | 42.2% | | |
-| **6** | **High SC** | **Hash** | **59 MB/s** | **6.2 GB/s** | **31.4%** | :white_check_mark: | :white_check_mark: |
-| 7 | High SC | Hash | 50 MB/s | 6.3 GB/s | 31.3% | :white_check_mark: | :white_check_mark: |
-| 8 | High SC | **BT4** | 36 MB/s | 7.0 GB/s | 31.0% | :white_check_mark: | :white_check_mark: |
-| 9 | High | Hash | 6.0 MB/s | 1.3 GB/s | 27.4% | | partial |
-| 10 | High | Hash | 5.8 MB/s | 1.3 GB/s | 27.2% | | partial |
-| 11 | High | **BT4** | 1.3 MB/s | 1.1 GB/s | **25.5%** | | partial |
+| Level | Codec | Matcher | Parallel Compress | Parallel Decompress | Notes |
+|-------|-------|---------|:-----------------:|:-------------------:|-------|
+| 1 | Fast | Hash | | | Fastest compress |
+| 2 | Fast | Hash | | | |
+| 3 | Fast | Hash | | | |
+| 4 | Fast | Hash | | | |
+| 5 | Fast | Hash | | | Best Fast ratio |
+| **6** | **High SC** | **Hash** | :white_check_mark: | :white_check_mark: | **Recommended default** |
+| 7 | High SC | Hash | :white_check_mark: | :white_check_mark: | |
+| 8 | High SC | **BT4** | :white_check_mark: | :white_check_mark: | Best SC ratio |
+| 9 | High | Hash | | partial | Sliding window |
+| 10 | High | Hash | | partial | |
+| 11 | High | **BT4** | | partial | Maximum ratio |
 
 See [Threading Model](#threading-model) below for details on how parallelism works at each level.
 
@@ -165,22 +165,22 @@ Slz.WarmUp();
 
 ## Comparison vs LZ4, Snappy, Zstd
 
-### enwik8 (100 MB text, 3-run median)
+### enwik9 (1 GB text, 3-run median)
 
 | Compressor | Ratio | Compress | Decompress | Parallel Compress | Parallel Decompress |
 |---|---|---|---|:-:|:-:|
-| Snappy | 56.7% | 518 MB/s | 1,467 MB/s | | |
-| LZ4 Fast | 57.3% | 516 MB/s | 4,335 MB/s | | |
-| **SLZ L1** | **58.6%** | **304 MB/s** | **5,501 MB/s** | | |
-| Zstd 1 | 40.7% | 436 MB/s | 1,207 MB/s | | |
-| LZ4 Max | 41.9% | 23 MB/s | 4,541 MB/s | | |
-| **SLZ L5** | **42.2%** | **60 MB/s** | **4,604 MB/s** | | |
-| Zstd 3 | 35.5% | 286 MB/s | 1,343 MB/s | | |
-| **SLZ L6** | **31.4%** | **63 MB/s** | **6,649 MB/s** | :white_check_mark: | :white_check_mark: |
-| **SLZ L8** | **31.0%** | **36 MB/s** | **6,360 MB/s** | :white_check_mark: | :white_check_mark: |
-| Zstd 9 | 31.1% | 67 MB/s | 1,255 MB/s | | |
-| Zstd 19 | 26.9% | 2.2 MB/s | 1,149 MB/s | | |
-| **SLZ L11** | **25.5%** | **1.4 MB/s** | **1,121 MB/s** | | **partial** |
+| Snappy | 50.9% | 559 MB/s | 1,388 MB/s | | |
+| LZ4 Fast | 50.9% | 567 MB/s | 4,277 MB/s | | |
+| **SLZ L1** | **52.3%** | **337 MB/s** | **5,589 MB/s** | | |
+| Zstd 1 | 35.7% | 485 MB/s | 1,417 MB/s | | |
+| LZ4 Max | 37.2% | 25 MB/s | 4,520 MB/s | | |
+| **SLZ L5** | **38.2%** | **67 MB/s** | **5,003 MB/s** | | |
+| Zstd 3 | 31.2% | 325 MB/s | 1,220 MB/s | | |
+| **SLZ L6** | **27.8%** | **63 MB/s** | **10,698 MB/s** | :white_check_mark: | :white_check_mark: |
+| Zstd 9 | 27.2% | 75 MB/s | 1,394 MB/s | | |
+| **SLZ L8** | **27.3%** | **29 MB/s** | **10,814 MB/s** | :white_check_mark: | :white_check_mark: |
+| Zstd 19 | 23.5% | 2.5 MB/s | 1,156 MB/s | | |
+| **SLZ L11** | **22.2%** | **1.5 MB/s** | **970 MB/s** | | **partial** |
 
 ### silesia (212 MB mixed, 3-run median)
 
