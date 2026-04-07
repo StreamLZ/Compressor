@@ -4,7 +4,7 @@ High-performance LZ compression library for .NET with streaming support.
 
 ## Features
 
-- **Up to 10.7 GB/s decompress** (level 6, silesia), **down to 27% ratio** (level 11, enwik8)
+- **Up to 11.0 GB/s decompress** (level 8, silesia), **down to 25.5% ratio** (level 11, enwik8)
 - **Simple level scale** (1-11) — higher = better ratio, slower
 - **Streaming** — SLZ1 frame format supports files of any size
 - **Sliding window** — cross-block match references for better ratio
@@ -44,19 +44,19 @@ byte[] max = Slz.CompressFramed(data, SlzCompressionLevel.Maximum);
 
 ## Compression Levels
 
-| Level | Compress | Decompress | Ratio (enwik8) | Parallel Compress | Parallel Decompress |
-|-------|----------|------------|----------------|:-----------------:|:-------------------:|
-| 1 | 287 MB/s | 5.4 GB/s | 58.6% | | |
-| 2 | 243 MB/s | 5.4 GB/s | 56.9% | | |
-| 3 | 225 MB/s | 5.3 GB/s | 56.5% | | |
-| 4 | 231 MB/s | 4.4 GB/s | 54.0% | | |
-| 5 | 58 MB/s | 4.6 GB/s | 42.2% | | |
-| **6** | **56 MB/s** | **5.7 GB/s** | **33.7%** | :white_check_mark: | :white_check_mark: |
-| 7 | 39 MB/s | 5.8 GB/s | 33.6% | :white_check_mark: | :white_check_mark: |
-| 8 | 32 MB/s | 5.6 GB/s | 33.7% | :white_check_mark: | :white_check_mark: |
-| 9 | 6.0 MB/s | 1.3 GB/s | 27.4% | | partial |
-| 10 | 5.8 MB/s | 1.3 GB/s | 27.2% | | partial |
-| 11 | 5.5 MB/s | 1.3 GB/s | 27.2% | | partial |
+| Level | Codec | Matcher | Compress | Decompress | Ratio (enwik8) | Parallel Compress | Parallel Decompress |
+|-------|-------|---------|----------|------------|----------------|:-----------------:|:-------------------:|
+| 1 | Fast | Hash | 287 MB/s | 5.4 GB/s | 58.6% | | |
+| 2 | Fast | Hash | 243 MB/s | 5.4 GB/s | 56.9% | | |
+| 3 | Fast | Hash | 225 MB/s | 5.3 GB/s | 56.5% | | |
+| 4 | Fast | Hash | 231 MB/s | 4.4 GB/s | 54.0% | | |
+| 5 | Fast | Hash | 58 MB/s | 4.6 GB/s | 42.2% | | |
+| **6** | **High SC** | **Hash** | **56 MB/s** | **5.7 GB/s** | **33.7%** | :white_check_mark: | :white_check_mark: |
+| 7 | High SC | Hash | 39 MB/s | 5.8 GB/s | 33.6% | :white_check_mark: | :white_check_mark: |
+| 8 | High SC | **BT4** | 32 MB/s | 5.8 GB/s | 33.4% | :white_check_mark: | :white_check_mark: |
+| 9 | High | Hash | 6.0 MB/s | 1.3 GB/s | 27.4% | | partial |
+| 10 | High | Hash | 5.8 MB/s | 1.3 GB/s | 27.2% | | partial |
+| 11 | High | **BT4** | 1.3 MB/s | 1.1 GB/s | **25.5%** | | partial |
 
 See [Threading Model](#threading-model) below for details on how parallelism works at each level.
 
