@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.3.0]
+
+### Performance
+- BT4 binary tree match finder for L8 and L11. Finds higher-quality
+  matches than hash chains by walking a sorted suffix tree.
+  - L8 (SC): -0.2pp ratio on silesia, +19% faster decompress (9.2 → 11.0 GB/s).
+  - L11: -1.7pp ratio on enwik8 (27.2% → 25.5%), compress ~4x slower.
+  - L6-L7 and L9-L10 unchanged (hash-based, BT4 tested but rejected).
+- Optimized BT4: pinned arrays, 8-byte XOR+TZCNT match extension,
+  prefetch for tree child nodes.
+
 ## [1.2.1]
 
 ### Fixed
