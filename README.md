@@ -4,7 +4,7 @@ High-performance LZ compression library for .NET with streaming support.
 
 ## Features
 
-- **Up to 11.0 GB/s decompress** (level 8, silesia), **down to 25.5% ratio** (level 11, enwik8)
+- **Up to 8.7 GB/s decompress** (level 6, silesia), **down to 25.5% ratio** (level 11, enwik8)
 - **Simple level scale** (1-11) — higher = better ratio, slower
 - **Streaming** — SLZ1 frame format supports files of any size
 - **Sliding window** — cross-block match references for better ratio
@@ -51,9 +51,9 @@ byte[] max = Slz.CompressFramed(data, SlzCompressionLevel.Maximum);
 | 3 | Fast | Hash | 225 MB/s | 5.3 GB/s | 56.5% | | |
 | 4 | Fast | Hash | 231 MB/s | 4.4 GB/s | 54.0% | | |
 | 5 | Fast | Hash | 58 MB/s | 4.6 GB/s | 42.2% | | |
-| **6** | **High SC** | **Hash** | **56 MB/s** | **5.7 GB/s** | **33.7%** | :white_check_mark: | :white_check_mark: |
-| 7 | High SC | Hash | 39 MB/s | 5.8 GB/s | 33.6% | :white_check_mark: | :white_check_mark: |
-| 8 | High SC | **BT4** | 32 MB/s | 5.8 GB/s | 33.4% | :white_check_mark: | :white_check_mark: |
+| **6** | **High SC** | **Hash** | **59 MB/s** | **6.2 GB/s** | **31.4%** | :white_check_mark: | :white_check_mark: |
+| 7 | High SC | Hash | 50 MB/s | 6.3 GB/s | 31.3% | :white_check_mark: | :white_check_mark: |
+| 8 | High SC | **BT4** | 36 MB/s | 7.0 GB/s | 31.0% | :white_check_mark: | :white_check_mark: |
 | 9 | High | Hash | 6.0 MB/s | 1.3 GB/s | 27.4% | | partial |
 | 10 | High | Hash | 5.8 MB/s | 1.3 GB/s | 27.2% | | partial |
 | 11 | High | **BT4** | 1.3 MB/s | 1.1 GB/s | **25.5%** | | partial |
@@ -169,31 +169,32 @@ Slz.WarmUp();
 
 | Compressor | Ratio | Compress | Decompress | Parallel Compress | Parallel Decompress |
 |---|---|---|---|:-:|:-:|
-| Snappy | 56.7% | 518 MB/s | 1,177 MB/s | | |
-| LZ4 Fast | 57.3% | 484 MB/s | 4,335 MB/s | | |
-| **SLZ L1** | **58.6%** | **288 MB/s** | **5,421 MB/s** | | |
-| Zstd 1 | 40.7% | 422 MB/s | 1,072 MB/s | | |
-| LZ4 Max | 41.9% | 23 MB/s | 4,335 MB/s | | |
-| **SLZ L5** | **42.2%** | **59 MB/s** | **4,402 MB/s** | | |
-| Zstd 3 | 35.5% | 282 MB/s | 1,289 MB/s | | |
-| **SLZ L6** | **33.7%** | **55 MB/s** | **5,470 MB/s** | :white_check_mark: | :white_check_mark: |
-| Zstd 9 | 31.1% | 65 MB/s | 1,223 MB/s | | |
-| Zstd 19 | 26.9% | 2.1 MB/s | 926 MB/s | | |
-| **SLZ L11** | **27.3%** | **5.5 MB/s** | **1,339 MB/s** | | **partial** |
+| Snappy | 56.7% | 518 MB/s | 1,467 MB/s | | |
+| LZ4 Fast | 57.3% | 516 MB/s | 4,335 MB/s | | |
+| **SLZ L1** | **58.6%** | **304 MB/s** | **5,501 MB/s** | | |
+| Zstd 1 | 40.7% | 436 MB/s | 1,207 MB/s | | |
+| LZ4 Max | 41.9% | 23 MB/s | 4,541 MB/s | | |
+| **SLZ L5** | **42.2%** | **60 MB/s** | **4,604 MB/s** | | |
+| Zstd 3 | 35.5% | 286 MB/s | 1,343 MB/s | | |
+| **SLZ L6** | **31.4%** | **63 MB/s** | **6,649 MB/s** | :white_check_mark: | :white_check_mark: |
+| **SLZ L8** | **31.0%** | **36 MB/s** | **6,360 MB/s** | :white_check_mark: | :white_check_mark: |
+| Zstd 9 | 31.1% | 67 MB/s | 1,255 MB/s | | |
+| Zstd 19 | 26.9% | 2.2 MB/s | 1,149 MB/s | | |
+| **SLZ L11** | **25.5%** | **1.4 MB/s** | **1,121 MB/s** | | **partial** |
 
 ### silesia (212 MB mixed, 3-run median)
 
 | Compressor | Ratio | Compress | Decompress | Parallel Compress | Parallel Decompress |
 |---|---|---|---|:-:|:-:|
-| Snappy | 48.1% | 763 MB/s | 1,573 MB/s | | |
-| LZ4 Fast | 47.4% | 717 MB/s | 4,510 MB/s | | |
-| **SLZ L1** | **47.1%** | **421 MB/s** | **5,858 MB/s** | | |
-| Zstd 1 | 34.5% | 561 MB/s | 1,074 MB/s | | |
+| Snappy | 48.1% | 805 MB/s | 2,009 MB/s | | |
+| LZ4 Fast | 47.4% | 720 MB/s | 4,510 MB/s | | |
+| **SLZ L1** | **47.1%** | **462 MB/s** | **5,964 MB/s** | | |
+| Zstd 1 | 34.5% | 570 MB/s | 1,549 MB/s | | |
 | LZ4 Max | 36.3% | 17 MB/s | 4,832 MB/s | | |
-| **SLZ L5** | **36.4%** | **79 MB/s** | **5,222 MB/s** | | |
-| **SLZ L6** | **28.2%** | **73 MB/s** | **10,817 MB/s** | :white_check_mark: | :white_check_mark: |
-| Zstd 9 | 27.9% | 88 MB/s | 1,121 MB/s | | |
-| **SLZ L11** | **24.7%** | **7.5 MB/s** | **1,370 MB/s** | | **partial** |
+| **SLZ L5** | **36.4%** | **82 MB/s** | **5,281 MB/s** | | |
+| **SLZ L6** | **26.7%** | **65 MB/s** | **8,727 MB/s** | :white_check_mark: | :white_check_mark: |
+| Zstd 9 | 27.9% | 93 MB/s | 1,573 MB/s | | |
+| **SLZ L11** | **24.2%** | **3.4 MB/s** | **1,424 MB/s** | | **partial** |
 
 *All benchmarks on Intel Arrow Lake-S (Ultra 9 285K), 24-core, .NET 10.*
 
@@ -202,7 +203,7 @@ Slz.WarmUp();
 StreamLZ uses different threading strategies depending on the compression level:
 
 - **L1-L5 (Fast codec):** Single-threaded compress and decompress. The high decompress throughput (5+ GB/s) comes from the simple token format, not parallelism.
-- **L6-L8 (High codec, self-contained):** Fully parallel. Each 256KB chunk is compressed and decompressed independently across all available cores. This is why L6 decompresses at 5.3 GB/s despite using a more complex codec than L1.
+- **L6-L8 (High codec, self-contained):** Fully parallel. Chunks are grouped (4 × 256KB = 1MB per group) and each group is assigned to one thread. Within a group, chunks are compressed/decompressed sequentially with cross-chunk context, giving the match finder a larger search window. Between groups there are no references, preserving full parallelism across all available cores.
 - **L9-L11 (High codec, sliding window):** Compression is single-threaded because chunks reference previous output via a sliding window. Decompression uses a batched two-phase approach that processes chunks in batches of `ProcessorCount` (e.g. 24 on a 24-core machine). For each batch:
   1. **Phase 1 (parallel):** `ReadLzTable` runs on all chunks in the batch simultaneously — this decodes the entropy streams (Huffman/tANS) and unpacks offsets, which is the most CPU-intensive part.
   2. **Phase 2 (serial):** `ProcessLzRuns` resolves tokens and copies literals/matches for each chunk in order, since match copies can reference output from earlier chunks.

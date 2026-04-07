@@ -192,7 +192,9 @@ internal static unsafe partial class Compressor
             ? opts2.DictionarySize : StreamLZConstants.MaxDictionarySize;
 
         bool sc = opts2.SelfContained;
-        int scPosInChunk = startPos & (StreamLZConstants.ChunkSize - 1);
+        // For SC grouping: startPos is the cumulative offset within the group.
+        // Matches may reference any prior byte within the group (not just the current 256KB chunk).
+        int scPosInChunk = startPos;
         int initialCopyBytes = (startPos == 0) ? 8 : 0;
         byte* srcEndSafe = source + srcSize - 8;
         int minMatchLength = Math.Max(opts2.MinMatchLength, 4);
@@ -214,10 +216,10 @@ internal static unsafe partial class Compressor
         // same chunk. LAO offsets are absolute back-distances from the current
         // position, so we compact each candidate list down to matches that fit
         // within the chunk-local history available at that position.
-        // Self-contained: filter out matches that cross chunk boundaries, compacting valid entries
+        // Self-contained: filter out matches that cross group boundaries, compacting valid entries
         if (sc)
         {
-            int posInChunk = startPos & (StreamLZConstants.ChunkSize - 1);
+            int posInChunk = startPos; // startPos = group offset, allows full within-group references
             for (int pos = 0; pos < srcSize; pos++)
             {
                 int baseIdx = 4 * pos;

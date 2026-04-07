@@ -521,83 +521,97 @@ internal static unsafe partial class StreamLZCompressor
         LzCoder coder, byte* srcIn, byte* dst, int srcSize, byte* destinationStart)
     {
         int numChunks = (srcSize + StreamLZConstants.ChunkSize - 1) / StreamLZConstants.ChunkSize;
+        int G = StreamLZConstants.ScGroupSize;
+        int numGroups = (numChunks + G - 1) / G;
         var results = new BlockResult[numChunks];
         nint srcL = (nint)srcIn;
 
-        Parallel.For(0, numChunks,
+        Parallel.For(0, numGroups,
             new ParallelOptions { MaxDegreeOfParallelism = coder.NumThreads },
             () =>
             {
                 var origPriority = Thread.CurrentThread.Priority;
-                // Lower worker thread priority to avoid starving the UI/main thread during parallel compression.
                 Thread.CurrentThread.Priority = ThreadPriority.BelowNormal;
                 return (Coder: coder.CloneForThread(), Temp: new LzTemp(), OrigPriority: origPriority);
             },
-            (i, _, threadState) =>
+            (g, _, threadState) =>
             {
                 var (threadCoder, threadLzTemp, _) = threadState;
-                byte* blockSrc = (byte*)srcL + i * StreamLZConstants.ChunkSize;
-                int blockSize = Math.Min(srcSize - i * StreamLZConstants.ChunkSize, StreamLZConstants.ChunkSize);
-                int bufsizeNeeded = GetCompressBound(blockSize);
-                byte[] tmpBuf = ArrayPool<byte>.Shared.Rent(bufsizeNeeded + StreamLZConstants.CompressBufferPadding);
+                int firstChunk = g * G;
+                int lastChunk = Math.Min(firstChunk + G, numChunks);
+                int chunksInGroup = lastChunk - firstChunk;
 
-                // Per-chunk match finding: compact array, no dictionary across chunks
-                byte[] matchSrcArr = ArrayPool<byte>.Shared.Rent(blockSize);
+                // Total source bytes for this group
+                byte* groupSrc = (byte*)srcL + firstChunk * StreamLZConstants.ChunkSize;
+                int groupBytes = Math.Min(srcSize - firstChunk * StreamLZConstants.ChunkSize,
+                    chunksInGroup * StreamLZConstants.ChunkSize);
+
+                // Match finder sees the full group
+                byte[] matchSrcArr = ArrayPool<byte>.Shared.Rent(groupBytes);
                 fixed (byte* pArr = matchSrcArr)
-                    Buffer.MemoryCopy(blockSrc, pArr, blockSize, blockSize);
+                    Buffer.MemoryCopy(groupSrc, pArr, groupBytes, groupBytes);
 
-                var mls = ManagedMatchLenStorage.Create(blockSize + 1, 8.0f);
+                var mls = ManagedMatchLenStorage.Create(groupBytes + 1, 8.0f);
                 mls.WindowBaseOffset = 0;
-                mls.RoundStartPos = 0; // SC chunks are independent; MLS indices are 0-based
-                // BT4 for L8 only (codec level 9, SC): +0.3pp ratio, +9% faster decompress.
-                // L6-L7 tested but BT4 slows decompress there (parser too narrow to exploit matches).
+                mls.RoundStartPos = 0;
                 if (coder.CompressionLevel >= 9)
-                    MatchFinder.FindMatchesBT4(matchSrcArr, blockSize, mls, 4, 0, maxDepth: 96);
+                    MatchFinder.FindMatchesBT4(matchSrcArr, groupBytes, mls, 4, 0, maxDepth: 96);
                 else
-                    MatchFinder.FindMatchesHashBased(matchSrcArr, blockSize, mls, 4, 0);
+                    MatchFinder.FindMatchesHashBased(matchSrcArr, groupBytes, mls, 4, 0);
                 ArrayPool<byte>.Shared.Return(matchSrcArr);
 
-                fixed (byte* pTmp = tmpBuf)
+                // Compress each chunk in the group sequentially with cross-chunk context
+                int groupOffset = 0; // cumulative offset within group
+                for (int ci = 0; ci < chunksInGroup; ci++)
                 {
-                    byte* tmpDst = pTmp;
-                    bool keyframe = true; // every SC chunk is a keyframe
+                    int chunkIdx = firstChunk + ci;
+                    byte* blockSrc = (byte*)srcL + chunkIdx * StreamLZConstants.ChunkSize;
+                    int blockSize = Math.Min(srcSize - chunkIdx * StreamLZConstants.ChunkSize, StreamLZConstants.ChunkSize);
+                    int bufsizeNeeded = GetCompressBound(blockSize);
+                    byte[] tmpBuf = ArrayPool<byte>.Shared.Rent(bufsizeNeeded + StreamLZConstants.CompressBufferPadding);
+                    bool keyframe = (ci == 0); // first chunk in group is keyframe
 
-                    if (AreAllBytesEqual(blockSrc, blockSize))
+                    fixed (byte* pTmp = tmpBuf)
                     {
-                        byte* dstBlk = WriteBlockHdr(tmpDst, threadCoder.CompressorFileId,
-                            threadCoder.Options!.GenerateChunkHeaderChecksum, keyframe, uncompressed: false, selfContained: true);
-                        byte* end = WriteMemsetChunkHeader(dstBlk, blockSrc[0]);
-                        results[i] = new BlockResult { TmpBuf = tmpBuf, TotalBytes = (int)(end - tmpDst) };
-                    }
-                    else
-                    {
-                        byte* dstBlk = WriteBlockHdr(tmpDst, threadCoder.CompressorFileId,
-                            threadCoder.Options!.GenerateChunkHeaderChecksum, keyframe, uncompressed: false, selfContained: true);
-                        byte* dstQh = WriteChunkHeader(dstBlk, (uint)(blockSize - 1));
+                        byte* tmpDst = pTmp;
 
-                        float cost = StreamLZConstants.InvalidCost;
-                        // startPos=0: each SC chunk is independent; ensures initialCopyBytes=8
-                        // to prevent Mode 0 delta literal cascade corruption.
-                        int chunkCompressedSize = CompressChunk(threadCoder, threadLzTemp, mls, blockSrc, blockSize,
-                            dstQh, tmpDst + bufsizeNeeded, 0, &cost);
-
-                        float memsetCost = (blockSize * CostCoefficients.Current.MemsetPerByte + CostCoefficients.Current.MemsetBase)
-                            * threadCoder.SpeedTradeoff + blockSize + StreamLZConstants.ChunkHeaderSize;
-
-                        if (chunkCompressedSize < 0 || chunkCompressedSize >= blockSize || cost > memsetCost)
+                        if (AreAllBytesEqual(blockSrc, blockSize))
                         {
-                            tmpDst = pTmp;
-                            byte* uncHdr = WriteBlockHdr(tmpDst, threadCoder.CompressorFileId,
-                                crc: false, keyframe, uncompressed: true, selfContained: true);
-                            Buffer.MemoryCopy(blockSrc, uncHdr, blockSize, blockSize);
-                            results[i] = new BlockResult { TmpBuf = tmpBuf, TotalBytes = (int)(uncHdr + blockSize - tmpDst) };
+                            byte* dstBlk = WriteBlockHdr(tmpDst, threadCoder.CompressorFileId,
+                                threadCoder.Options!.GenerateChunkHeaderChecksum, keyframe, uncompressed: false, selfContained: true);
+                            byte* end = WriteMemsetChunkHeader(dstBlk, blockSrc[0]);
+                            results[chunkIdx] = new BlockResult { TmpBuf = tmpBuf, TotalBytes = (int)(end - tmpDst) };
                         }
                         else
                         {
-                            WriteChunkHeader(dstBlk, (uint)(chunkCompressedSize - 1));
-                            results[i] = new BlockResult { TmpBuf = tmpBuf, TotalBytes = (int)(dstQh + chunkCompressedSize - tmpDst) };
+                            byte* dstBlk = WriteBlockHdr(tmpDst, threadCoder.CompressorFileId,
+                                threadCoder.Options!.GenerateChunkHeaderChecksum, keyframe, uncompressed: false, selfContained: true);
+                            byte* dstQh = WriteChunkHeader(dstBlk, (uint)(blockSize - 1));
+
+                            float cost = StreamLZConstants.InvalidCost;
+                            int chunkCompressedSize = CompressChunk(threadCoder, threadLzTemp, mls, blockSrc, blockSize,
+                                dstQh, tmpDst + bufsizeNeeded, groupOffset, &cost);
+
+                            float memsetCost = (blockSize * CostCoefficients.Current.MemsetPerByte + CostCoefficients.Current.MemsetBase)
+                                * threadCoder.SpeedTradeoff + blockSize + StreamLZConstants.ChunkHeaderSize;
+
+                            if (chunkCompressedSize < 0 || chunkCompressedSize >= blockSize || cost > memsetCost)
+                            {
+                                tmpDst = pTmp;
+                                byte* uncHdr = WriteBlockHdr(tmpDst, threadCoder.CompressorFileId,
+                                    crc: false, keyframe, uncompressed: true, selfContained: true);
+                                Buffer.MemoryCopy(blockSrc, uncHdr, blockSize, blockSize);
+                                results[chunkIdx] = new BlockResult { TmpBuf = tmpBuf, TotalBytes = (int)(uncHdr + blockSize - tmpDst) };
+                            }
+                            else
+                            {
+                                WriteChunkHeader(dstBlk, (uint)(chunkCompressedSize - 1));
+                                results[chunkIdx] = new BlockResult { TmpBuf = tmpBuf, TotalBytes = (int)(dstQh + chunkCompressedSize - tmpDst) };
+                            }
                         }
                     }
+
+                    groupOffset += blockSize;
                 }
 
                 return threadState;

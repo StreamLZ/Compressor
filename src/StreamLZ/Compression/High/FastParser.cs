@@ -139,7 +139,8 @@ internal static unsafe class FastParser
         bool sc = lzcoder.Options.SelfContained;
         if (sc)
         {
-            dictSize = Math.Min(dictSize, StreamLZConstants.ChunkSize); // cap to chunk size for self-contained
+            // Cap dictionary to group size: allows cross-chunk references within an SC group
+            dictSize = Math.Min(dictSize, StreamLZConstants.ChunkSize * StreamLZConstants.ScGroupSize);
         }
 
         int minMatchLength = Math.Max(lzcoder.Options.MinMatchLength, 4);

@@ -253,6 +253,14 @@ internal static class StreamLZConstants
     // ────────────────────────────────────────────────────────────
 
     /// <summary>
+    /// Number of 256KB chunks grouped per thread in self-contained (SC) parallel mode.
+    /// Chunks within a group are compressed/decompressed sequentially with cross-chunk
+    /// context, giving the match finder a larger search window. Between groups there are
+    /// no references, preserving full parallelism.
+    /// </summary>
+    public const int ScGroupSize = 4;
+
+    /// <summary>
     /// Estimated memory consumption per compression thread (40 MB).
     /// Used by the thread count calculator to avoid exceeding available RAM.
     /// </summary>

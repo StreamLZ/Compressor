@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.4.0]
+
+### Performance
+- SC chunk grouping: group 4 × 256KB chunks per thread in self-contained
+  parallel mode (L6-L8). The match finder sees 1MB of context instead of
+  256KB, dramatically improving compression ratio with no speed penalty on
+  homogeneous data.
+  - L6 enwik8: 33.7% → **31.4%** (-2.3pp ratio), compress unchanged, decompress +28%.
+  - L8 enwik8: 33.4% → **31.0%** (-2.4pp), compress unchanged, decompress +20%.
+  - L6 silesia: 28.2% → **26.7%** (-1.5pp), compress -14%, decompress -14%.
+  - L8 silesia: 27.9% → **26.3%** (-1.6pp), compress -4%, decompress -19%.
+
+### Changed
+- **Breaking**: Compressed output from L6-L8 now contains cross-chunk
+  references within each 4-chunk group. Older decompressors (< 1.4.0)
+  cannot decode data compressed with this version at L6-L8. Decompression
+  of data compressed by older versions is unaffected.
+
 ## [1.3.0]
 
 ### Performance

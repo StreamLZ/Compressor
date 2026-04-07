@@ -714,32 +714,45 @@ internal static unsafe class StreamLZDecoder
         }
         byte* prefixBase = src + pieceSrcEnd - prefixBytes;
 
-        // Phase 2: Parallel decompress
+        // Phase 2: Parallel decompress — groups of G chunks per worker.
+        // Within a group, chunks are decoded sequentially with cross-chunk context.
+        // Between groups, no references (full parallelism).
+        int G = StreamLZConstants.ScGroupSize;
+        int numGroups = (numChunks + G - 1) / G;
         int scratchSize = StreamLZConstants.ScratchSize;
         int error = 0;
         nint dstN = (nint)dst, srcN = (nint)src;
 
-        Parallel.For(0, chunks.Count,
+        Parallel.For(0, numGroups,
             new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount },
             () => (nint)NativeMemory.AllocZeroed((nuint)scratchSize),
-            (i, _, scratchNint) =>
+            (g, _, scratchNint) =>
             {
-                var q = chunks[i];
-                byte* localScratch = (byte*)scratchNint;
-                // Clear scratch for reuse between chunks
-                new Span<byte>(localScratch, scratchSize).Clear();
-                StreamLZHeader hdr = default;
-                int srcUsed = 0, dstUsed = 0;
-                // Self-contained chunks decode with dstOffset = 0 because they must not
-                // depend on earlier chunk output. The encoder appends a tail prefix table
-                // for the first 8 bytes of chunks 1..N, which phase 3 restores below.
-                bool ok = DecodeStep(ref hdr, ref srcUsed, ref dstUsed,
-                    localScratch, scratchSize,
-                    (byte*)dstN + q.DstOffset, 0, q.DstSize,
-                    (byte*)srcN + q.SrcOffset, q.SrcSize);
-                if (!ok || dstUsed != q.DstSize)
+                int firstChunk = g * G;
+                int lastChunk = Math.Min(firstChunk + G, numChunks);
+
+                // dstStart for this group = output position of the first chunk in the group
+                byte* groupDst = (byte*)dstN + chunks[firstChunk].DstOffset;
+
+                for (int ci = firstChunk; ci < lastChunk; ci++)
                 {
-                    Interlocked.Exchange(ref error, 1);
+                    var q = chunks[ci];
+                    byte* localScratch = (byte*)scratchNint;
+                    new Span<byte>(localScratch, scratchSize).Clear();
+                    StreamLZHeader hdr = default;
+                    int srcUsed = 0, dstUsed = 0;
+
+                    // dstOffset within the group: allows cross-chunk LZ back-references
+                    int groupDstOffset = q.DstOffset - chunks[firstChunk].DstOffset;
+
+                    bool ok = DecodeStep(ref hdr, ref srcUsed, ref dstUsed,
+                        localScratch, scratchSize,
+                        groupDst, groupDstOffset, q.DstSize,
+                        (byte*)srcN + q.SrcOffset, q.SrcSize);
+                    if (!ok || dstUsed != q.DstSize)
+                    {
+                        Interlocked.Exchange(ref error, 1);
+                    }
                 }
                 return scratchNint;
             },
@@ -750,9 +763,9 @@ internal static unsafe class StreamLZDecoder
             throw new InvalidDataException("StreamLZ parallel decompression encountered an error in one or more chunks.");
         }
 
-        // Phase 3: Restore first 8 bytes of each chunk (except #0) from the tail.
-        // Chunk 0 keeps its inline prefix; later chunks borrow those bytes so they
-        // can decode independently and then receive the real prefix here.
+        // Phase 3: Restore first 8 bytes of each group's first chunk (except group 0)
+        // from the tail prefix table. Chunks within a group already have correct bytes
+        // from cross-chunk decode, but we still restore ALL entries for format compatibility.
         for (int i = 0; i < numChunks - 1; i++)
         {
             var q = chunks[i + 1];
