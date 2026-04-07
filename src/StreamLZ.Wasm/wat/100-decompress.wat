@@ -103,6 +103,34 @@
     (local.get $dstSize)
   )
 
+  ;; ── decompressChunkAt ──────────────────────────────────────
+  ;; Decompress a single chunk with explicit pointers and group offset.
+  ;; Used by SC group decode: output goes to dstBase+dstOffset, and
+  ;; cross-chunk match references can reach back to dstBase.
+  ;; Parameters:
+  ;;   srcPtr    — pointer to compressed chunk data (block hdr + chunk hdr + payload)
+  ;;   srcLen    — byte length of compressed data
+  ;;   dstBase   — base output pointer (start of group output region)
+  ;;   dstOffset — offset within group for this chunk's output
+  ;;   dstSize   — expected decompressed size of this chunk
+  ;; Returns: decompressed size on success, -1 on error.
+  (func (export "decompressChunkAt")
+    (param $srcPtr i32) (param $srcLen i32)
+    (param $dstBase i32) (param $dstOffset i32) (param $dstSize i32)
+    (result i32)
+    (if (i32.lt_s
+          (call $decode_block_at
+            (local.get $srcPtr)
+            (i32.add (local.get $srcPtr) (local.get $srcLen))
+            (local.get $dstBase)
+            (local.get $dstOffset)
+            (local.get $dstSize))
+          (i32.const 0))
+      (then (return (i32.const -1)))
+    )
+    (local.get $dstSize)
+  )
+
   ;; ── decode_block ───────────────────────────────────────────
   ;; Decode one compressed frame-level block.
   ;; A block contains multiple 256KB StreamLZ chunks, each with its own
@@ -111,6 +139,20 @@
   (func $decode_block
     (param $src i32) (param $srcEnd i32)
     (param $dst i32) (param $dstSize i32)
+    (result i32)
+    (call $decode_block_at
+      (local.get $src) (local.get $srcEnd)
+      (local.get $dst) (i32.const 0) (local.get $dstSize))
+  )
+
+  ;; ── decode_block_at ──────────────────────────────────────────
+  ;; Decode one compressed block with an explicit initial offset.
+  ;; For SC group decode, dstOffset > 0 allows cross-chunk references:
+  ;; output goes to dst+dstOffset, match refs can reach back to dst.
+  ;; Returns 0 on success, -1 on error.
+  (func $decode_block_at
+    (param $src i32) (param $srcEnd i32)
+    (param $dst i32) (param $dstOffset i32) (param $dstSize i32)
     (result i32)
     (local $b0 i32)
     (local $b1 i32)
@@ -129,9 +171,9 @@
     (local $chunkBytesLeft i32)
     (local $isSC i32)
 
-    (local.set $dstEnd (i32.add (local.get $dst) (local.get $dstSize)))
-    (local.set $dstCur (local.get $dst))
-    (local.set $offset (i32.const 0))
+    (local.set $dstEnd (i32.add (i32.add (local.get $dst) (local.get $dstOffset)) (local.get $dstSize)))
+    (local.set $dstCur (i32.add (local.get $dst) (local.get $dstOffset)))
+    (local.set $offset (local.get $dstOffset))
     (local.set $isSC (i32.const 0))
 
     ;; Outer loop: one iteration per 256KB StreamLZ chunk
@@ -163,12 +205,10 @@
         )
 
         ;; Store chunk dstStart (at 0xD0):
-        ;; SC mode: per-chunk (each chunk independent)
-        ;; Non-SC mode: block start (cross-chunk references)
-        (if (local.get $isSC)
-          (then (i32.store (i32.const 0xD0) (local.get $dstCur)))
-          (else (i32.store (i32.const 0xD0) (local.get $dst)))
-        )
+        ;; Always use block/group base ($dst) so cross-chunk references work.
+        ;; For SC grouping, $dst is the group base; matches can reach earlier chunks.
+        ;; For non-SC, $dst is the block base as before.
+        (i32.store (i32.const 0xD0) (local.get $dst))
 
         ;; Bytes left for this 256KB chunk
         (local.set $chunkBytesLeft

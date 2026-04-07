@@ -61,6 +61,65 @@ function decompressChunk(msg) {
   }
 }
 
+function decompressGroup(msg) {
+  const { inputSAB, outputSAB, groupDstOffset, chunks, groupIndex } = msg;
+  const input = new Uint8Array(inputSAB);
+  const output = new Uint8Array(outputSAB);
+
+  // Calculate total group size for contiguous decode
+  let groupTotalSize = 0;
+  for (const c of chunks) groupTotalSize += c.dstSize;
+
+  // Find max input chunk size
+  let maxInputLen = 0;
+  for (const c of chunks) if (c.srcLen > maxInputLen) maxInputLen = c.srcLen;
+
+  const inputBase = wasm.getInputBase();
+  const outputBase = ((inputBase + maxInputLen + 255) & ~255);
+  const needed = outputBase + groupTotalSize + 65536;
+  const currentSize = wasm.memory.buffer.byteLength;
+  if (needed > currentSize) {
+    try {
+      wasm.memory.grow(Math.ceil((needed - currentSize) / 65536));
+    } catch (e) {
+      post({ type: 'done', groupIndex, ok: false, error: 'OOM' });
+      return;
+    }
+  }
+  wasm.setOutputBase(outputBase);
+  mem = new Uint8Array(wasm.memory.buffer);
+
+  // Decode chunks sequentially into contiguous WASM output region
+  let groupOffset = 0;
+  for (const c of chunks) {
+    if (c.isUncomp || c.isMemset) {
+      // Already handled on main thread; skip but advance offset
+      groupOffset += c.dstSize;
+      continue;
+    }
+
+    // Copy this chunk's compressed data to WASM input
+    mem = new Uint8Array(wasm.memory.buffer);
+    mem.set(input.subarray(c.srcOffset, c.srcOffset + c.srcLen), inputBase);
+
+    // decompressChunk decodes at outputBase with dstOffset for cross-chunk refs
+    const result = wasm.decompressChunkAt(inputBase, c.srcLen, outputBase, groupOffset, c.dstSize);
+
+    if (result !== c.dstSize) {
+      post({ type: 'done', groupIndex, ok: false, error: result });
+      return;
+    }
+
+    groupOffset += c.dstSize;
+  }
+
+  // Copy full group output to shared buffer
+  mem = new Uint8Array(wasm.memory.buffer);
+  output.set(mem.subarray(outputBase, outputBase + groupTotalSize), groupDstOffset);
+
+  post({ type: 'done', groupIndex, ok: true });
+}
+
 const HLZ_SCRATCH_BASE = 0x00230000;
 const HLZ_SCRATCH_SIZE = 0x00140020;
 
@@ -159,6 +218,7 @@ function phase1Batch(msg) {
 function onMessage(msg) {
   if (msg.type === 'init') init(msg.wasmModule);
   else if (msg.type === 'decompress_chunk') decompressChunk(msg);
+  else if (msg.type === 'decompress_group') decompressGroup(msg);
   else if (msg.type === 'phase1_batch') phase1Batch(msg);
 }
 

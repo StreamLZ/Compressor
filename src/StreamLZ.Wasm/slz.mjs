@@ -300,6 +300,8 @@ function decompressSingle(data, contentSize) {
 
 // ── Parallel decompress (L6-L8 SC) ──────────────────────────
 
+const SC_GROUP_SIZE = 4;
+
 async function decompressParallel(data, frame, pool) {
   const { chunks, contentSize, prefixBase } = frame;
   const inputSAB = new SharedArrayBuffer(data.length);
@@ -307,29 +309,51 @@ async function decompressParallel(data, frame, pool) {
   const outputSAB = new SharedArrayBuffer(contentSize);
   const output = new Uint8Array(outputSAB);
 
+  // Group chunks (G=SC_GROUP_SIZE). Within a group, chunks are decoded
+  // sequentially with cross-chunk context. Between groups, full parallelism.
+  const numGroups = Math.ceil(chunks.length / SC_GROUP_SIZE);
   const promises = [];
-  for (let i = 0; i < chunks.length; i++) {
-    const c = chunks[i];
-    if (c.isUncomp) {
-      output.set(data.subarray(c.srcOffset + 2, c.srcOffset + 2 + c.dstSize), c.dstOffset);
-      continue;
+
+  for (let g = 0; g < numGroups; g++) {
+    const first = g * SC_GROUP_SIZE;
+    const last = Math.min(first + SC_GROUP_SIZE, chunks.length);
+    const groupChunks = [];
+    let allSpecial = true;
+
+    for (let i = first; i < last; i++) {
+      const c = chunks[i];
+      if (c.isUncomp) {
+        output.set(data.subarray(c.srcOffset + 2, c.srcOffset + 2 + c.dstSize), c.dstOffset);
+      } else if (c.isMemset) {
+        output.fill(c.fillByte, c.dstOffset, c.dstOffset + c.dstSize);
+      } else {
+        allSpecial = false;
+      }
+      groupChunks.push(c);
     }
-    if (c.isMemset) {
-      output.fill(c.fillByte, c.dstOffset, c.dstOffset + c.dstSize);
-      continue;
-    }
+
+    if (allSpecial) continue;
+
+    const groupDstOffset = chunks[first].dstOffset;
     promises.push(pool.dispatch({
-      type: 'decompress_chunk',
-      inputSAB, inputOffset: c.srcOffset, inputLen: c.srcLen,
-      outputSAB, outputOffset: c.dstOffset, dstSize: c.dstSize,
-      chunkIndex: i
+      type: 'decompress_group',
+      inputSAB, outputSAB,
+      groupDstOffset,
+      chunks: groupChunks.map(c => ({
+        srcOffset: c.srcOffset, srcLen: c.srcLen,
+        dstOffset: c.dstOffset, dstSize: c.dstSize,
+        isUncomp: c.isUncomp || false,
+        isMemset: c.isMemset || false,
+        fillByte: c.fillByte || 0
+      })),
+      groupIndex: g
     }).then(result => {
-      if (!result.ok) throw new Error(`Chunk ${i} failed (code ${result.error})`);
+      if (!result.ok) throw new Error(`Group ${g} failed (${result.error})`);
     }));
   }
   await Promise.all(promises);
 
-  // Restore SC prefix bytes
+  // Restore SC prefix bytes (all entries, for format compatibility)
   for (let i = 0; i < chunks.length - 1; i++) {
     const c = chunks[i + 1];
     output.set(data.subarray(prefixBase + i * 8, prefixBase + i * 8 + Math.min(8, c.dstSize)), c.dstOffset);

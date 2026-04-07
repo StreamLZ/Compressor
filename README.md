@@ -194,6 +194,7 @@ Slz.WarmUp();
 | **SLZ L5** | **36.4%** | **82 MB/s** | **5,281 MB/s** | | |
 | **SLZ L6** | **26.7%** | **65 MB/s** | **8,727 MB/s** | :white_check_mark: | :white_check_mark: |
 | Zstd 9 | 27.9% | 93 MB/s | 1,573 MB/s | | |
+| Zstd 19 | 24.9% | 3.7 MB/s | 1,390 MB/s | | |
 | **SLZ L11** | **24.2%** | **3.4 MB/s** | **1,424 MB/s** | | **partial** |
 
 *All benchmarks on Intel Arrow Lake-S (Ultra 9 285K), 24-core, .NET 10.*
