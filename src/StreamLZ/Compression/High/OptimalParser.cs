@@ -360,6 +360,9 @@ internal static unsafe partial class Compressor
                 {
                     costModel.ChunkType = *chunkTypePtr;
                     costModel.SubOrCopyMask = (*chunkTypePtr != 1) ? -1 : 0;
+                    costModel.DecodeCostPerToken = lzcoder.Options?.DecodeCostPerToken ?? 0;
+                    costModel.DecodeCostSmallOffset = lzcoder.Options?.DecodeCostSmallOffset ?? 0;
+                    costModel.DecodeCostShortMatch = lzcoder.Options?.DecodeCostShortMatch ?? 0;
 
                     if (lzcoder.LastChunkType < 0)
                     {

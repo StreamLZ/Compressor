@@ -646,4 +646,249 @@ internal static class MatchFinder
             laoIdx += numLaoPerOffs;
         }
     }
+
+    // ────────────────────────────────────────────────────────────
+    //  FindMatchesBT4 — Binary Tree match finder
+    // ────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Finds matches using a binary tree (BT4) match finder. Each position is
+    /// inserted into a binary tree ordered by suffix content. The tree walk
+    /// simultaneously searches for matches and inserts the new position.
+    /// Produces higher-quality matches than hash chains (finds shorter-offset
+    /// matches that hash chains miss when depth-limited), at the cost of
+    /// slower insertion.
+    /// </summary>
+    /// <param name="srcBase">Source data buffer.</param>
+    /// <param name="srcSize">Size of the source data.</param>
+    /// <param name="mls">Match storage to populate.</param>
+    /// <param name="maxNumMatches">Maximum matches to keep per position (up to 4).</param>
+    /// <param name="preloadSize">Number of bytes already in the tree from a prior window.</param>
+    /// <param name="maxDepth">Maximum tree traversal depth per position. Higher = better ratio, slower.
+    /// Typical values: 32 (fast), 96 (normal), 256 (ultra).</param>
+    public static void FindMatchesBT4(
+        byte[] srcBase, int srcSize, ManagedMatchLenStorage mls,
+        int maxNumMatches, int preloadSize, int maxDepth = 96)
+    {
+        if (srcSize < 8) return;
+
+        // Hash table size: 2^bits, maps 4-byte prefix to most recent position
+        int bits = Math.Min(
+            Math.Max(BitOperations.Log2((uint)Math.Max(srcSize, 2) - 1) + 1, 16),
+            24);
+        int hashSize = 1 << bits;
+        uint hashMask = (uint)(hashSize - 1);
+
+        // head[hash] = most recent position with this 4-byte prefix (1-based, 0 = empty)
+        int[] head = new int[hashSize];
+
+        // Binary tree: left[pos] and right[pos] store child positions (1-based)
+        // left[pos] = position with lexicographically smaller suffix
+        // right[pos] = position with lexicographically larger suffix
+        int treeSize = srcSize + 1;
+        int[] left = GC.AllocateUninitializedArray<int>(treeSize);
+        int[] right = GC.AllocateUninitializedArray<int>(treeSize);
+
+        int srcSizeSafe = srcSize - 8;
+        Span<LengthAndOffset> matches = stackalloc LengthAndOffset[maxNumMatches + 2];
+
+        // Preload: insert positions [0..preloadSize) into the tree without storing matches
+        for (int pos = 0; pos < preloadSize && pos < srcSizeSafe; pos++)
+        {
+            BT4InsertOnly(srcBase, pos, head, left, right, hashMask, maxDepth, srcSizeSafe);
+        }
+
+        // Main loop: for each position, search + insert simultaneously
+        for (int pos = preloadSize; pos < srcSizeSafe; pos++)
+        {
+            int numMatch = BT4SearchAndInsert(srcBase, pos, head, left, right,
+                hashMask, maxDepth, srcSizeSafe, matches, maxNumMatches);
+
+            // Convert to MLS-relative position (subtract preloadSize, same as FindMatchesHashBased)
+            int mlsPos = pos - preloadSize;
+
+            if (numMatch > 0)
+            {
+                // Sort matches by length descending (longest first) for the optimal parser
+                var matchSlice = matches.Slice(0, numMatch);
+                matchSlice.Sort((a, b) => b.Length.CompareTo(a.Length));
+                numMatch = RemoveIdentical(matchSlice, numMatch);
+                InsertMatches(mls, mlsPos, matches, Math.Min(maxNumMatches, numMatch));
+            }
+
+            // Long match skip: for very long matches (>= 77 bytes), insert synthetic
+            // sub-matches at stride-4 and skip ahead (same as FindMatchesHashBased)
+            if (numMatch > 0 && matches[0].Length >= 77)
+            {
+                int skipLen = matches[0].Length;
+                int skipOffset = matches[0].Offset;
+                for (int skipPos = pos + 4; skipPos < pos + skipLen - 4 && skipPos < srcSizeSafe; skipPos += 4)
+                {
+                    BT4InsertOnly(srcBase, skipPos, head, left, right, hashMask, maxDepth / 4, srcSizeSafe);
+                    int subLen = skipLen - (skipPos - pos);
+                    if (subLen >= 4)
+                    {
+                        matches[0].Set(subLen, skipOffset);
+                        InsertMatches(mls, skipPos - preloadSize, matches, 1);
+                    }
+                }
+                pos += skipLen - 5;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Insert a position into the binary tree without searching for matches.
+    /// Used for preloading dictionary positions.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void BT4InsertOnly(
+        byte[] src, int pos, int[] head, int[] left, int[] right,
+        uint hashMask, int maxDepth, int srcSafe)
+    {
+        BT4SearchAndInsert(src, pos, head, left, right, hashMask, maxDepth, srcSafe,
+            Span<LengthAndOffset>.Empty, 0);
+    }
+
+    /// <summary>
+    /// Simultaneously search the binary tree for matches at <paramref name="pos"/>
+    /// and insert <paramref name="pos"/> into the tree. Returns the number of
+    /// matches found (up to <paramref name="maxMatches"/>).
+    /// </summary>
+    /// <remarks>
+    /// The binary tree is ordered by the full suffix content at each position.
+    /// Walking down the tree, at each node we compare our suffix with the node's
+    /// suffix. We go left if ours is smaller, right if larger. Each node we visit
+    /// that matches at least 4 bytes is a match candidate. We insert ourselves
+    /// by splitting the tree at the point where we stop (replacing a child pointer
+    /// with ourselves and adopting the displaced subtrees as our children).
+    /// </remarks>
+    /// <summary>
+    /// Simultaneously search the binary tree for matches at <paramref name="pos"/>
+    /// and insert <paramref name="pos"/> into the tree. Returns the number of
+    /// matches found (up to <paramref name="maxMatches"/>).
+    /// </summary>
+    /// <remarks>
+    /// Uses the standard BT insertion algorithm from LZMA/zstd. The key insight:
+    /// as we walk down the tree, we maintain two "dangling pointers" (leftNode, rightNode)
+    /// that track where to attach the next child. At each node, if our suffix is smaller,
+    /// the current node becomes our right child (via rightNode) and we descend left.
+    /// If larger, the current node becomes our left child and we descend right.
+    /// This simultaneously searches and inserts in O(depth) time.
+    /// </remarks>
+    private static unsafe int BT4SearchAndInsert(
+        byte[] src, int pos, int[] head, int[] left, int[] right,
+        uint hashMask, int maxDepth, int srcSafe,
+        Span<LengthAndOffset> matches, int maxMatches)
+    {
+        uint hash = (uint)Unsafe.ReadUnaligned<uint>(ref src[pos]);
+        hash = BitOperations.RotateLeft(hash * 0x9E3779B9u, 16);
+        int hashIdx = (int)(hash & hashMask);
+
+        int curMatch = head[hashIdx] - 1;
+        head[hashIdx] = pos + 1;
+
+        // Pin all arrays for the duration: eliminates managed bounds checks in the hot loop.
+        fixed (byte* pSrc = src)
+        fixed (int* pLeft = left)
+        fixed (int* pRight = right)
+        fixed (int* pHead = head)
+        {
+            int* leftNodePtr = pLeft + pos;
+            int* rightNodePtr = pRight + pos;
+            *leftNodePtr = 0;
+            *rightNodePtr = 0;
+
+            int matchLenLeft = 0;
+            int matchLenRight = 0;
+            int numFound = 0;
+            int bestLen = 3;
+
+            for (int depth = 0; depth < maxDepth && curMatch >= 0; depth++)
+            {
+                int commonLen = Math.Min(matchLenLeft, matchLenRight);
+                int maxLen = Math.Min(srcSafe - pos, srcSafe - curMatch);
+                if (maxLen <= commonLen) break;
+
+                // Extend using raw pointers + 8-byte XOR + TZCNT
+                byte* pA = pSrc + pos + commonLen;
+                byte* pB = pSrc + curMatch + commonLen;
+                int matchLen = commonLen;
+                int remain = maxLen - commonLen;
+                while (remain >= 8)
+                {
+                    ulong diff = *(ulong*)pA ^ *(ulong*)pB;
+                    if (diff != 0)
+                    {
+                        matchLen += BitOperations.TrailingZeroCount(diff) >> 3;
+                        goto doneExtend;
+                    }
+                    pA += 8; pB += 8;
+                    matchLen += 8;
+                    remain -= 8;
+                }
+                while (remain > 0 && *pA == *pB)
+                {
+                    pA++; pB++;
+                    matchLen++;
+                    remain--;
+                }
+                doneExtend:
+
+                if (matchLen > bestLen)
+                {
+                    bestLen = matchLen;
+                    if (numFound < maxMatches && matches.Length > 0)
+                    {
+                        matches[numFound++].Set(matchLen, pos - curMatch);
+                    }
+                    else if (numFound > 0 && matches.Length > 0)
+                    {
+                        // Replace shortest (linear scan — maxMatches is small, typically 4)
+                        int worstIdx = 0;
+                        for (int i = 1; i < numFound; i++)
+                        {
+                            if (matches[i].Length < matches[worstIdx].Length)
+                                worstIdx = i;
+                        }
+                        if (matchLen > matches[worstIdx].Length)
+                            matches[worstIdx].Set(matchLen, pos - curMatch);
+                    }
+
+                    if (matchLen >= maxLen)
+                    {
+                        *leftNodePtr = pLeft[curMatch];
+                        *rightNodePtr = pRight[curMatch];
+                        return numFound;
+                    }
+                }
+
+                // Branch and prefetch next node's children
+                if (pSrc[pos + matchLen] < pSrc[curMatch + matchLen])
+                {
+                    *rightNodePtr = curMatch + 1;
+                    rightNodePtr = pLeft + curMatch;
+                    matchLenRight = matchLen;
+                    curMatch = pLeft[curMatch] - 1;
+                    // Prefetch next node's tree entries
+                    if (curMatch >= 0 && Sse.IsSupported)
+                        Sse.Prefetch0(pLeft + curMatch);
+                }
+                else
+                {
+                    *leftNodePtr = curMatch + 1;
+                    leftNodePtr = pRight + curMatch;
+                    matchLenLeft = matchLen;
+                    curMatch = pRight[curMatch] - 1;
+                    if (curMatch >= 0 && Sse.IsSupported)
+                        Sse.Prefetch0(pRight + curMatch);
+                }
+            }
+
+            *leftNodePtr = 0;
+            *rightNodePtr = 0;
+
+            return numFound;
+        }
+    }
 }

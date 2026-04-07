@@ -25,6 +25,22 @@ internal sealed class CompressOptions
     public bool SelfContained { get; set; }
     /// <summary>Whether to use two-phase compression (self-contained + cross-chunk patches).</summary>
     public bool TwoPhase { get; set; }
+
+    // ── Decode-cost penalties (in 32nds of a bit) ──
+    // These bias the optimal parser toward matches that are cheaper to DECODE,
+    // not just cheaper to ENCODE. Set via environment variables for tuning.
+
+    /// <summary>Per-token fixed decode overhead penalty (32nds of a bit). Each token
+    /// requires carousel rotation + entropy decode + branch. Default 0.</summary>
+    public int DecodeCostPerToken { get; set; }
+
+    /// <summary>Penalty for matches with offset &lt; 16 (byte-at-a-time copy instead
+    /// of SIMD). Applied per match byte. In 32nds of a bit. Default 0.</summary>
+    public int DecodeCostSmallOffset { get; set; }
+
+    /// <summary>Penalty for very short matches (length 2-3) that barely justify
+    /// the token overhead. In 32nds of a bit. Default 0.</summary>
+    public int DecodeCostShortMatch { get; set; }
 }
 
 /// <summary>

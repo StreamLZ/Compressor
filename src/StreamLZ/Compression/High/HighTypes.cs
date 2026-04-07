@@ -143,6 +143,11 @@ internal static unsafe partial class Compressor
         public fixed uint OffsCost[256];
         public fixed uint OffsLoCost[256];
         public fixed uint MatchLenCost[256];
+
+        // Decode-cost penalties (in 32nds of a bit, 0 = disabled)
+        public int DecodeCostPerToken;
+        public int DecodeCostSmallOffset;
+        public int DecodeCostShortMatch;
     }
 
     /// <summary>Running compression statistics (histograms for each stream).</summary>

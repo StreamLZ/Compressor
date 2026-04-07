@@ -243,6 +243,7 @@ internal static unsafe partial class Compressor
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int BitsForToken(ref CostModel costModel, int curMatchLen, int cmdOffset, int recentField, int lengthField)
     {
+        int cost;
         if (curMatchLen - 17 >= 0)
         {
             int bitsForMatchLen;
@@ -255,9 +256,21 @@ internal static unsafe partial class Compressor
             {
                 bitsForMatchLen = (int)costModel.MatchLenCost[curMatchLen - 17];
             }
-            return (int)costModel.TokenCost[(15 << 2) + (recentField << 6) + lengthField] + bitsForMatchLen;
+            cost = (int)costModel.TokenCost[(15 << 2) + (recentField << 6) + lengthField] + bitsForMatchLen;
         }
-        return (int)costModel.TokenCost[((curMatchLen - 2) << 2) + (recentField << 6) + lengthField];
+        else
+        {
+            cost = (int)costModel.TokenCost[((curMatchLen - 2) << 2) + (recentField << 6) + lengthField];
+        }
+
+        // Decode-cost penalties (currently zero — experimentation showed no benefit;
+        // the decompress slowdown from BT4 is inherent to higher entropy density,
+        // not fixable by biasing match selection).
+        cost += costModel.DecodeCostPerToken;
+        if (curMatchLen <= 3)
+            cost += costModel.DecodeCostShortMatch;
+
+        return cost;
     }
 
     // Explicit distance penalty: nudge parser toward nearby matches when
@@ -304,6 +317,13 @@ internal static unsafe partial class Compressor
         if (offsetBits > OffsetDistancePenaltyThreshold)
         {
             cost += (offsetBits - OffsetDistancePenaltyThreshold) * OffsetDistancePenaltyMult;
+        }
+
+        // Decode-cost penalty for small offsets: match copy uses byte-at-a-time
+        // instead of SIMD when offset < 16. Penalty is per-byte of the match.
+        if (offset < 16 && costModel.DecodeCostSmallOffset > 0)
+        {
+            cost += (uint)costModel.DecodeCostSmallOffset;
         }
 
         return cost;

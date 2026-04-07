@@ -386,12 +386,14 @@ internal static unsafe partial class StreamLZCompressor
     /// <returns>A new <see cref="CompressOptions"/> instance with defaults for the specified level.</returns>
     public static CompressOptions GetDefaultCompressOpts(int level)
     {
-        return new CompressOptions
+        var opts = new CompressOptions
         {
             SeekChunkLen = StreamLZConstants.ChunkSize,
-            SpaceSpeedTradeoffBytes = 256, // default speed/ratio tradeoff (1/256 scale)
-            MaxLocalDictionarySize = 4 * 1024 * 1024, // 4 MB
+            SpaceSpeedTradeoffBytes = 256,
+            MaxLocalDictionarySize = 4 * 1024 * 1024,
         };
+
+        return opts;
     }
 
     // ================================================================
@@ -472,7 +474,17 @@ internal static unsafe partial class StreamLZCompressor
             mls.WindowBaseOffset = dictSize;
             mls.RoundStartPos = (int)(srcIn - srcWindowBase);
 
-            MatchFinder.FindMatchesHashBased(matchSrcArr, compactLen, mls, 4, dictSize);
+            // BT4 for L11 (codec level 9, non-SC) only: binary tree finds higher-quality
+            // matches at the cost of slower compress + decompress. Users of L11 explicitly
+            // chose maximum ratio. L9-L10 keep hash-based for balanced speed/ratio.
+            if (coder.CompressionLevel >= 9)
+            {
+                MatchFinder.FindMatchesBT4(matchSrcArr, compactLen, mls, 4, dictSize, maxDepth: 128);
+            }
+            else
+            {
+                MatchFinder.FindMatchesHashBased(matchSrcArr, compactLen, mls, 4, dictSize);
+            }
 
             byte* dictBasePtr = srcIn - dictSize;
             int n = CompressBlocks(coder, lztemp, srcIn, dst, srcSize,
@@ -494,6 +506,7 @@ internal static unsafe partial class StreamLZCompressor
 
         return (int)(dst - destinationStart);
     }
+
 
     // ================================================================
     //  Self-contained parallel compress (match finding + compression)
@@ -536,7 +549,12 @@ internal static unsafe partial class StreamLZCompressor
                 var mls = ManagedMatchLenStorage.Create(blockSize + 1, 8.0f);
                 mls.WindowBaseOffset = 0;
                 mls.RoundStartPos = 0; // SC chunks are independent; MLS indices are 0-based
-                MatchFinder.FindMatchesHashBased(matchSrcArr, blockSize, mls, 4, 0);
+                // BT4 for L8 only (codec level 9, SC): +0.3pp ratio, +9% faster decompress.
+                // L6-L7 tested but BT4 slows decompress there (parser too narrow to exploit matches).
+                if (coder.CompressionLevel >= 9)
+                    MatchFinder.FindMatchesBT4(matchSrcArr, blockSize, mls, 4, 0, maxDepth: 96);
+                else
+                    MatchFinder.FindMatchesHashBased(matchSrcArr, blockSize, mls, 4, 0);
                 ArrayPool<byte>.Shared.Return(matchSrcArr);
 
                 fixed (byte* pTmp = tmpBuf)
