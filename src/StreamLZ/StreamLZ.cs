@@ -1,5 +1,6 @@
 // StreamLZ.cs — Public facade API for the StreamLZ compression library.
 
+using System.Buffers;
 using System.Buffers.Binary;
 using StreamLZ.Common;
 using StreamLZ.Compression;
@@ -220,54 +221,61 @@ public static class Slz
                     $"SLZ1 frame claims {header.ContentSize} bytes decompressed, which exceeds the limit of {maxDecompressedSize} bytes. " +
                     "Pass a larger maxDecompressedSize if this is expected.");
 
-            // Fast path: known content size — parse blocks in-place, no MemoryStream
+            // Fast path: known content size — decompress into pooled buffer with SafeSpace,
+            // then copy to exact-sized result array. Avoids MemoryStream overhead.
             int dstLen = (int)header.ContentSize;
-            byte[] result = new byte[dstLen + SafeSpace];
-            fixed (byte* pSrc = compressed)
-            fixed (byte* pDst = result)
+            byte[] workBuf = ArrayPool<byte>.Shared.Rent(dstLen + SafeSpace);
+            try
             {
-                int pos = header.HeaderSize;
-                int dstOff = 0;
-
-                while (pos + 4 <= compressed.Length)
+                fixed (byte* pSrc = compressed)
+                fixed (byte* pDst = workBuf)
                 {
-                    // Check for end mark (4 zero bytes) before requiring 8-byte block header
-                    if (BinaryPrimitives.ReadUInt32LittleEndian(compressed[pos..]) == 0)
-                        break;
-                    if (!FrameSerializer.TryReadBlockHeader(compressed[pos..], out int compSize, out int decompSize, out bool isUncomp))
-                        throw new InvalidDataException($"Invalid block header in SLZ1 frame at pos={pos}.");
-                    if (compSize == 0)
-                        break;
-                    pos += 8;
+                    int pos = header.HeaderSize;
+                    int dstOff = 0;
 
-                    if (isUncomp)
+                    while (pos + 4 <= compressed.Length)
                     {
-                        if (pos + decompSize > compressed.Length)
-                            throw new InvalidDataException("Unexpected end of data in uncompressed block.");
-                        Buffer.MemoryCopy(pSrc + pos, pDst + dstOff, decompSize, decompSize);
-                    }
-                    else
-                    {
-                        if (pos + compSize > compressed.Length)
-                            throw new InvalidDataException("Unexpected end of data in compressed block.");
-                        int written = StreamLZDecoder.Decompress(
-                            pSrc + pos, compSize, pDst, decompSize, dstOffset: dstOff);
-                        if (written < 0)
-                            throw new InvalidDataException("Block decompression failed.");
-                        decompSize = written;
+                        if (BinaryPrimitives.ReadUInt32LittleEndian(compressed[pos..]) == 0)
+                            break;
+                        if (!FrameSerializer.TryReadBlockHeader(compressed[pos..], out int compSize, out int decompSize, out bool isUncomp))
+                            throw new InvalidDataException($"Invalid block header in SLZ1 frame at pos={pos}.");
+                        if (compSize == 0)
+                            break;
+                        pos += 8;
+
+                        if (isUncomp)
+                        {
+                            if (pos + decompSize > compressed.Length)
+                                throw new InvalidDataException("Unexpected end of data in uncompressed block.");
+                            Buffer.MemoryCopy(pSrc + pos, pDst + dstOff, decompSize, decompSize);
+                        }
+                        else
+                        {
+                            if (pos + compSize > compressed.Length)
+                                throw new InvalidDataException("Unexpected end of data in compressed block.");
+                            int written = StreamLZDecoder.Decompress(
+                                pSrc + pos, compSize, pDst, decompSize, dstOffset: dstOff);
+                            if (written < 0)
+                                throw new InvalidDataException("Block decompression failed.");
+                            decompSize = written;
+                        }
+
+                        dstOff += decompSize;
+                        pos += compSize;
                     }
 
-                    dstOff += decompSize;
-                    pos += compSize;
+                    if (dstOff != dstLen)
+                        throw new InvalidDataException($"SLZ1 frame content size mismatch: header says {dstLen}, decompressed {dstOff}.");
                 }
 
-                if (dstOff != dstLen)
-                    throw new InvalidDataException($"SLZ1 frame content size mismatch: header says {dstLen}, decompressed {dstOff}.");
+                byte[] result = new byte[dstLen];
+                Buffer.BlockCopy(workBuf, 0, result, 0, dstLen);
+                return result;
             }
-
-            // Trim SafeSpace
-            Array.Resize(ref result, dstLen);
-            return result;
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(workBuf);
+            }
         }
 
         // Content size not in header — fall back to stream-based decompression
