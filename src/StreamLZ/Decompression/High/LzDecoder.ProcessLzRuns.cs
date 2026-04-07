@@ -429,6 +429,11 @@ internal static unsafe partial class LzDecoder
             // (offsetIndex + 1) & 4 is 4 when offsetIndex==3, else 0 — advances by one int.
             offsStream = (int*)((nint)offsStream + ((offsetIndex + 1) & 4));
 
+            // Prefetch match source: offset is known, literal copy hasn't started yet.
+            // By the time literals are processed, this cache line should be in L1.
+            if (Sse.IsSupported)
+                Sse.Prefetch0(dst + literalLengthInt + offset);
+
             int actualMatchLength;
             if (matchLength != 15)
             {
