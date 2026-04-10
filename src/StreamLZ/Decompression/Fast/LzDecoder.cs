@@ -10,6 +10,13 @@ using StreamLZ.Common;
 
 namespace StreamLZ.Decompression.Fast;
 
+/// <summary>Compile-time boolean marker for generic specialization.
+/// Using a struct type parameter forces the JIT to generate separate native
+/// code for each variant, eliminating isDelta branches in the hot loop.</summary>
+internal interface ILiteralMode { static abstract bool IsDelta { get; } }
+internal struct RawLiterals : ILiteralMode { public static bool IsDelta => false; }
+internal struct DeltaLiterals : ILiteralMode { public static bool IsDelta => true; }
+
 /// <summary>
 /// Static decoder for Fast/Turbo LZ format.
 /// All methods use unsafe pointer arithmetic for hot inner loops.
@@ -342,15 +349,29 @@ internal static unsafe class LzDecoder
     // medium off32 match (cmd 3..23), long literal (cmd 0), long off16 match (cmd 1),
     // or long off32 match (cmd 2). The short token path handles ~90% of commands.
     //
-    // isDelta is a compile-time-like bool: the JIT specializes the two callsites
-    // (mode 0 and mode 1), so the isDelta branches compile away into separate copies
-    // of the method body — no runtime branch cost for the literal copy type selection.
+    // Generic on TMode (RawLiterals / DeltaLiterals): the JIT generates two separate
+    // native code copies, one per struct type. The TMode.IsDelta checks are constant-
+    // folded at JIT time, eliminating the isDelta branch from the hot loop entirely.
+    // This also frees a register (isDelta was in ecx), reducing spill pressure.
     [SkipLocalsInit]
     public static byte* ProcessMode(
         bool isDelta,
         byte* dst, nuint dstSize, byte* dstPtrEnd, byte* dstStart,
         byte* srcEnd, FastLzTable* lz, int* savedDist, nuint startOff)
     {
+        return isDelta
+            ? ProcessModeImpl<DeltaLiterals>(dst, dstSize, dstPtrEnd, dstStart, srcEnd, lz, savedDist, startOff)
+            : ProcessModeImpl<RawLiterals>(dst, dstSize, dstPtrEnd, dstStart, srcEnd, lz, savedDist, startOff);
+    }
+
+    [SkipLocalsInit]
+    [MethodImpl(MethodImplOptions.AggressiveOptimization | MethodImplOptions.NoInlining)]
+    private static byte* ProcessModeImpl<TMode>(
+        byte* dst, nuint dstSize, byte* dstPtrEnd, byte* dstStart,
+        byte* srcEnd, FastLzTable* lz, int* savedDist, nuint startOff)
+        where TMode : struct, ILiteralMode
+    {
+        bool isDelta = TMode.IsDelta;
         byte* dstEnd = dst + dstSize;
         byte* dstSafeEnd = dstEnd - StreamLZDecoder.SafeSpace;
         byte* cmdStream = lz->CommandStream.Start;
@@ -416,7 +437,6 @@ internal static unsafe class LzDecoder
                 recentOffs ^= (nint)(useDistance & (nuint)(recentOffs ^ -newDist));
                 off16Stream = (ushort*)((nuint)off16Stream + (useDistance & 2));
                 // Validate that the match offset doesn't reference before the output buffer start.
-                // The 32-bit offset paths already validate this; the 16-bit path must too.
                 if (dst + recentOffs < dstStart)
                 {
                     return null;
@@ -707,8 +727,10 @@ internal static unsafe class LzDecoder
                 lz->CommandStream.Start += lz->CommandStream2Offset;
             }
 
-            srcCur = ProcessMode(mode == 0, dst, dstSizeCur, dstEnd, dstStart, srcEnd, lz, &savedDist,
-                (offset == 0) && (iteration == 0) ? (nuint)8 : 0);
+            nuint sOff = (offset == 0) && (iteration == 0) ? (nuint)8 : 0;
+            srcCur = mode == 0
+                ? ProcessModeImpl<DeltaLiterals>(dst, dstSizeCur, dstEnd, dstStart, srcEnd, lz, &savedDist, sOff)
+                : ProcessModeImpl<RawLiterals>(dst, dstSizeCur, dstEnd, dstStart, srcEnd, lz, &savedDist, sOff);
             if (srcCur == null)
             {
                 return false;
