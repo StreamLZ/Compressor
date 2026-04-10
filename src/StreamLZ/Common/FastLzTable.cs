@@ -68,4 +68,9 @@ internal unsafe struct FastLzTable
 
     /// <summary>Command stream offset for next 64KB chunk end.</summary>
     public uint CommandStream2OffsetEnd;
+
+    /// <summary>End of compressed source data. Used only by long literal/match paths
+    /// to bounds-check the length stream. Stored here to free a register in the
+    /// short-token hot loop (which doesn't need it).</summary>
+    public byte* SrcEnd;
 }

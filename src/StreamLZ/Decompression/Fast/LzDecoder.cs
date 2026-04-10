@@ -359,16 +359,17 @@ internal static unsafe class LzDecoder
         byte* dst, nuint dstSize, byte* dstPtrEnd, byte* dstStart,
         byte* srcEnd, FastLzTable* lz, int* savedDist, nuint startOff)
     {
+        lz->SrcEnd = srcEnd;
         return isDelta
-            ? ProcessModeImpl<DeltaLiterals>(dst, dstSize, dstPtrEnd, dstStart, srcEnd, lz, savedDist, startOff)
-            : ProcessModeImpl<RawLiterals>(dst, dstSize, dstPtrEnd, dstStart, srcEnd, lz, savedDist, startOff);
+            ? ProcessModeImpl<DeltaLiterals>(dst, dstSize, dstPtrEnd, dstStart, lz, savedDist, startOff)
+            : ProcessModeImpl<RawLiterals>(dst, dstSize, dstPtrEnd, dstStart, lz, savedDist, startOff);
     }
 
     [SkipLocalsInit]
     [MethodImpl(MethodImplOptions.AggressiveOptimization | MethodImplOptions.NoInlining)]
     private static byte* ProcessModeImpl<TMode>(
         byte* dst, nuint dstSize, byte* dstPtrEnd, byte* dstStart,
-        byte* srcEnd, FastLzTable* lz, int* savedDist, nuint startOff)
+        FastLzTable* lz, int* savedDist, nuint startOff)
         where TMode : struct, ILiteralMode
     {
         bool isDelta = TMode.IsDelta;
@@ -483,14 +484,14 @@ internal static unsafe class LzDecoder
             {
                 // Long literal run: base length 64, extended via length stream.
                 // Length encoding: if byte > 251, a 2-byte extension follows (value × 4).
-                if (srcEnd - lengthStream == 0)
+                if (lz->SrcEnd - lengthStream == 0)
                 {
                     return null;
                 }
                 length = *lengthStream;
                 if (length > ExtendedLengthThreshold)
                 {
-                    if (srcEnd - lengthStream < 3)
+                    if (lz->SrcEnd - lengthStream < 3)
                     {
                         return null;
                     }
@@ -540,14 +541,14 @@ internal static unsafe class LzDecoder
             else if (cmd == 1)
             {
                 // Long match with 16-bit offset: base length 91, extended via length stream.
-                if (srcEnd - lengthStream == 0)
+                if (lz->SrcEnd - lengthStream == 0)
                 {
                     return null;
                 }
                 length = *lengthStream;
                 if (length > ExtendedLengthThreshold)
                 {
-                    if (srcEnd - lengthStream < 3)
+                    if (lz->SrcEnd - lengthStream < 3)
                     {
                         return null;
                     }
@@ -584,14 +585,14 @@ internal static unsafe class LzDecoder
             else /* cmd == 2 */
             {
                 // Long match with 32-bit offset: base length 29, extended via length stream.
-                if (srcEnd - lengthStream == 0)
+                if (lz->SrcEnd - lengthStream == 0)
                 {
                     return null;
                 }
                 length = *lengthStream;
                 if (length > ExtendedLengthThreshold)
                 {
-                    if (srcEnd - lengthStream < 3)
+                    if (lz->SrcEnd - lengthStream < 3)
                     {
                         return null;
                     }
@@ -728,9 +729,10 @@ internal static unsafe class LzDecoder
             }
 
             nuint sOff = (offset == 0) && (iteration == 0) ? (nuint)8 : 0;
+            lz->SrcEnd = srcEnd;
             srcCur = mode == 0
-                ? ProcessModeImpl<DeltaLiterals>(dst, dstSizeCur, dstEnd, dstStart, srcEnd, lz, &savedDist, sOff)
-                : ProcessModeImpl<RawLiterals>(dst, dstSizeCur, dstEnd, dstStart, srcEnd, lz, &savedDist, sOff);
+                ? ProcessModeImpl<DeltaLiterals>(dst, dstSizeCur, dstEnd, dstStart, lz, &savedDist, sOff)
+                : ProcessModeImpl<RawLiterals>(dst, dstSizeCur, dstEnd, dstStart, lz, &savedDist, sOff);
             if (srcCur == null)
             {
                 return false;
