@@ -378,3 +378,31 @@ predicted (variable dst advance), the offset check is well-predicted (always
 passes on valid data).
 
 **Disposition:** Kept for safety.
+
+#### Move off32Stream/off32StreamEnd to FastLzTable struct
+
+**Change:** Read off32Stream and off32StreamEnd from `lz->` struct pointer
+in medium/long paths instead of caching in local variables, hoping to free
+two registers for the short-token hot path.
+
+**Result:** No change in ASM. JIT disasm confirmed the JIT was already NOT
+keeping off32 in registers during the short token path — it was already
+spilling them to the stack. Moving to the struct just relocated the spill.
+The newDist spill (`[rsp+0x08]`) and dstSafeEnd-on-stack remained identical.
+
+**Disposition:** Reverted. JIT register allocator was already optimal for
+these values.
+
+#### Remove off32 prefetch to reduce register pressure
+
+**Change:** Remove `Sse.Prefetch0(dstBegin - off32Stream[3])` from
+medium/long match paths, hoping that eliminating the `off32Stream[3]`
+read would let the JIT free the off32Stream register sooner.
+
+**Result:** Made things worse. JIT disasm showed a NEW dstStart spill
+(`mov [rsp+0x88], r9`) at the short token entry that didn't exist before.
+Code grew from 1025 to 1047 bytes. The JIT's global register allocator
+reshuffled in a suboptimal way when the prefetch constraint was removed.
+
+**Disposition:** Reverted. The off32 prefetch was actually helping the
+register allocator find a better allocation by constraining its choices.
