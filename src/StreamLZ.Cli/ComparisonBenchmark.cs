@@ -25,6 +25,7 @@ internal static class ComparisonBenchmark
         {
             var r = BenchStreamLZ(src, level, runs);
             results.Add(r);
+            GC.Collect(2, GCCollectionMode.Aggressive, true, true);
         }
 
         // LZ4
@@ -34,10 +35,12 @@ internal static class ComparisonBenchmark
             ("LZ4 Max", LZ4Level.L12_MAX) })
         {
             results.Add(BenchLZ4(src, name, lz4Level, runs));
+            GC.Collect(2, GCCollectionMode.Aggressive, true, true);
         }
 
         // Snappy
         results.Add(BenchSnappy(src, runs));
+        GC.Collect(2, GCCollectionMode.Aggressive, true, true);
 
         // Zstd
         foreach (var (name, zstdLevel) in new[] {
@@ -47,6 +50,7 @@ internal static class ComparisonBenchmark
             ("Zstd 19", 19) })
         {
             results.Add(BenchZstd(src, name, zstdLevel, runs));
+            GC.Collect(2, GCCollectionMode.Aggressive, true, true);
         }
 
         // Print table

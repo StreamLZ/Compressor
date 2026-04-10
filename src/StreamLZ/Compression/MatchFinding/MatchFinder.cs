@@ -1,5 +1,6 @@
 // MatchFinder.cs -- Hash-based match finding for LZ compression.
 
+using System.Buffers;
 using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
@@ -690,14 +691,18 @@ internal static class MatchFinder
         uint hashMask = (uint)(hashSize - 1);
 
         // head[hash] = most recent position with this 4-byte prefix (1-based, 0 = empty)
-        int[] head = new int[hashSize];
+        // Use ArrayPool to avoid LOH pressure: BT4 is called per-block (~3800 times
+        // for enwik9), and allocating+discarding 576MB of arrays each time exhausts
+        // the LOH and drives the working set to 13GB+.
+        int[] head = ArrayPool<int>.Shared.Rent(hashSize);
+        Array.Clear(head, 0, hashSize); // must be zero-initialized
 
         // Binary tree: left[pos] and right[pos] store child positions (1-based)
         // left[pos] = position with lexicographically smaller suffix
         // right[pos] = position with lexicographically larger suffix
         int treeSize = srcSize + 1;
-        int[] left = GC.AllocateUninitializedArray<int>(treeSize);
-        int[] right = GC.AllocateUninitializedArray<int>(treeSize);
+        int[] left = ArrayPool<int>.Shared.Rent(treeSize);
+        int[] right = ArrayPool<int>.Shared.Rent(treeSize);
 
         int srcSizeSafe = srcSize - 8;
         Span<LengthAndOffset> matches = stackalloc LengthAndOffset[maxNumMatches + 2];
@@ -745,6 +750,10 @@ internal static class MatchFinder
                 pos += skipLen - 5;
             }
         }
+
+        ArrayPool<int>.Shared.Return(head);
+        ArrayPool<int>.Shared.Return(left);
+        ArrayPool<int>.Shared.Return(right);
     }
 
     /// <summary>
