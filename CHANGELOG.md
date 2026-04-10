@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.4.1]
+
+### Performance
+- Remove redundant scratch buffer zeroing in all decompress paths. The
+  scratch buffer is always overwritten before any reads; clearing ~884KB
+  per chunk × hundreds of chunks was pure waste.
+  - L11 enwik8 decomp: +31% (995 → 1,307 MB/s).
+  - L11 silesia decomp: +15%.
+- Dual cache-line prefetch for match source in ExecuteTokens_Type1.
+  Matches that span a cache line boundary caused stalls; prefetching the
+  second line (+64 bytes) eliminates them.
+  - L11 enwik8 decomp: +18% (1,307 → 1,541 MB/s).
+- Eliminate O(n) literal-length sum loop after ExecuteTokens_Type1.
+  ProcessLzRuns_Type1 was running a full second pass over the token array
+  to advance litStream, but ExecuteTokens already walks it internally.
+  Pass litStream by ref to avoid the redundant pass.
+  - L11 enwik8 decomp: +7% (1,541 → 1,648 MB/s).
+  - L8 enwik9 decomp: +6%.
+  - L8 silesia decomp: +3%.
+- Combined L11 enwik8 decompress improvement: **+66%** (995 → 1,648 MB/s).
+
+### Added
+- `-db` CLI mode: decompress-only benchmark for profiling. Accepts SLZ1
+  framed files produced by `-c`, runs N decompress iterations with no
+  compression. Designed for dotnet-trace / VTune / PerfView.
+
 ## [1.4.0]
 
 ### Performance

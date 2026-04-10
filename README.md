@@ -4,7 +4,7 @@ High-performance LZ compression library for .NET with streaming support.
 
 ## Features
 
-- **Up to 10.4 GB/s decompress** (level 7, enwik9), **down to 22.2% ratio** (level 11, enwik9)
+- **Up to 12.2 GB/s decompress** (level 8, enwik9), **down to 22.2% ratio** (level 11, enwik9)
 - **Simple level scale** (1-11) — higher = better ratio, slower
 - **Streaming** — SLZ1 frame format supports files of any size
 - **Sliding window** — cross-block match references for better ratio
@@ -169,33 +169,33 @@ Slz.WarmUp();
 
 | Compressor | Ratio | Compress | Decompress | Parallel Compress | Parallel Decompress |
 |---|---|---|---|:-:|:-:|
-| Snappy | 50.9% | 559 MB/s | 1,388 MB/s | | |
-| LZ4 Fast | 50.9% | 567 MB/s | 4,277 MB/s | | |
-| **SLZ L1** | **52.3%** | **337 MB/s** | **5,589 MB/s** | | |
-| Zstd 1 | 35.7% | 485 MB/s | 1,417 MB/s | | |
-| LZ4 Max | 37.2% | 25 MB/s | 4,520 MB/s | | |
-| **SLZ L5** | **38.2%** | **67 MB/s** | **5,003 MB/s** | | |
-| Zstd 3 | 31.2% | 325 MB/s | 1,220 MB/s | | |
-| **SLZ L6** | **27.8%** | **63 MB/s** | **10,698 MB/s** | :white_check_mark: | :white_check_mark: |
-| Zstd 9 | 27.2% | 75 MB/s | 1,394 MB/s | | |
-| **SLZ L8** | **27.3%** | **29 MB/s** | **10,814 MB/s** | :white_check_mark: | :white_check_mark: |
-| Zstd 19 | 23.5% | 2.5 MB/s | 1,156 MB/s | | |
-| **SLZ L11** | **22.2%** | **1.5 MB/s** | **970 MB/s** | | **partial** |
+| Snappy | 50.9% | 556 MB/s | 1,388 MB/s | | |
+| LZ4 Fast | 50.9% | 567 MB/s | 4,296 MB/s | | |
+| **SLZ L1** | **52.3%** | **323 MB/s** | **5,448 MB/s** | | |
+| Zstd 1 | 35.7% | 464 MB/s | 1,234 MB/s | | |
+| LZ4 Max | 37.2% | 25 MB/s | 4,499 MB/s | | |
+| **SLZ L5** | **38.2%** | **61 MB/s** | **4,935 MB/s** | | |
+| Zstd 3 | 31.2% | 308 MB/s | 1,378 MB/s | | |
+| **SLZ L6** | **27.8%** | **53 MB/s** | **10,132 MB/s** | :white_check_mark: | :white_check_mark: |
+| Zstd 9 | 27.2% | 70 MB/s | 1,210 MB/s | | |
+| **SLZ L8** | **27.3%** | **24 MB/s** | **12,229 MB/s** | :white_check_mark: | :white_check_mark: |
+| Zstd 19 | 23.5% | 2.2 MB/s | 1,115 MB/s | | |
+| **SLZ L11** | **22.2%** | **1.5 MB/s** | **1,070 MB/s** | | **partial** |
 
 ### silesia (212 MB mixed, 3-run median)
 
 | Compressor | Ratio | Compress | Decompress | Parallel Compress | Parallel Decompress |
 |---|---|---|---|:-:|:-:|
-| Snappy | 48.1% | 805 MB/s | 2,009 MB/s | | |
-| LZ4 Fast | 47.4% | 720 MB/s | 4,510 MB/s | | |
-| **SLZ L1** | **47.1%** | **462 MB/s** | **5,964 MB/s** | | |
-| Zstd 1 | 34.5% | 570 MB/s | 1,549 MB/s | | |
+| Snappy | 48.1% | 781 MB/s | 1,471 MB/s | | |
+| LZ4 Fast | 47.4% | 717 MB/s | 4,510 MB/s | | |
+| **SLZ L1** | **47.1%** | **439 MB/s** | **5,844 MB/s** | | |
+| Zstd 1 | 34.5% | 572 MB/s | 1,309 MB/s | | |
 | LZ4 Max | 36.3% | 17 MB/s | 4,832 MB/s | | |
-| **SLZ L5** | **36.4%** | **82 MB/s** | **5,281 MB/s** | | |
-| **SLZ L6** | **26.7%** | **65 MB/s** | **8,727 MB/s** | :white_check_mark: | :white_check_mark: |
-| Zstd 9 | 27.9% | 93 MB/s | 1,573 MB/s | | |
-| Zstd 19 | 24.9% | 3.7 MB/s | 1,390 MB/s | | |
-| **SLZ L11** | **24.2%** | **3.4 MB/s** | **1,424 MB/s** | | **partial** |
+| **SLZ L5** | **36.4%** | **78 MB/s** | **4,749 MB/s** | | |
+| **SLZ L6** | **26.7%** | **54 MB/s** | **9,267 MB/s** | :white_check_mark: | :white_check_mark: |
+| Zstd 9 | 27.9% | 88 MB/s | 1,309 MB/s | | |
+| Zstd 19 | 24.9% | 3.1 MB/s | 1,103 MB/s | | |
+| **SLZ L11** | **24.2%** | **2.2 MB/s** | **1,593 MB/s** | | **partial** |
 
 *All benchmarks on Intel Arrow Lake-S (Ultra 9 285K), 24-core, .NET 10.*
 

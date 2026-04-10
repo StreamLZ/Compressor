@@ -391,38 +391,59 @@ unsafe
     }
     else if (mode == "db")
     {
-        // Decompress-only benchmark: reads a pre-compressed file (4-byte LE original size
-        // + compressed data, as written by -c mode), then decompresses N times.
-        // No compression happens here — pure decompress profiling for VTune.
-        int origSize = BitConverter.ToInt32(src, 0);
-        byte[] compData = src.AsSpan(4).ToArray();
+        // Decompress-only benchmark: reads an SLZ1-framed .slz file (produced by -c)
+        // and decompresses it N times. No compression happens here — pure decompress
+        // profiling for dotnet-trace / VTune / PerfView.
+        // Input must be the framed format written by `-c`.
+        Console.WriteLine($"Compressed input: {src.Length:N0} bytes");
 
-        Console.WriteLine($"Compressed input: {compData.Length:N0} bytes, original size: {origSize:N0} bytes");
+        // Read the frame header to get the exact decompressed size.
+        // SLZ1 frame: [magic(4)][version(1)][flags(1)][codec(1)][level(1)]
+        //             [blockSizeLog2(1)][reserved(1)][contentSize(8, if flag bit 0)]...
+        if (src.Length < 10 || src[0] != 0x31 || src[1] != 0x5A || src[2] != 0x4C || src[3] != 0x53)
+        {
+            Console.Error.WriteLine("[CLI] Input is not an SLZ1 framed file. Use `-c` to produce one.");
+            return;
+        }
+        byte flags = src[5];
+        if ((flags & 0x01) == 0)
+        {
+            Console.Error.WriteLine("[CLI] Framed file has no ContentSize header field. -db requires a sized frame.");
+            return;
+        }
+        long origSizeLong = BinaryPrimitives.ReadInt64LittleEndian(src.AsSpan(10, 8));
+        if (origSizeLong <= 0 || origSizeLong > int.MaxValue - Slz.SafeSpace)
+        {
+            Console.Error.WriteLine($"[CLI] Unsupported content size: {origSizeLong:N0}");
+            return;
+        }
+        int origSize = (int)origSizeLong;
+        Console.WriteLine($"Decompressed size: {origSize:N0} bytes");
         Console.WriteLine();
 
-        // Warmup decompress
-        byte[] decompressed = new byte[origSize + StreamLZDecoder.SafeSpace];
-        fixed (byte* pComp = compData) fixed (byte* pDecomp = decompressed)
-            StreamLZDecoder.Decompress(pComp, compData.Length, pDecomp, origSize);
+        byte[] decompressed = new byte[origSize + Slz.SafeSpace];
+
+        // Warmup decompress (triggers JIT of the hot path before timing)
+        Slz.DecompressFramed((ReadOnlySpan<byte>)src, (Span<byte>)decompressed);
 
         // Decompress benchmark
-        long[] decompTimes = new long[runs];
+        double[] decompSeconds = new double[runs];
         for (int r = 0; r < runs; r++)
         {
             var sw = Stopwatch.StartNew();
-            int decompSize;
-            fixed (byte* pComp = compData) fixed (byte* pDecomp = decompressed)
-                decompSize = StreamLZDecoder.Decompress(pComp, compData.Length, pDecomp, origSize);
+            int decompSize = Slz.DecompressFramed((ReadOnlySpan<byte>)src, (Span<byte>)decompressed);
             sw.Stop();
-            decompTimes[r] = sw.ElapsedMilliseconds;
-            double mbps = (double)origSize / sw.Elapsed.TotalSeconds / (1024 * 1024);
-            Console.WriteLine($"  Decompress run {r + 1}: {decompTimes[r]:N0}ms ({mbps:F1} MB/s)");
+            if (decompSize != origSize)
+                Console.Error.WriteLine($"[CLI] Decompress size mismatch: {decompSize} != {origSize}");
+            decompSeconds[r] = sw.Elapsed.TotalSeconds;
+            double mbps = (double)origSize / decompSeconds[r] / (1024 * 1024);
+            Console.WriteLine($"  Decompress run {r + 1}: {sw.ElapsedMilliseconds:N0}ms ({mbps:F1} MB/s)");
         }
 
-        Array.Sort(decompTimes);
-        long decompMedian = decompTimes[runs / 2];
-        double decompMbps = (double)origSize / (decompMedian / 1000.0) / (1024 * 1024);
-        Console.WriteLine($"  Decompress median: {decompMedian:N0}ms ({decompMbps:F1} MB/s)");
+        Array.Sort(decompSeconds);
+        double decompMedianSec = decompSeconds[runs / 2];
+        double decompMbps = (double)origSize / decompMedianSec / (1024 * 1024);
+        Console.WriteLine($"  Decompress median: {decompMedianSec * 1000:N0}ms ({decompMbps:F1} MB/s)");
     }
     // -c and -d modes are handled above via stream API (no file size limit).
 }

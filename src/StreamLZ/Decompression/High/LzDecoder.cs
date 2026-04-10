@@ -47,9 +47,9 @@ internal static unsafe partial class LzDecoder
 
     /// <summary>
     /// Number of tokens to look ahead for match-source software prefetch.
-    /// Sweep on Arrow Lake (enwik8 High L9): 0→883, 16→1015, 32→1109,
-    /// 48→1223, 64→1255, 96→1272, 128→1306, 192→1207 MB/s.
-    /// Plateau at 64-128, regression at 192. 128 chosen as best median.
+    /// Sweep on Arrow Lake (enwik8 L11, dual-line prefetch): 32→1376,
+    /// 64→1547, 128→1541, 256→1514 MB/s. Plateau at 64-128, noise-level
+    /// differences — 128 kept for consistency with earlier tuning.
     /// </summary>
     private const int PrefetchAhead = 128;
 

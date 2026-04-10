@@ -265,3 +265,92 @@ ratio win to justify it.
 
 **Disposition:** L6-L7 stayed on the hash-based match finder. BT4 is only
 wired in at L8 (SC) and L11 (non-SC).
+
+---
+
+## Decompress Profiling Experiments (2026-04-10)
+
+After profiling L11 decompress with dotnet-trace, we identified hotspots and
+tested six micro-optimizations. Three were committed (+66% L11 decompress),
+three were rejected.
+
+### What worked (committed)
+
+1. **Remove scratch buffer zeroing (+31%)** — The scratch buffer was zeroed
+   before each chunk decode, but the decoder always overwrites it first.
+   884KB × 381 chunks = 337MB of wasted writes per enwik8 L11 decompress.
+
+2. **Dual cache-line prefetch (+18%)** — The existing single-line prefetch
+   missed when matches spanned a cache line boundary. Adding `Prefetch0(addr+64)`
+   warms the second line.
+
+3. **Eliminate O(n) litLen sum loop (+7%)** — `ProcessLzRuns_Type1` ran a
+   second pass over all tokens to sum literal lengths and advance `litStream`.
+   Changed `ExecuteTokens_Type1` to take `ref byte* litStream` and write back
+   the advanced pointer directly.
+
+### What was tried and rejected
+
+#### PrefetchNonTemporal for match source
+
+**Change:** Replace `Sse.Prefetch0` with `Sse.PrefetchNonTemporal` for match
+source prefetch, since match data is used once then discarded.
+
+**Result:** -20% regression (1307 → 1045 MB/s). NTA bypasses L1, but the
+match copy immediately needs the data in L1. Prefetch0 is correct.
+
+#### Prefetch1 (L2-only) for match source
+
+**Change:** Replace `Sse.Prefetch0` with `Sse.Prefetch1`.
+
+**Result:** Neutral (1284 vs 1307 MB/s, within noise). L2 prefetch is slightly
+worse than L1 but not significantly. No benefit over Prefetch0.
+
+#### Triple cache-line prefetch
+
+**Change:** Prefetch three lines (+0, +64, +128) instead of two.
+
+**Result:** -7% regression (1541 → 1424 MB/s). The third line is almost always
+wasted (few matches exceed 128 bytes), and the extra prefetch instruction
+competes with useful work.
+
+#### Dual-distance prefetch (i+128 and i+256)
+
+**Change:** Issue a `Prefetch0` at `PrefetchAhead` (128) and a second
+`Prefetch1` at `2*PrefetchAhead` (256) to warm data even earlier.
+
+**Result:** -15% regression (1541 → 1107 MB/s). Too much prefetch traffic.
+The memory subsystem is oversaturated with speculative loads.
+
+#### Vector128 match copy with offset branch
+
+**Change:** Use a single `Vector128.Load`/`Store` (16 bytes) for matches
+with `offset <= -16`, falling back to two `Copy64` calls for small offsets
+(8-15) where the copy would alias.
+
+**Result:** -3% regression (1307 → 1272 MB/s). The added branch cost more
+than the unified load/store saved. The JIT likely already fuses the two
+`Copy64` calls into efficient code.
+
+#### Precomputed PrefetchDelta in token struct
+
+**Change:** Add a 5th field `PrefetchDelta = DstPos + LitLen + Offset` to
+the `LzToken` struct (16→20 bytes). Saves 2 loads + 2 adds per iteration
+in the prefetch computation.
+
+**Result:** L11 enwik8 +2% (1541 → 1574 MB/s), but L8 enwik9 -6% (10441 →
+9798 MB/s). The larger token struct (25% more memory) hurts the
+bandwidth-sensitive L8 path more than the reduced arithmetic helps L11.
+
+**Disposition:** Reverted. L8 regression outweighs L11 gain.
+
+#### Removing bounds check in ExecuteTokens_Type1
+
+**Change:** Remove `if (matchSource < dstStart) return false` from the
+hot loop — the branch is always correctly predicted on valid data.
+
+**Result:** Identical speed (1307 → 1288 MB/s, noise). The branch predictor
+handles this at 100% accuracy, so removing it saves zero cycles. The check
+is effectively free.
+
+**Disposition:** Kept for safety — protects against corrupt input at no cost.
