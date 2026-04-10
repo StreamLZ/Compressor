@@ -352,7 +352,7 @@ internal static unsafe class StreamLZDecoder
             fixed (byte* dstPtr = destination)
             fixed (byte* scratchPtr = scratchArr)
             {
-                new Span<byte>(scratchPtr, scratchSize).Clear();
+                // Scratch is overwritten by the decoder before any reads — no need to zero.
                 return DecompressCore(srcPtr, source.Length, dstPtr, decompressedSize, scratchPtr, scratchSize);
             }
         }
@@ -403,7 +403,7 @@ internal static unsafe class StreamLZDecoder
         {
             fixed (byte* scratchPtr = scratchArr)
             {
-                new Span<byte>(scratchPtr, scratchSize).Clear();
+                // Scratch is overwritten by the decoder before any reads — no need to zero.
                 if (dstOffset == 0)
                     return DecompressCore(src, srcLen, dst, dstLen, scratchPtr, scratchSize);
                 // With dictionary: use SerialDecodeLoop directly, starting at the dictionary offset
@@ -738,7 +738,7 @@ internal static unsafe class StreamLZDecoder
                 {
                     var q = chunks[ci];
                     byte* localScratch = (byte*)scratchNint;
-                    new Span<byte>(localScratch, scratchSize).Clear();
+                    // Scratch is overwritten by the decoder before any reads — no need to zero.
                     StreamLZHeader hdr = default;
                     int srcUsed = 0, dstUsed = 0;
 
@@ -972,11 +972,11 @@ internal static unsafe class StreamLZDecoder
                 int batchEnd = Math.Min(batchStart + batchSize, numChunks);
                 int batchCount = batchEnd - batchStart;
 
-                // Clear Phase 2 results and scratch for this batch.
+                // Clear Phase 2 results for this batch. Scratch is overwritten by
+                // the decoder before any reads — no need to zero.
                 for (int j = 0; j < batchCount; j++)
                 {
                     phase1Results[j] = default;
-                    new Span<byte>((byte*)scratchPtrs[j], scratchPerChunk).Clear();
                 }
 
                 // Phase 2: Parallel entropy decode for this batch.
