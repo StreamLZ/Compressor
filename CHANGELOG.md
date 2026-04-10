@@ -20,6 +20,17 @@
   - L8 enwik9 decomp: +6%.
   - L8 silesia decomp: +3%.
 - Combined L11 enwik8 decompress improvement: **+66%** (995 → 1,648 MB/s).
+- Fast decoder (L1-L5): defer per-token bounds check to dstSafeEnd region.
+  The check was costing 17-21% of L1 throughput because dst advances by
+  variable amounts, causing poor branch prediction.
+  - L1 enwik8 decomp: +21% (4,523 → 5,480 MB/s).
+- Branchless left/right tree descent in BT4 match finder (L8/L11 compress).
+  The suffix comparison is 50/50 unpredictable; conditional moves eliminate
+  the misprediction penalty.
+  - L11 enwik8 compress: +3.5% (76,770 → 74,072 ms).
+  - L8 enwik8 compress: +3.4%.
+- Widen hash-finder CountMatchingBytes from 4-byte to 8-byte XOR+TZCNT,
+  aligning with the pointer-based version.
 
 ### Added
 - `-db` CLI mode: decompress-only benchmark for profiling. Accepts SLZ1

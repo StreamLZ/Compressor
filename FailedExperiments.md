@@ -354,3 +354,27 @@ handles this at 100% accuracy, so removing it saves zero cycles. The check
 is effectively free.
 
 **Disposition:** Kept for safety — protects against corrupt input at no cost.
+
+#### Branchless match length resolve in ResolveTokens
+
+**Change:** Replace `if (matchLength != 15)` branch with speculative read +
+conditional move, matching the pattern already used for literal lengths.
+
+**Result:** -3% regression (1648 → 1593 MB/s). The `matchLength == 15` branch
+is well-predicted (long matches are rare, ~5% of tokens), so it's effectively
+free. The speculative read adds overhead (unconditional `*lenStream` load)
+without saving mispredictions.
+
+**Disposition:** Reverted. Only unpredictable branches benefit from branchless
+conversion. Well-predicted branches (>90% one direction) are free.
+
+#### Fast decoder offset bounds check removal
+
+**Change:** Remove `if (dst + recentOffs < dstStart) return null` from the
+Fast decoder's short token path.
+
+**Result:** +1% (noise). Unlike the `dst >= dstEnd` check which was poorly
+predicted (variable dst advance), the offset check is well-predicted (always
+passes on valid data).
+
+**Disposition:** Kept for safety.
