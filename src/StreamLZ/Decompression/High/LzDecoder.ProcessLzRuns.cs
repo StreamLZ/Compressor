@@ -229,7 +229,7 @@ internal static unsafe partial class LzDecoder
         byte* dst,
         byte* dstEnd,
         byte* dstStart,
-        byte* litStream)
+        ref byte* litStreamRef)
     {
         // Wide copy operations (Copy64, WildCopy16) may write up to 15 bytes past
         // the logical end of each run. In the parallel self-contained decompressor,
@@ -242,6 +242,8 @@ internal static unsafe partial class LzDecoder
         // The split point is found via binary search on pre-resolved token positions.
         byte* dstBase = dst;
         byte* dstSafeEnd = dstEnd - StreamLZDecoder.SafeSpace;
+        // Local copy to avoid per-iteration ref indirection in the hot loop.
+        byte* litStream = litStreamRef;
 
         int safeTokenCount = tokenCount;
         if (tokenCount > 0)
@@ -342,6 +344,8 @@ internal static unsafe partial class LzDecoder
             dst += matchLength;
         }
 
+        // Write back the advanced litStream pointer to the caller's ref.
+        litStreamRef = litStream;
         return true;
     }
 
@@ -601,25 +605,19 @@ internal static unsafe partial class LzDecoder
                     return LzError();
                 }
 
-                // Phase B: Execute with match-source prefetch
-                if (!ExecuteTokens_Type1(tokens, resolved, dst, dstEnd, dstStart, litStream))
+                // Phase B: Execute with match-source prefetch.
+                // litStream is advanced by ref so we don't need a separate O(n) sum afterwards.
+                if (!ExecuteTokens_Type1(tokens, resolved, dst, dstEnd, dstStart, ref litStream))
                 {
                     return LzError();
                 }
 
-                // Advance pointers past all tokens
+                // Advance dst past all tokens (litStream is already advanced by ref)
                 if (resolved > 0)
                 {
                     ref LzToken last = ref tokens[resolved - 1];
                     int totalAdvance = last.DstPos + last.LitLen + last.MatchLen;
                     dst += totalAdvance;
-                    // litStream advances inside ExecuteTokens by sum of all LitLen
-                    int totalLits = 0;
-                    for (int i = 0; i < resolved; i++)
-                    {
-                        totalLits += tokens[i].LitLen;
-                    }
-                    litStream += totalLits;
                 }
             }
             finally
