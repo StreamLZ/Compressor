@@ -187,7 +187,17 @@ internal static class MatchFinder
     public static int CountMatchingBytes(byte[] src, int pos, int pendIdx, int offset)
     {
         int len = 0;
-        while (pendIdx - (pos + len) >= 4)
+        while (pendIdx - (pos + len) >= 8)
+        {
+            ulong a = Unsafe.ReadUnaligned<ulong>(ref src[pos + len]);
+            ulong b = Unsafe.ReadUnaligned<ulong>(ref src[pos + len - offset]);
+            if (a != b)
+            {
+                return len + (BitOperations.TrailingZeroCount(a ^ b) >> 3);
+            }
+            len += 8;
+        }
+        if (pendIdx - (pos + len) >= 4)
         {
             uint a = Unsafe.ReadUnaligned<uint>(ref src[pos + len]);
             uint b = Unsafe.ReadUnaligned<uint>(ref src[pos + len - offset]);
