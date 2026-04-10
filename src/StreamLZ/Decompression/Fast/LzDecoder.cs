@@ -389,9 +389,10 @@ internal static unsafe class LzDecoder
                 // tokens and a small declared dstSize would cascade past SafeSpace.
                 // This check catches the cascade — the predictor eliminates it for
                 // legitimate streams where dst stays within bounds.
-                if (dst >= dstEnd)
+                if (dst >= dstSafeEnd)
                 {
-                    return null;
+                    // Near end of output: per-token check
+                    if (dst >= dstEnd) return null;
                 }
                 // Branchless offset selection: bit 7 of cmd indicates new vs recent offset.
                 // (cmd >> 7) - 1 yields 0 when bit 7 is set (use new), all-ones when clear (keep recent).
