@@ -1,36 +1,34 @@
 # Changelog
 
-## [1.4.1]
+## [1.4.3]
 
 ### Performance
-- Remove redundant scratch buffer zeroing in all decompress paths. The
-  scratch buffer is always overwritten before any reads; clearing ~884KB
-  per chunk × hundreds of chunks was pure waste.
-  - L11 enwik8 decomp: +31% (995 → 1,307 MB/s).
-  - L11 silesia decomp: +15%.
+- Fast decoder generic specialization: eliminate isDelta branch from hot
+  loop via struct type parameter. The JIT generates separate native code
+  per literal mode, constant-folding the isDelta check.
+  - L1 enwik8 decomp: +4.2%, L5: +7.2%.
+- Fast decoder: move srcEnd from parameter to FastLzTable struct. Frees
+  a register in the short-token hot path, eliminating the rax spill that
+  cost 2 instructions per literal copy.
+  - L1 enwik8 decomp: +7.1%, L5: +4.3%.
+- Combined L1 decompress improvement (1.4.1–1.4.3): **+35%** (4,523 → 6,115 MB/s).
+- Combined L5 decompress improvement (1.4.1–1.4.3): **+14%** (4,376 → 4,995 MB/s).
+
+## [1.4.2]
+
+### Performance
+- Remove redundant scratch buffer zeroing in all decompress paths.
+  - L11 enwik8 decomp: +31% (995 → 1,307 MB/s), L11 silesia: +15%.
 - Dual cache-line prefetch for match source in ExecuteTokens_Type1.
-  Matches that span a cache line boundary caused stalls; prefetching the
-  second line (+64 bytes) eliminates them.
   - L11 enwik8 decomp: +18% (1,307 → 1,541 MB/s).
 - Eliminate O(n) literal-length sum loop after ExecuteTokens_Type1.
-  ProcessLzRuns_Type1 was running a full second pass over the token array
-  to advance litStream, but ExecuteTokens already walks it internally.
-  Pass litStream by ref to avoid the redundant pass.
-  - L11 enwik8 decomp: +7% (1,541 → 1,648 MB/s).
-  - L8 enwik9 decomp: +6%.
-  - L8 silesia decomp: +3%.
+  - L11 enwik8 decomp: +7%, L8 enwik9: +6%, L8 silesia: +3%.
 - Combined L11 enwik8 decompress improvement: **+66%** (995 → 1,648 MB/s).
-- Fast decoder (L1-L5): defer per-token bounds check to dstSafeEnd region.
-  The check was costing 17-21% of L1 throughput because dst advances by
-  variable amounts, causing poor branch prediction.
+- Fast decoder: defer per-token bounds check to dstSafeEnd region.
   - L1 enwik8 decomp: +21% (4,523 → 5,480 MB/s).
-- Branchless left/right tree descent in BT4 match finder (L8/L11 compress).
-  The suffix comparison is 50/50 unpredictable; conditional moves eliminate
-  the misprediction penalty.
-  - L11 enwik8 compress: +3.5% (76,770 → 74,072 ms).
-  - L8 enwik8 compress: +3.4%.
-- Widen hash-finder CountMatchingBytes from 4-byte to 8-byte XOR+TZCNT,
-  aligning with the pointer-based version.
+- Branchless left/right tree descent in BT4 match finder.
+  - L11 enwik8 compress: +3.5%, L8: +3.4%.
+- Widen hash-finder CountMatchingBytes from 4-byte to 8-byte XOR+TZCNT.
 
 ### Added
 - `-db` CLI mode: decompress-only benchmark for profiling. Accepts SLZ1
