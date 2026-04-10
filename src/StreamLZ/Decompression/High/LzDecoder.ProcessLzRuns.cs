@@ -270,7 +270,11 @@ internal static unsafe partial class LzDecoder
             int prefetchIndex = i + PrefetchAhead;
             if (prefetchIndex < tokenCount)
             {
-                Sse.Prefetch0(dstBase + tokens[prefetchIndex].DstPos + tokens[prefetchIndex].LitLen + tokens[prefetchIndex].Offset);
+                // Prefetch two cache lines: many matches span a line boundary, and
+                // long matches (>64 bytes) benefit from the second line being warm.
+                byte* prefetchAddr = dstBase + tokens[prefetchIndex].DstPos + tokens[prefetchIndex].LitLen + tokens[prefetchIndex].Offset;
+                Sse.Prefetch0(prefetchAddr);
+                Sse.Prefetch0(prefetchAddr + 64);
             }
 
             int literalLength = tokens[i].LitLen;
