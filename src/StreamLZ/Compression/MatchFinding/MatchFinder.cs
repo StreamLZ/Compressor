@@ -873,25 +873,36 @@ internal static class MatchFinder
                     }
                 }
 
-                // Branch and prefetch next node's children
-                if (pSrc[pos + matchLen] < pSrc[curMatch + matchLen])
+                // Branchless left/right tree descent. The comparison result is ~50/50
+                // unpredictable (depends on suffix ordering), causing frequent branch
+                // mispredictions. Using conditional moves (ternary → CMOV) eliminates
+                // the misprediction penalty at the cost of reading both child pointers.
+                bool goLeft = pSrc[pos + matchLen] < pSrc[curMatch + matchLen];
+                int curMatchPlusOne = curMatch + 1;
+                int nextLeft = pLeft[curMatch] - 1;
+                int nextRight = pRight[curMatch] - 1;
+
+                // Conditional store: write curMatch+1 to the appropriate dangling pointer
+                *rightNodePtr = goLeft ? curMatchPlusOne : *rightNodePtr;
+                *leftNodePtr = goLeft ? *leftNodePtr : curMatchPlusOne;
+
+                // Update dangling pointer to follow the matched child
+                rightNodePtr = goLeft ? (pLeft + curMatch) : rightNodePtr;
+                leftNodePtr = goLeft ? leftNodePtr : (pRight + curMatch);
+
+                // Update the common-length tracker for the traversed direction
+                matchLenRight = goLeft ? matchLen : matchLenRight;
+                matchLenLeft = goLeft ? matchLenLeft : matchLen;
+
+                // Follow the appropriate child
+                curMatch = goLeft ? nextLeft : nextRight;
+
+                // Prefetch both children of the next node — we don't know which
+                // way we'll go, and both arrays should be warm from prior prefetches.
+                if (curMatch >= 0 && Sse.IsSupported)
                 {
-                    *rightNodePtr = curMatch + 1;
-                    rightNodePtr = pLeft + curMatch;
-                    matchLenRight = matchLen;
-                    curMatch = pLeft[curMatch] - 1;
-                    // Prefetch next node's tree entries
-                    if (curMatch >= 0 && Sse.IsSupported)
-                        Sse.Prefetch0(pLeft + curMatch);
-                }
-                else
-                {
-                    *leftNodePtr = curMatch + 1;
-                    leftNodePtr = pRight + curMatch;
-                    matchLenLeft = matchLen;
-                    curMatch = pRight[curMatch] - 1;
-                    if (curMatch >= 0 && Sse.IsSupported)
-                        Sse.Prefetch0(pRight + curMatch);
+                    Sse.Prefetch0(pLeft + curMatch);
+                    Sse.Prefetch0(pRight + curMatch);
                 }
             }
 
