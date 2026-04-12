@@ -47,7 +47,7 @@ Offset  Size  Field
 4       1     Version (must be 1; decoders must reject values > 1)
 5       1     Flags (see below)
 6       1     Codec ID
-7       1     Compression level (1-9)
+7       1     Compression level (1-9 codec level; user-facing levels 1-11 map to these)
 8       1     Block size (log2 encoding, see below)
 9       1     Reserved (must be 0)
 10      8     Content size (int64, present if flag bit 0 set)
@@ -162,7 +162,9 @@ Byte 1 (bit layout):
 
 ### SelfContained flag
 
-When set, each chunk within the block is independently decompressible with no cross-chunk LZ back-references. This enables parallel decompression. When clear, chunks may reference data decoded by earlier chunks within the same block.
+When set, chunks are grouped (default: 4 chunks per group) for parallel decompression. Within a group, chunks are decoded sequentially and may reference output from earlier chunks in the same group via LZ back-references. Between groups, there are no cross-references, enabling full parallelism across groups. The group size is a compressor/decompressor constant (`ScGroupSize = 4`), not stored in the bitstream. When clear, chunks may reference data decoded by any earlier chunk within the same block.
+
+**Self-contained prefix table:** When SelfContained is set, the block payload is followed by a suffix table containing the first 8 bytes of each chunk except the first. This table has `(numChunks - 1) * 8` bytes. During parallel decompression, each chunk's initial 8 bytes may be decoded incorrectly (the LZ back-reference for `InitialRecentOffset = 8` cannot reach the prior chunk's output). After all chunks are decoded, the decompressor overwrites each chunk's first 8 bytes from this table to restore correctness.
 
 ---
 
@@ -273,7 +275,7 @@ In the framed streaming API, a **sliding window** provides cross-block back-refe
 - The decompressor maintains the same window and passes the dictionary context to the block decoder so LZ back-references can reach into previously decoded blocks.
 - Default window size: 128 MB. Maximum: 1 GB.
 
-When `SelfContained` mode is enabled, cross-chunk references within a block are disabled (each chunk is independent), but cross-block references via the sliding window are still active unless the frame compressor operates in fully independent mode.
+When `SelfContained` mode is enabled, chunks are grouped (4 per group by default). Cross-group references are disabled, enabling parallel decompression. Within a group, chunks are decoded sequentially with cross-chunk context. Cross-block references via the sliding window are still active unless the frame compressor operates in fully independent mode.
 
 **Dictionary ID:** The optional `DictionaryId` field in the frame header is an opaque 4-byte identifier that tags which pre-shared dictionary was used during compression. It does **not** carry dictionary content — both compressor and decompressor must have the dictionary available externally. If present, the dictionary is logically prepended to the sliding window before the first block (i.e., it occupies the initial window state so the first block can reference it via LZ back-references).
 
@@ -319,3 +321,4 @@ The packed byte (0xF0..0xFF) is followed by `extraBits` raw bits encoding the re
 | SafeSpace          | 64          | Extra bytes needed past output end |
 | Huffman LUT bits   | 11          | 2048-entry decode table            |
 | Initial copy bytes | 8           | Verbatim bytes at chunk start      |
+| SC group size      | 4           | Chunks per group in self-contained mode |
