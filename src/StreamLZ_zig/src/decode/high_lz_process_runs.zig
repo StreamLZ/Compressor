@@ -122,6 +122,14 @@ fn processLzRunsType0(
         const off_i: i32 = picked;
         const lit_off_i: i32 = lit_delta_offset;
 
+        // Prefetch the match source for THIS iteration — the literal copy
+        // that follows gives ~10-100 cycles for the line to arrive in L1.
+        // C# does the same; see High.LzDecoder.ProcessLzRuns_Type0.
+        {
+            const pre_addr: usize = @intFromPtr(dst) + lit_len_i +% @as(usize, @bitCast(@as(isize, off_i)));
+            @prefetch(@as([*]const u8, @ptrFromInt(pre_addr)), .{ .rw = .read, .locality = 3, .cache = .data });
+        }
+
         if (@intFromPtr(dst + lit_len_i + match_len_i) >= @intFromPtr(dst_safe_end)) {
             // Slow exact-copy tail.
             if (@intFromPtr(dst + lit_len_i + match_len_i) > @intFromPtr(dst_end)) return error.OutputTruncated;
@@ -140,7 +148,12 @@ fn processLzRunsType0(
             const match_src_post_lit: usize = @intFromPtr(dst + lit_len_i) +% @as(usize, @bitCast(@as(isize, off_i)));
             if (match_src_post_lit < @intFromPtr(dst_start)) return error.OutputTruncated;
 
-            // Delta-literal copy: up to 24 bytes unconditionally then tail.
+            // Cascading delta-literal copy: the 80% case has ≤ 2 literals,
+            // so the first copy64Add handles it with zero branches taken.
+            // 8- and 16-byte literals fall through to the nested `if`s. Only
+            // literals > 24 bytes enter the 8-byte-stride loop — much rarer
+            // than the short-token case, and then still wide rather than
+            // byte-wise.
             const lit_src_ptr: [*]const u8 = @ptrFromInt(@intFromPtr(dst) +% @as(usize, @bitCast(@as(isize, lit_off_i))));
             copy.copy64Add(dst, lit_stream, lit_src_ptr);
             if (literal_length > 8) {
@@ -148,16 +161,16 @@ fn processLzRunsType0(
                 if (literal_length > 16) {
                     copy.copy64Add(dst + 16, lit_stream + 16, lit_src_ptr + 16);
                     if (literal_length > 24) {
-                        // Rare — use byte-wise for correctness.
-                        var remaining: usize = lit_len_i - 24;
-                        var d = dst + 24;
-                        var s = lit_stream + 24;
-                        var e = lit_src_ptr + 24;
-                        while (remaining > 0) : (remaining -= 1) {
-                            d[0] = s[0] +% e[0];
-                            d += 1;
-                            s += 1;
-                            e += 1;
+                        var remaining: usize = lit_len_i;
+                        var dd = dst;
+                        var ss = lit_stream;
+                        var ee = lit_src_ptr;
+                        while (remaining > 24) {
+                            copy.copy64Add(dd + 24, ss + 24, ee + 24);
+                            remaining -= 8;
+                            dd += 8;
+                            ss += 8;
+                            ee += 8;
                         }
                     }
                 }
@@ -392,6 +405,11 @@ fn processLzRunsType1(
     }
 }
 
+/// Prefetch this far ahead (in tokens) so the match source cache line is
+/// resident in L1 by the time we reach it. C# uses 128 based on an Arrow
+/// Lake sweep (32→1376, 64→1547, 128→1541, 256→1514 MB/s). We match it.
+const prefetch_ahead: u32 = 128;
+
 fn executeTokensType1(
     tokens: [*]const LzToken,
     token_count: u32,
@@ -410,6 +428,20 @@ fn executeTokensType1(
 
     var i: u32 = 0;
     while (i < token_count) : (i += 1) {
+        // Match-source prefetch for a token ~128 steps ahead. The LzToken is
+        // 16 bytes so 4 per cache line; one prefetch also warms tokens[i+N+1..+3].
+        // We prefetch two 64-byte lines because many matches span a line
+        // boundary and long matches (>64) benefit from the second line too.
+        const prefetch_index: u32 = i + prefetch_ahead;
+        if (prefetch_index < token_count) {
+            const pt = tokens[prefetch_index];
+            const pre_base: usize = @intFromPtr(dst_base) + @as(usize, @intCast(pt.dst_pos)) + @as(usize, @intCast(pt.lit_len));
+            const pre_addr: usize = pre_base +% @as(usize, @bitCast(@as(isize, pt.offset)));
+            const p0: [*]const u8 = @ptrFromInt(pre_addr);
+            @prefetch(p0, .{ .rw = .read, .locality = 3, .cache = .data });
+            @prefetch(p0 + 64, .{ .rw = .read, .locality = 3, .cache = .data });
+        }
+
         const t = tokens[i];
         const lit_len: usize = @intCast(t.lit_len);
         const match_len: usize = @intCast(t.match_len);
@@ -422,14 +454,12 @@ fn executeTokensType1(
             // Slow exact path for trailing tokens.
             if (@intFromPtr(dst_after_all) > @intFromPtr(dst_end)) return error.OutputTruncated;
             var d = dst_token_start;
-            // Literal
             var lrem = lit_len;
             while (lrem > 0) : (lrem -= 1) {
                 d[0] = lit_stream[0];
                 d += 1;
                 lit_stream += 1;
             }
-            // Match
             const match_addr: usize = @intFromPtr(d) +% @as(usize, @bitCast(@as(isize, offset)));
             if (match_addr < @intFromPtr(dst_start)) return error.OutputTruncated;
             var s: [*]const u8 = @ptrFromInt(match_addr);
@@ -442,7 +472,7 @@ fn executeTokensType1(
             continue;
         }
 
-        // Fast path: wide copies.
+        // Fast path: cascading wide copies, matching the C# reference.
         var d = dst_token_start;
         copy.copy64(d, lit_stream);
         if (lit_len > 8) {

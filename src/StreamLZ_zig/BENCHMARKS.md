@@ -12,18 +12,36 @@ Zig 0.15.2 `ReleaseFast -Dcpu=native`. C# ReleaseFast via `StreamLZ.Cli -db -r 1
   (bypassing `DecompressCoreTwoPhase` and `DecompressCoreParallel`) so both
   are decoding on one thread.
 
+## After Phase 7b (prefetch + cascading literal copy in High decoder)
+
+| fixture | level | Zig mean MB/s | C# median MB/s | Zig / C# | vs Phase 7 |
+|---|---|---:|---:|---:|---:|
+| silesia_all.tar | L1  | **6,582** | 6,307 | **1.04×** | +0.1% |
+| silesia_all.tar | L5  | **5,472** | 5,527 | **0.99×** |  0.0% |
+| silesia_all.tar | L6  |     950 |     —¹ |      — |  new   |
+| silesia_all.tar | L9  |     992 | 1,196 |  0.83× | +7.2% |
+| silesia_all.tar | L11 |     941 | 1,225 |  0.77× | +9.2% |
+| enwik8.txt      | L1  | **6,051** | 5,886 | **1.03×** |  0.0% |
+| enwik8.txt      | L9  |     672 |   922 |  0.73× | +19.1% |
+| enwik8.txt      | L11 |     691 |   915 |  0.76× | +27.9% |
+
+¹ C# serial decompress of an SC fixture isn't a valid comparison: the
+C# serial loop doesn't understand the tail prefix table, so forcing it
+off the parallel dispatch fails the decode. L6-L8 parity would need
+C# to expose a serial SC path, or phase 13 for Zig parallel.
+
 ## After Phase 7 (`@Vector(16, u8)` / `@Vector(8, u8)` copy helpers)
 
-| fixture | level | decomp size | Zig mean MB/s | C# median MB/s | Zig / C# |
-|---|---|---:|---:|---:|---:|
-| silesia_all.tar | L1  | 212,797,440 | **6,575** | 6,357 | **1.03×** |
-| silesia_all.tar | L5  | 212,797,440 | **5,516** | 5,524 | **1.00×** |
-| silesia_all.tar | L9  | 212,797,440 |     925 | 1,192 | 0.78× |
-| silesia_all.tar | L11 | 212,797,440 |     862 | 1,220 | 0.71× |
-| enwik8.txt      | L1  | 100,000,000 | **6,051** | 5,886 | **1.03×** |
-| enwik8.txt      | L5  | 100,000,000 | **4,833** | 4,762 | **1.01×** |
-| enwik8.txt      | L9  | 100,000,000 |     564 |   890 | 0.63× |
-| enwik8.txt      | L11 | 100,000,000 |     540 |   915 | 0.59× |
+| fixture | level | Zig mean MB/s | C# median MB/s | Zig / C# |
+|---|---|---:|---:|---:|
+| silesia_all.tar | L1  | 6,575 | 6,357 | 1.03× |
+| silesia_all.tar | L5  | 5,516 | 5,524 | 1.00× |
+| silesia_all.tar | L9  |   925 | 1,192 | 0.78× |
+| silesia_all.tar | L11 |   862 | 1,220 | 0.71× |
+| enwik8.txt      | L1  | 6,051 | 5,886 | 1.03× |
+| enwik8.txt      | L5  | 4,833 | 4,762 | 1.01× |
+| enwik8.txt      | L9  |   564 |   890 | 0.63× |
+| enwik8.txt      | L11 |   540 |   915 | 0.59× |
 
 ### Phase 7 takeaways
 
