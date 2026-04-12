@@ -11,6 +11,7 @@ const Command = enum {
     info,
     decompress,
     compress,
+    bench,
 
     fn parse(s: []const u8) ?Command {
         const map = .{
@@ -25,6 +26,8 @@ const Command = enum {
             .{ "d", .decompress },
             .{ "compress", .compress },
             .{ "c", .compress },
+            .{ "bench", .bench },
+            .{ "b", .bench },
         };
         inline for (map) |entry| {
             if (std.mem.eql(u8, s, entry[0])) return entry[1];
@@ -64,12 +67,96 @@ pub fn main() !void {
         .help => try printUsage(stdout),
         .info => try runInfo(allocator, stdout, args[2..]),
         .decompress => try runDecompress(allocator, stdout, args[2..]),
+        .bench => try runBench(allocator, stdout, args[2..]),
         .compress => {
             try stdout.print("error: 'compress' is not implemented yet (coming in phase 9)\n", .{});
             try stdout.flush();
             std.process.exit(2);
         },
     }
+}
+
+fn runBench(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const []const u8) !void {
+    if (args.len < 1 or args.len > 2) {
+        try w.writeAll("usage: streamlz bench <file.slz> [runs]\n");
+        try w.flush();
+        std.process.exit(2);
+    }
+    const path = args[0];
+    const runs: u32 = if (args.len == 2)
+        std.fmt.parseInt(u32, args[1], 10) catch 10
+    else
+        10;
+
+    const in_file = std.fs.cwd().openFile(path, .{}) catch |err| {
+        try w.print("error: cannot open '{s}': {s}\n", .{ path, @errorName(err) });
+        try w.flush();
+        std.process.exit(1);
+    };
+    defer in_file.close();
+
+    const max_bytes: usize = 1 << 31;
+    const src = in_file.readToEndAlloc(allocator, max_bytes) catch |err| {
+        try w.print("error: cannot read '{s}': {s}\n", .{ path, @errorName(err) });
+        try w.flush();
+        std.process.exit(1);
+    };
+    defer allocator.free(src);
+
+    const hdr = frame.parseHeader(src) catch |err| {
+        try w.print("error: not a valid SLZ1 frame: {s}\n", .{@errorName(err)});
+        try w.flush();
+        std.process.exit(1);
+    };
+
+    const content_size: usize = if (hdr.content_size) |cs| @intCast(cs) else {
+        try w.writeAll("error: frame has no content size; bench needs a sized frame\n");
+        try w.flush();
+        std.process.exit(1);
+    };
+
+    const dst = allocator.alloc(u8, content_size + decoder.safe_space) catch |err| {
+        try w.print("error: cannot allocate {d} bytes: {s}\n", .{ content_size + decoder.safe_space, @errorName(err) });
+        try w.flush();
+        std.process.exit(1);
+    };
+    defer allocator.free(dst);
+
+    // Warm-up: one untimed decode to page-fault the dst and prime the caches.
+    _ = decoder.decompressFramed(src, dst) catch |err| {
+        try w.print("error: decompression failed: {s}\n", .{@errorName(err)});
+        try w.flush();
+        std.process.exit(1);
+    };
+
+    var best_ns: u64 = std.math.maxInt(u64);
+    var total_ns: u64 = 0;
+    var run: u32 = 0;
+    while (run < runs) : (run += 1) {
+        var timer = try std.time.Timer.start();
+        _ = try decoder.decompressFramed(src, dst);
+        const elapsed = timer.read();
+        if (elapsed < best_ns) best_ns = elapsed;
+        total_ns += elapsed;
+    }
+
+    const mean_ns: u64 = total_ns / runs;
+    const mb: f64 = @as(f64, @floatFromInt(content_size)) / (1024.0 * 1024.0);
+    const best_mbps: f64 = mb * 1e9 / @as(f64, @floatFromInt(best_ns));
+    const mean_mbps: f64 = mb * 1e9 / @as(f64, @floatFromInt(mean_ns));
+
+    try w.print("bench: {s}\n", .{path});
+    try w.print("  src bytes:       {d}\n", .{src.len});
+    try w.print("  decompressed:    {d} ({d:.2} MB)\n", .{ content_size, mb });
+    try w.print("  runs:            {d} (plus 1 warm-up)\n", .{runs});
+    try w.print("  best:            {d:.3} ms  ({d:.0} MB/s)\n", .{
+        @as(f64, @floatFromInt(best_ns)) / 1_000_000.0,
+        best_mbps,
+    });
+    try w.print("  mean:            {d:.3} ms  ({d:.0} MB/s)\n", .{
+        @as(f64, @floatFromInt(mean_ns)) / 1_000_000.0,
+        mean_mbps,
+    });
 }
 
 fn printVersion(w: *std.Io.Writer) !void {
