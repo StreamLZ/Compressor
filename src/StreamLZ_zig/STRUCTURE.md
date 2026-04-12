@@ -16,7 +16,11 @@ Update this alongside any file moves or renames.
 src/StreamLZ_zig/
 ├── build.zig
 ├── build.zig.zon
+├── STATUS.md                            session snapshot + phase tracker
 ├── STRUCTURE.md                         ← you are here
+├── BENCHMARKS.md                        decompress perf numbers
+├── scripts/
+│   └── gen_fixtures.sh                  [phase 8] corpus generator via C# CLI
 └── src/
     ├── main.zig                         CLI entry (arg parsing + dispatch)
     ├── cli.zig                          [planned] Subcommand handlers (info/decompress/compress)
@@ -40,7 +44,8 @@ src/StreamLZ_zig/
     │   ├── high_lz_process_runs.zig     [phase 5] ProcessLzRuns hot loop (split for size)
     │   ├── entropy_decoder.zig          [phase 4] Entropy dispatcher + table reconstruction
     │   ├── huffman_decoder.zig          [phase 4] 11-bit LUT, 3-stream parallel canonical Huffman
-    │   └── tans_decoder.zig             [phase 6] 5-state interleaved tANS decoder
+    │   ├── tans_decoder.zig             [phase 6] 5-state interleaved tANS decoder
+    │   └── fixture_tests.zig            [phase 8] exhaustive corpus roundtrip test
     │
     └── encode/                          # Everything write-side
         ├── streamlz_encoder.zig         [phase 9] Top-level compress dispatcher

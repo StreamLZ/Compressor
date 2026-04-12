@@ -34,11 +34,11 @@ zero coupling to the .NET solution.
 | 5b | SC grouping | Per-group `dst_start` computation so group-first chunks get `base_offset == 0` initial Copy64; tail prefix restoration |
 | 7 | Vectorize CopyHelpers | `@Vector(16, u8)` × 4 for `copy64Bytes`, `@Vector(8, u8)` `+%` for `copy64Add`. `streamlz bench` subcommand for in-memory timing |
 | 7b | High decoder hot loop | `@prefetch` 128 tokens ahead in `executeTokensType1`; same-iteration prefetch in `processLzRunsType0`; 8-byte cascading literal copy |
+| 8 | Fixture corpus + roundtrip tests | `scripts/gen_fixtures.sh` builds 20 raws × 7 levels = 140 `.slz` under `c:/tmp/fixtures/`. `decode/fixture_tests.zig` walks `$STREAMLZ_FIXTURES_DIR/slz/*.slz`, decodes, and diffs against `raw/<stem>.raw`. Skips cleanly if env var unset. Debug + ReleaseFast both 48/48 green, 140/140 bit-exact |
 
 ### Pending
 | # | phase | notes |
 |---|---|---|
-| 8 | Fixture corpus + exhaustive roundtrip tests | Cheap / mechanical. Generate all levels × many sizes & shapes, wire into `zig build test` |
 | 9 | Fast encoder (L1-L5) | Hash matcher, greedy/lazy parser, token encoder → `encode/fast_lz_encoder.zig`, `encode/match_hasher.zig` |
 | 10 | Huffman + tANS encoders | `encode/multi_array_huffman_encoder.zig` (2 KLOC in C#), `encode/tans_encoder.zig`, `encode/offset_encoder.zig`, `encode/byte_histogram.zig` |
 | 11 | High encoder | `encode/high_lz_encoder.zig`, `encode/optimal_parser.zig` (DP), `encode/cost_model.zig` |
@@ -194,19 +194,15 @@ Base (pre-session): `4a0451a` (`Add concurrent access test verifying Slz thread 
 
 ## Recommended next session entry points (in order)
 
-1. **Phase 8 — fixture corpus.** Mechanical but valuable. Generate every
-   level × 5-8 sizes × text/binary/repetitive into `c:/tmp/fixtures/`
-   via the existing C# CLI, then add a `zig build test` target that
-   decompresses each and diffs against the original. Guards against
-   regression as the encoder lands.
-
-2. **Phase 9 — Fast encoder.** Start with level 1 (simplest: greedy hash
+1. **Phase 9 — Fast encoder.** Start with level 1 (simplest: greedy hash
    matcher + short-token encoder). Pair with `match_hasher.zig`.
    Validate by round-tripping through my decoder and comparing against
    the C# encoder's output (they don't have to match byte-for-byte;
-   only need to decode correctly via the C# decoder).
+   only need to decode correctly via the C# decoder). With Phase 8 in
+   place, every new encoder output can be pushed through the fixture
+   test as regression protection for the decoder.
 
-3. **Phase 13 — Parallel decompress.** This is what closes the 0.7-0.8×
+2. **Phase 13 — Parallel decompress.** This is what closes the 0.7-0.8×
    gap on L6-L11. Uses `std.Thread.Pool` and a pre-scan over chunks.
    Gemini's review (rejected above as hallucinated on specifics) is
    actually correct in general shape: pre-allocate per-worker scratch,
@@ -214,12 +210,18 @@ Base (pre-session): `4a0451a` (`Add concurrent access test verifying Slz thread 
 
 ## Unit test count
 
-45 Zig unit tests passing, wired via `main.zig` test aggregator:
+48 Zig unit tests passing, wired via `main.zig` test aggregator:
 
 ```
-$ zig build test --summary all
-Build Summary: 3/3 steps succeeded; 45/45 tests passed
+$ STREAMLZ_FIXTURES_DIR=c:/tmp/fixtures zig build test --summary all
+  [fixture_tests] all 140 fixtures passed
+Build Summary: 3/3 steps succeeded; 48/48 tests passed
 ```
+
+The `fixture_tests` block is self-skipping when `STREAMLZ_FIXTURES_DIR`
+is unset, so `zig build test` works on a clean checkout without the
+pre-generated corpus. Run `scripts/gen_fixtures.sh` once to populate
+`c:/tmp/fixtures/{raw,slz}` and then set the env var for full coverage.
 
 ## Feedback memories the session picked up (saved outside the repo)
 
