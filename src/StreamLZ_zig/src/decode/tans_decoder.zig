@@ -434,33 +434,32 @@ pub fn decode(p: *TansDecoderParams) DecodeError!void {
     if (@intFromPtr(ptr_f) > @intFromPtr(ptr_b)) return error.StreamMismatch;
 
     if (@intFromPtr(dst) < @intFromPtr(dst_end)) {
-        while (true) {
-            // ── TANS_FORWARD_BITS + round state0 ──
+        outer: while (true) {
+            // ── TANS_FORWARD_BITS + round state0, state1 ──
             if (@intFromPtr(ptr_f) > @intFromPtr(src_end)) return error.SourceTruncated;
             const fw1: u32 = std.mem.readInt(u32, ptr_f[0..4], .little);
             bits_f |= fw1 << @intCast(bitpos_f);
             ptr_f += @as(usize, @intCast((31 - bitpos_f) >> 3));
             bitpos_f |= 24;
 
-            inline for (0..2) |round| {
-                _ = round;
+            {
                 const e0 = &lut[state0];
                 dst[0] = e0.symbol;
                 dst += 1;
                 bitpos_f -= @intCast(e0.bits_x);
                 state0 = ((bits_f & e0.x) + e0.w) & lut_mask;
                 bits_f >>= @intCast(e0.bits_x);
-                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) break;
+                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) break :outer;
+            }
+            {
                 const e1 = &lut[state1];
                 dst[0] = e1.symbol;
                 dst += 1;
                 bitpos_f -= @intCast(e1.bits_x);
                 state1 = ((bits_f & e1.x) + e1.w) & lut_mask;
                 bits_f >>= @intCast(e1.bits_x);
-                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) break;
-                break; // only one iteration — this is a label-break trick
+                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) break :outer;
             }
-            if (@intFromPtr(dst) >= @intFromPtr(dst_end)) break;
 
             if (@intFromPtr(ptr_f) > @intFromPtr(src_end)) return error.SourceTruncated;
             const fw2: u32 = std.mem.readInt(u32, ptr_f[0..4], .little);
@@ -475,7 +474,7 @@ pub fn decode(p: *TansDecoderParams) DecodeError!void {
                 bitpos_f -= @intCast(e2.bits_x);
                 state2 = ((bits_f & e2.x) + e2.w) & lut_mask;
                 bits_f >>= @intCast(e2.bits_x);
-                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) break;
+                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) break :outer;
 
                 const e3 = &lut[state3];
                 dst[0] = e3.symbol;
@@ -483,7 +482,7 @@ pub fn decode(p: *TansDecoderParams) DecodeError!void {
                 bitpos_f -= @intCast(e3.bits_x);
                 state3 = ((bits_f & e3.x) + e3.w) & lut_mask;
                 bits_f >>= @intCast(e3.bits_x);
-                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) break;
+                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) break :outer;
             }
 
             if (@intFromPtr(ptr_f) > @intFromPtr(src_end)) return error.SourceTruncated;
@@ -499,7 +498,7 @@ pub fn decode(p: *TansDecoderParams) DecodeError!void {
                 bitpos_f -= @intCast(e4.bits_x);
                 state4 = ((bits_f & e4.x) + e4.w) & lut_mask;
                 bits_f >>= @intCast(e4.bits_x);
-                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) break;
+                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) break :outer;
             }
 
             // ── TANS_BACKWARD_BITS + round state0 ──
@@ -518,7 +517,7 @@ pub fn decode(p: *TansDecoderParams) DecodeError!void {
                 bitpos_b -= @intCast(e0.bits_x);
                 state0 = ((bits_b & e0.x) + e0.w) & lut_mask;
                 bits_b >>= @intCast(e0.bits_x);
-                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) break;
+                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) break :outer;
 
                 const e1 = &lut[state1];
                 dst[0] = e1.symbol;
@@ -526,7 +525,7 @@ pub fn decode(p: *TansDecoderParams) DecodeError!void {
                 bitpos_b -= @intCast(e1.bits_x);
                 state1 = ((bits_b & e1.x) + e1.w) & lut_mask;
                 bits_b >>= @intCast(e1.bits_x);
-                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) break;
+                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) break :outer;
             }
 
             if (@intFromPtr(ptr_b) < @intFromPtr(src_start)) return error.SourceTruncated;
@@ -544,7 +543,7 @@ pub fn decode(p: *TansDecoderParams) DecodeError!void {
                 bitpos_b -= @intCast(e2.bits_x);
                 state2 = ((bits_b & e2.x) + e2.w) & lut_mask;
                 bits_b >>= @intCast(e2.bits_x);
-                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) break;
+                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) break :outer;
 
                 const e3 = &lut[state3];
                 dst[0] = e3.symbol;
@@ -552,7 +551,7 @@ pub fn decode(p: *TansDecoderParams) DecodeError!void {
                 bitpos_b -= @intCast(e3.bits_x);
                 state3 = ((bits_b & e3.x) + e3.w) & lut_mask;
                 bits_b >>= @intCast(e3.bits_x);
-                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) break;
+                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) break :outer;
             }
 
             if (@intFromPtr(ptr_b) < @intFromPtr(src_start)) return error.SourceTruncated;
@@ -570,7 +569,7 @@ pub fn decode(p: *TansDecoderParams) DecodeError!void {
                 bitpos_b -= @intCast(e4.bits_x);
                 state4 = ((bits_b & e4.x) + e4.w) & lut_mask;
                 bits_b >>= @intCast(e4.bits_x);
-                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) break;
+                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) break :outer;
             }
         }
     }
@@ -606,7 +605,8 @@ pub fn highDecodeTans(
 ) DecodeError!usize {
     if (src_size < 8 or dst_size < 5) return error.SourceTruncated;
 
-    var src_end: [*]const u8 = src_in + src_size;
+    const src_end_orig: [*]const u8 = src_in + src_size;
+    var src_end: [*]const u8 = src_end_orig;
 
     var br: huffman.BitReaderState = .{
         .p = src_in,
@@ -625,6 +625,10 @@ pub fn highDecodeTans(
     try decodeTable(&br, log_table_bits, &tans_data);
 
     var src: [*]const u8 = br.p - @as(usize, @intCast(@divTrunc(24 - br.bit_pos, 8)));
+    // Capture src_start BEFORE state-init modifies src. The decode hot
+    // loop's backward-reader bound is this post-table position, not the
+    // post-state-init position.
+    const src_start_post_table: [*]const u8 = src;
     if (@intFromPtr(src) >= @intFromPtr(src_end) or @intFromPtr(src_end) - @intFromPtr(src) < 8) {
         return error.SourceTruncated;
     }
@@ -701,8 +705,14 @@ pub fn highDecodeTans(
         .state2 = state2,
         .state3 = state3,
         .state4 = state4,
-        .src_start = src,
-        .src_end = src_end,
+        // src_start / src_end here mirror the C# reference: they're the
+        // post-table src position (BEFORE state-init advances src) and the
+        // ORIGINAL src_end (before the backward-init decrement). The decode
+        // hot loop's pointer bounds-check relies on this "outer" range, and
+        // its forward/backward reads legitimately step into the overlap
+        // region formed by the state-init bytes at both ends.
+        .src_start = src_start_post_table,
+        .src_end = src_end_orig,
         .lut_mask = l_mask,
     };
 
