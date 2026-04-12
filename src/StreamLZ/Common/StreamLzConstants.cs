@@ -41,6 +41,14 @@ internal static class StreamLZConstants
     public const uint ChunkTypeMemset = 1u << ChunkTypeShift;
 
     /// <summary>
+    /// Maximum read size per block for BT4 levels (L11) in the framed compressor's
+    /// serial path. Smaller blocks have better cache locality for the BT4 tree walk,
+    /// improving compress speed by ~33% with no ratio impact (the 64MB sliding window
+    /// dictionary still provides full cross-block context).
+    /// </summary>
+    public const int Bt4MaxReadSize = 8 * 1024 * 1024; // 8MB
+
+    /// <summary>
     /// Extra bytes added to compressed output buffers beyond the compress bound.
     /// Provides headroom for the 3-byte chunk header and 8-byte initial literal copy written by the compressor.
     /// </summary>

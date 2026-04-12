@@ -429,6 +429,8 @@ internal static unsafe partial class StreamLZCompressor
     /// <param name="srcSize">Size of the source data in bytes.</param>
     /// <param name="srcWindowBase">Base of the dictionary window for match references.</param>
     /// <returns>Total number of compressed bytes written.</returns>
+    [ThreadStatic] private static LzTemp? t_lztemp;
+
     [SkipLocalsInit]
     internal static int CompressInternal(
         LzCoder coder, byte* srcIn, byte* dst, int srcSize,
@@ -436,7 +438,7 @@ internal static unsafe partial class StreamLZCompressor
     {
         byte* destinationStart = dst;
 
-        using var lztemp = new LzTemp();
+        var lztemp = t_lztemp ??= new LzTemp();
 
         if (srcWindowBase == null || coder.Options!.SeekChunkReset != 0)
         {
@@ -470,7 +472,7 @@ internal static unsafe partial class StreamLZCompressor
             fixed (byte* pArr = matchSrcArr)
                 Buffer.MemoryCopy(dictBase, pArr, compactLen, compactLen);
 
-            var mls = ManagedMatchLenStorage.Create(srcSize + 1, 8.0f);
+            var mls = lztemp.GetMls(srcSize + 1, 8.0f);
             mls.WindowBaseOffset = dictSize;
             mls.RoundStartPos = (int)(srcIn - srcWindowBase);
 

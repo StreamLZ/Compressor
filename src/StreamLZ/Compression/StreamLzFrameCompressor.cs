@@ -187,7 +187,8 @@ internal static class StreamLzFrameCompressor
             // Need: windowSize + readSize + compressBound(readSize) ≈ windowSize + 2*readSize
             long maxRead = (serialBudget - windowSize) / 2;
             maxRead = (maxRead / StreamLZConstants.ChunkSize) * StreamLZConstants.ChunkSize;
-            int readSize = (int)Math.Clamp(maxRead, StreamLZConstants.ChunkSize, windowSize);
+            int readSizeCap = (level >= 9) ? StreamLZConstants.Bt4MaxReadSize : windowSize;
+            int readSize = (int)Math.Clamp(maxRead, StreamLZConstants.ChunkSize, readSizeCap);
             int windowBufSize = windowSize + readSize;
             byte[] windowBuf = ArrayPool<byte>.Shared.Rent(windowBufSize);
             int compressBound = StreamLZCompressor.GetCompressBound(readSize);

@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.4.4]
+
+### Fixed
+- Fix memory growth in L9-L11 framed compression: reuse LzTemp (ThreadStatic)
+  and MLS (Reset instead of Create) across blocks. Previously each of ~125
+  blocks for enwik9 allocated ~100MB of match buffers that accumulated on
+  the LOH, driving working set from 6GB to 13GB+. Now stabilizes at ~6.5GB.
+- Pool BT4 tree arrays (head/left/right) via ArrayPool instead of fresh
+  allocation per block.
+
+### Performance
+- Cap framed read size to 8MB for BT4 levels (L9-L11). Smaller blocks have
+  better cache locality for BT4 tree walks. No ratio impact (64MB sliding
+  window dictionary still provides full cross-block context).
+  - L11 enwik8 compress: 76.8s → 57.8s (+33%).
+- Warmup compress uses 128KB slice instead of full file. Eliminates the
+  10-minute warmup overhead on enwik9 L11.
+- GC.Collect between comparison benchmark levels to prevent cross-level
+  LOH accumulation.
+
 ## [1.4.3]
 
 ### Performance

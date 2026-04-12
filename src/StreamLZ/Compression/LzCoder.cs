@@ -194,6 +194,19 @@ internal sealed class LzTemp : IDisposable
     public readonly ReusableBuffer<byte> MatchSrc = new();
     /// <summary>Reusable literal index buffer (zero-initialized on each use).</summary>
     public readonly ReusableBuffer<int> LitIndexes = new();
+    /// <summary>Cached MLS, reused across blocks to avoid LOH churn.</summary>
+    private ManagedMatchLenStorage? _mls;
+
+    /// <summary>Returns a reusable MLS, creating or resetting as needed.</summary>
+    public ManagedMatchLenStorage GetMls(int entries, float avgBytes)
+    {
+        if (_mls == null)
+            _mls = ManagedMatchLenStorage.Create(entries, avgBytes);
+        else
+            _mls.Reset(entries, avgBytes);
+        return _mls;
+    }
+
     /// <summary>Returns a reusable match result buffer of at least <paramref name="minSize"/> elements.</summary>
     public LengthAndOffset[] GetLaoBuffer(int minSize) => Lao.Get(minSize);
 

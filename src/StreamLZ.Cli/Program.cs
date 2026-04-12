@@ -308,13 +308,13 @@ unsafe
         // Pre-JIT hot paths
         _ = Slz.SafeSpace;
 
-        // Warmup compress (framed API handles sliding window properly for all file sizes)
-        byte[] compressed = Slz.CompressFramed(src, level);
+        // Warmup: compress a small slice to trigger JIT compilation of all hot methods.
+        // No need to warmup on the full file — JIT compiles on first call regardless of size.
+        int warmupSize = Math.Min(src.Length, 128 * 1024);
+        Slz.CompressFramed(src.AsSpan(0, warmupSize), level);
 
-        Console.WriteLine($"Level {level}: {src.Length:N0} -> {compressed.Length:N0} bytes ({(double)compressed.Length / src.Length * 100:F1}%)");
-        Console.WriteLine();
-
-        // Compress benchmark
+        // Compress benchmark — first run also provides the compressed data for decompress test
+        byte[] compressed = null!;
         double[] compSeconds = new double[runs];
         for (int r = 0; r < runs; r++)
         {
@@ -325,6 +325,9 @@ unsafe
             double mbps = (double)src.Length / compSeconds[r] / (1024 * 1024);
             Console.WriteLine($"  Compress run {r + 1}: {sw.ElapsedMilliseconds:N0}ms ({mbps:F1} MB/s)");
         }
+
+        Console.WriteLine($"Level {level}: {src.Length:N0} -> {compressed.Length:N0} bytes ({(double)compressed.Length / src.Length * 100:F1}%)");
+        Console.WriteLine();
 
         Array.Sort(compSeconds);
         double compMedianSec = compSeconds[runs / 2];
