@@ -28,14 +28,23 @@ pub inline fn copy64Bytes(dst: [*]u8, src: [*]const u8) void {
 /// Copies in 16-byte steps until `dst` reaches `dst_end`.
 /// **Caller responsibility:** may overwrite up to 15 bytes past `dst_end`.
 /// Provide a safe-space padding on the output buffer (StreamLZ reserves 64).
+///
+/// Load/store interleave: the two 8-byte halves are sequenced as
+/// load-store-load-store. When an LZ match copy chains this against a
+/// small-offset overlap (e.g. `src = dst - 8`), the second load then
+/// observes the byte the first store just produced, so the A/B/... pattern
+/// propagates correctly. Both halves loaded first would read unwritten
+/// memory for the upper half. (x86 store-to-load forwarding gives the C#
+/// reference the same behaviour naturally; the Zig compiler won't reorder
+/// these dependent operations either — they're expressed in source order.)
 pub inline fn wildCopy16(dst_in: [*]u8, src_in: [*]const u8, dst_end: [*]const u8) void {
     var d = dst_in;
     var s = src_in;
     std.debug.assert(@intFromPtr(d) <= @intFromPtr(dst_end));
     while (true) {
         const v0 = std.mem.readInt(u64, s[0..8], .little);
-        const v1 = std.mem.readInt(u64, s[8..16], .little);
         std.mem.writeInt(u64, d[0..8], v0, .little);
+        const v1 = std.mem.readInt(u64, s[8..16], .little);
         std.mem.writeInt(u64, d[8..16], v1, .little);
         d += 16;
         s += 16;
@@ -101,4 +110,25 @@ test "copy64Add wraps on u8 overflow" {
     var dst: [8]u8 = @splat(0);
     copy64Add(dst[0..].ptr, src[0..].ptr, delta[0..].ptr);
     try testing.expectEqualSlices(u8, &[_]u8{ 44, 44, 44, 44, 44, 44, 44, 44 }, &dst);
+}
+
+test "wildCopy16 propagates small-offset overlap (LZ match copy)" {
+    // Simulates the LZ match-copy pattern used by the High decoder: the
+    // output buffer has 8 seed bytes ('A'), then two Copy64 calls propagate
+    // the pattern to fill 16 more bytes, then wildCopy16 extends the match
+    // with `src = dst - 8`. The interleaved load-store-load-store sequence
+    // is what keeps the upper-half read from grabbing unwritten memory.
+    var buf: [80]u8 = @splat(0);
+    @memset(buf[0..8], 'A');
+    copy64(buf[8..].ptr, buf[0..].ptr);
+    copy64(buf[16..].ptr, buf[8..].ptr);
+    wildCopy16(buf[24..].ptr, buf[16..].ptr, buf[70..].ptr);
+    // Positions 0..69 must all be 'A'. A non-interleaved wildCopy16 writes
+    // 8 A's, then 8 zeros for every subsequent wildcopy iteration.
+    for (buf[0..70], 0..) |b, i| {
+        if (b != 'A') {
+            std.debug.print("byte {d} = 0x{x} (expected 'A' = 0x41)\n", .{ i, b });
+            return error.OverlapPropagationFailed;
+        }
+    }
 }

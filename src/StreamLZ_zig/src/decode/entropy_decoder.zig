@@ -3,11 +3,12 @@
 //! Dispatches an entropy block by reading its 2-5 byte header (chunk type in
 //! `src[0][6:4]`) and routing to:
 //!   * Type 0 — memcopy / raw bytes
-//!   * Type 1 — tANS (phase 6, not yet)
+//!   * Type 1 — tANS
 //!   * Type 2 — Huffman 2-way split
-//!   * Type 3 — RLE  (phase 4b, not yet)
+//!   * Type 3 — RLE
 //!   * Type 4 — Huffman 4-way split
-//!   * Type 5 — Recursive multi-block (phase 4b, not yet)
+//!   * Type 5 — Recursive multi-block (simple N-split path supported;
+//!     the multi-array bit-7-set variant lands in a follow-up)
 //!
 //! The decoder writes into `dst_buf` (or, for Type 0 with `force_memmove=false`,
 //! hands back a pointer directly into `src`, enabling zero-copy literal streams
@@ -24,6 +25,9 @@ pub const DecodeError = error{
     BadChunkHeader,
     UnsupportedChunkType,
     SubDecoderMismatch,
+    RleStreamMismatch,
+    RecursiveDepthExceeded,
+    MultiArrayNotSupported,
 } || huffman.DecodeError || tans.DecodeError;
 
 /// Result of an entropy-block decode. `out_ptr` is where the decoded bytes
@@ -128,9 +132,10 @@ fn highDecodeBytesInternal(
     const payload = src_ptr[0..src_size];
     var src_used: usize = undefined;
 
-    // Scratch for sub-decoders comes from whatever space remains above dst_buf.
-    // For now we use a small stack scratch sized generously enough for LUTs.
-    var scratch_buf: [0x8000]u8 align(16) = undefined;
+    // Scratch for sub-decoders. tANS needs up to 32 KB for its LUT; RLE and
+    // Recursive may need more for nested sub-block decode targets. Size
+    // generously — this is one stack frame and is bounded.
+    var scratch_buf: [0x10000]u8 align(16) = undefined;
     const scratch_ptr: [*]u8 = &scratch_buf;
     const scratch_end_ptr: [*]u8 = scratch_ptr + scratch_buf.len;
 
@@ -145,7 +150,22 @@ fn highDecodeBytesInternal(
             scratch_ptr,
             scratch_end_ptr,
         ),
-        3, 5 => return error.UnsupportedChunkType,
+        3 => src_used = try decodeRle(
+            payload,
+            dst_buf,
+            dst_size,
+            scratch_ptr,
+            scratch_end_ptr,
+            max_depth,
+        ),
+        5 => src_used = try decodeRecursive(
+            payload,
+            dst_buf,
+            dst_size,
+            scratch_ptr,
+            scratch_end_ptr,
+            max_depth,
+        ),
         else => return error.BadChunkHeader,
     }
 
@@ -155,6 +175,168 @@ fn highDecodeBytesInternal(
         .decoded_size = dst_size,
         .bytes_consumed = @intFromPtr(src_ptr) + src_size - @intFromPtr(src_start),
     };
+}
+
+// ────────────────────────────────────────────────────────────
+//  Type 3 — RLE decoder
+// ────────────────────────────────────────────────────────────
+
+/// Run-length decoder. Commands walk backward from the end of the block,
+/// literals forward from `src[1]`. The first byte flags whether the
+/// command stream is entropy-coded (via a nested `highDecodeBytes` call).
+fn decodeRle(
+    src: []const u8,
+    dst_buf: [*]u8,
+    dst_size: usize,
+    scratch: [*]u8,
+    scratch_end: [*]u8,
+    max_depth: u32,
+) DecodeError!usize {
+    if (src.len <= 1) {
+        if (src.len != 1) return error.SourceTruncated;
+        @memset(dst_buf[0..dst_size], src[0]);
+        return 1;
+    }
+
+    var dst = dst_buf;
+    const dst_end: [*]u8 = dst_buf + dst_size;
+
+    const src_start: [*]const u8 = src.ptr;
+    var cmd_ptr: [*]const u8 = src_start + 1;
+    var cmd_ptr_end: [*]const u8 = src_start + src.len;
+
+    // Optional entropy-coded command prefix.
+    var scratch_ptr: [*]u8 = scratch;
+    if (src[0] != 0) {
+        const remaining: []const u8 = src_start[0..src.len];
+        const res = try highDecodeBytesInternal(
+            scratch_ptr,
+            @intFromPtr(scratch_end) - @intFromPtr(scratch_ptr),
+            remaining,
+            true,
+            max_depth - 1,
+        );
+        const n = res.bytes_consumed;
+        const dec_size = res.decoded_size;
+        const tail_size: usize = src.len - n;
+        const cmd_len: usize = tail_size + dec_size;
+        if (cmd_len > @intFromPtr(scratch_end) - @intFromPtr(scratch_ptr)) return error.OutputTooSmall;
+
+        // Append the un-decoded tail bytes after the decoded prefix.
+        const dst_slot: [*]u8 = scratch_ptr;
+        @memcpy(dst_slot[dec_size .. dec_size + tail_size], src_start[n .. n + tail_size]);
+
+        cmd_ptr = dst_slot;
+        cmd_ptr_end = dst_slot + cmd_len;
+        scratch_ptr += cmd_len;
+    }
+
+    var rle_byte: u8 = 0;
+
+    while (@intFromPtr(cmd_ptr) < @intFromPtr(cmd_ptr_end)) {
+        const cmd: u32 = (cmd_ptr_end - 1)[0];
+
+        if ((cmd -% 1) >= constants.rle_short_command_threshold) {
+            cmd_ptr_end -= 1;
+            const bytes_to_copy: usize = @intCast((~cmd) & 0xF);
+            const bytes_to_rle: usize = @intCast(cmd >> 4);
+            if (@intFromPtr(dst_end) - @intFromPtr(dst) < bytes_to_copy + bytes_to_rle) return error.RleStreamMismatch;
+            if (@intFromPtr(cmd_ptr_end) - @intFromPtr(cmd_ptr) < bytes_to_copy) return error.RleStreamMismatch;
+            @memcpy(dst[0..bytes_to_copy], cmd_ptr[0..bytes_to_copy]);
+            cmd_ptr += bytes_to_copy;
+            dst += bytes_to_copy;
+            @memset(dst[0..bytes_to_rle], rle_byte);
+            dst += bytes_to_rle;
+        } else if (cmd >= 0x10) {
+            const pair_ptr: [*]const u8 = cmd_ptr_end - 2;
+            const word: u32 = @as(u32, pair_ptr[0]) | (@as(u32, pair_ptr[1]) << 8);
+            const data: u32 = word -% 4096;
+            cmd_ptr_end -= 2;
+            const bytes_to_copy: usize = @intCast(data & 0x3F);
+            const bytes_to_rle: usize = @intCast(data >> 6);
+            if (@intFromPtr(dst_end) - @intFromPtr(dst) < bytes_to_copy + bytes_to_rle) return error.RleStreamMismatch;
+            if (@intFromPtr(cmd_ptr_end) - @intFromPtr(cmd_ptr) < bytes_to_copy) return error.RleStreamMismatch;
+            @memcpy(dst[0..bytes_to_copy], cmd_ptr[0..bytes_to_copy]);
+            cmd_ptr += bytes_to_copy;
+            dst += bytes_to_copy;
+            @memset(dst[0..bytes_to_rle], rle_byte);
+            dst += bytes_to_rle;
+        } else if (cmd == 1) {
+            rle_byte = cmd_ptr[0];
+            cmd_ptr += 1;
+            cmd_ptr_end -= 1;
+        } else if (cmd >= 9) {
+            const pair_ptr: [*]const u8 = cmd_ptr_end - 2;
+            const word: u32 = @as(u32, pair_ptr[0]) | (@as(u32, pair_ptr[1]) << 8);
+            const bytes_to_rle: usize = @intCast((word -% 0x8ff) * 128);
+            cmd_ptr_end -= 2;
+            if (@intFromPtr(dst_end) - @intFromPtr(dst) < bytes_to_rle) return error.RleStreamMismatch;
+            @memset(dst[0..bytes_to_rle], rle_byte);
+            dst += bytes_to_rle;
+        } else {
+            const pair_ptr: [*]const u8 = cmd_ptr_end - 2;
+            const word: u32 = @as(u32, pair_ptr[0]) | (@as(u32, pair_ptr[1]) << 8);
+            const bytes_to_copy: usize = @intCast((word -% 511) * 64);
+            cmd_ptr_end -= 2;
+            if (@intFromPtr(cmd_ptr_end) - @intFromPtr(cmd_ptr) < bytes_to_copy) return error.RleStreamMismatch;
+            if (@intFromPtr(dst_end) - @intFromPtr(dst) < bytes_to_copy) return error.RleStreamMismatch;
+            @memcpy(dst[0..bytes_to_copy], cmd_ptr[0..bytes_to_copy]);
+            dst += bytes_to_copy;
+            cmd_ptr += bytes_to_copy;
+        }
+    }
+
+    if (@intFromPtr(cmd_ptr_end) != @intFromPtr(cmd_ptr)) return error.RleStreamMismatch;
+    if (@intFromPtr(dst) != @intFromPtr(dst_end)) return error.RleStreamMismatch;
+    return src.len;
+}
+
+// ────────────────────────────────────────────────────────────
+//  Type 5 — Recursive multi-block decoder (simple N-split path)
+// ────────────────────────────────────────────────────────────
+
+fn decodeRecursive(
+    src: []const u8,
+    dst_buf: [*]u8,
+    dst_size: usize,
+    scratch: [*]u8,
+    scratch_end: [*]u8,
+    max_depth: u32,
+) DecodeError!usize {
+    _ = scratch;
+    _ = scratch_end;
+    if (src.len < 6) return error.SourceTruncated;
+
+    const n0: u8 = src[0] & 0x7F;
+    if (n0 < 2) return error.BadChunkHeader;
+
+    // Multi-array variant (bit 7 set) — the intricate interleaved-stream path
+    // in C#'s `High_DecodeMultiArrayInternal`. Not yet ported.
+    if ((src[0] & 0x80) != 0) return error.MultiArrayNotSupported;
+
+    // Simple path: N sub-blocks, each decoded via highDecodeBytesInternal with
+    // `force_memmove=true` so they concatenate into dst_buf.
+    var remaining_src: []const u8 = src[1..];
+    var dst_cursor: [*]u8 = dst_buf;
+    var dst_remaining: usize = dst_size;
+    var n: u32 = n0;
+
+    while (n != 0) : (n -= 1) {
+        const res = try highDecodeBytesInternal(
+            dst_cursor,
+            dst_remaining,
+            remaining_src,
+            true,
+            max_depth - 1,
+        );
+        dst_cursor += res.decoded_size;
+        dst_remaining -= res.decoded_size;
+        remaining_src = remaining_src[res.bytes_consumed..];
+    }
+
+    if (dst_remaining != 0) return error.SubDecoderMismatch;
+    // Return total bytes consumed from the original `src`.
+    return src.len - remaining_src.len;
 }
 
 // ────────────────────────────────────────────────────────────
@@ -183,12 +365,9 @@ test "Type 0 memcopy with force_memmove copies into dst_buf" {
     try testing.expectEqualSlices(u8, "hello", dst[0..5]);
 }
 
-test "unsupported chunk types return error" {
-    // Type 3 (RLE) with short-mode header: 0x80 | (3<<4) = 0xB0
-    var src: [3]u8 = .{ 0xB0, 0, 0 };
-    var dst: [16]u8 = undefined;
-    try testing.expectError(error.UnsupportedChunkType, highDecodeBytes(&dst, dst.len, &src, false));
-}
+// The previous "unsupported chunk types return error" placeholder test was
+// removed in phase 4b — Types 3 and 5 are now wired. End-to-end fixtures
+// are the real validation for RLE / Recursive.
 
 test "truncated source returns SourceTruncated" {
     const src = [_]u8{0x80};

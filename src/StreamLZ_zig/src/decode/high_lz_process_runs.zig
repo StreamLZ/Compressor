@@ -7,6 +7,10 @@
 //! array, then execute with match-source prefetching. For the first
 //! port I keep both paths simple and correct; the SIMD AVX2 tail
 //! optimizations and binary-search dstSafeEnd split land in phase 7.
+//!
+//! Note: correctness of small-offset match propagation depends on
+//! `io.copy_helpers.wildCopy16` doing load-store-load-store (not both
+//! loads first); see the comment on that function.
 
 const std = @import("std");
 const constants = @import("../format/streamlz_constants.zig");
