@@ -39,6 +39,11 @@ pub fn processLzRuns(
     }
 }
 
+/// Fallback allocator for the Type 1 token array when the scratch buffer
+/// is exhausted. We use the page allocator to avoid pulling a `Allocator`
+/// parameter through every decoder entry point.
+const fallback_allocator = std.heap.page_allocator;
+
 // ────────────────────────────────────────────────────────────
 //  Type 0 — delta-coded literals, single-pass
 // ────────────────────────────────────────────────────────────
@@ -321,13 +326,25 @@ fn processLzRunsType1(
     const len_stream_end = lz.len_stream + lz.len_stream_size;
 
     const token_count = lz.cmd_stream_size;
+    var fallback_tokens: ?[]LzToken = null;
+    defer if (fallback_tokens) |t| fallback_allocator.free(t);
+
     if (token_count > 0) {
         const token_bytes: usize = @as(usize, token_count) * @sizeOf(LzToken);
-        if (@intFromPtr(scratch_free) + token_bytes > @intFromPtr(scratch_end)) {
-            // Fall back: no dynamic allocator allowed here; tokens must fit in scratch.
-            return error.OutputTruncated;
-        }
-        const tokens: [*]LzToken = @ptrCast(@alignCast(scratch_free));
+        const tokens: [*]LzToken = blk: {
+            if (@intFromPtr(scratch_free) + token_bytes <= @intFromPtr(scratch_end)) {
+                // Align scratch_free to 16 bytes.
+                const aligned = (@intFromPtr(scratch_free) + 15) & ~@as(usize, 15);
+                if (aligned + token_bytes > @intFromPtr(scratch_end)) {
+                    // Fall through to allocator path.
+                } else {
+                    break :blk @ptrFromInt(aligned);
+                }
+            }
+            const slice = fallback_allocator.alignedAlloc(LzToken, .fromByteUnits(16), token_count) catch return error.OutputTruncated;
+            fallback_tokens = slice;
+            break :blk slice.ptr;
+        };
 
         var offs_final: [*]align(1) const i32 = undefined;
         var len_final: [*]align(1) const i32 = undefined;

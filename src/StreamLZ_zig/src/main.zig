@@ -252,6 +252,7 @@ test {
     _ = @import("decode/fast_lz_decoder.zig");
     _ = @import("decode/high_lz_decoder.zig");
     _ = @import("decode/high_lz_process_runs.zig");
+    _ = @import("decode/tans_decoder.zig");
 }
 
 test "Command.parse recognises known commands" {

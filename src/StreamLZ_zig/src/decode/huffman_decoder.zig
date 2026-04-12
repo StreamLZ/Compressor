@@ -245,8 +245,9 @@ pub fn decodeGolombRiceLengths(dst_buf: [*]u8, size: usize, br: *BitReader2) Dec
             count += 8;
         } else {
             const x = k_rice_code_bits2_value[v];
-            // Store count + low-nibble symbols at dst[0..4]
-            const lo: u32 = @as(u32, @bitCast(count)) + (x & 0x0F0F_0F0F);
+            // Store count + low-nibble symbols at dst[0..4]. `count` is small
+            // (may be slightly negative); byte-wise the math must wrap.
+            const lo: u32 = @as(u32, @bitCast(count)) +% (x & 0x0F0F_0F0F);
             const hi: u32 = (x >> 4) & 0x0F0F_0F0F;
             std.mem.writeInt(u32, dst[0..4], lo, .little);
             std.mem.writeInt(u32, dst[4..8], hi, .little);

@@ -16,6 +16,7 @@
 const std = @import("std");
 const constants = @import("../format/streamlz_constants.zig");
 const huffman = @import("huffman_decoder.zig");
+const tans = @import("tans_decoder.zig");
 
 pub const DecodeError = error{
     SourceTruncated,
@@ -23,7 +24,7 @@ pub const DecodeError = error{
     BadChunkHeader,
     UnsupportedChunkType,
     SubDecoderMismatch,
-} || huffman.DecodeError;
+} || huffman.DecodeError || tans.DecodeError;
 
 /// Result of an entropy-block decode. `out_ptr` is where the decoded bytes
 /// actually live — for Type 0 zero-copy mode it points into the source buffer;
@@ -57,7 +58,7 @@ fn highDecodeBytesInternal(
     force_memmove: bool,
     max_depth: u32,
 ) DecodeError!DecodeResult {
-    _ = max_depth; // reserved for Type 5 recursive path (phase 4b)
+    if (max_depth == 0) return error.BadChunkHeader;
 
     if (src_buf.len < 2) return error.SourceTruncated;
 
@@ -127,10 +128,24 @@ fn highDecodeBytesInternal(
     const payload = src_ptr[0..src_size];
     var src_used: usize = undefined;
 
+    // Scratch for sub-decoders comes from whatever space remains above dst_buf.
+    // For now we use a small stack scratch sized generously enough for LUTs.
+    var scratch_buf: [0x8000]u8 align(16) = undefined;
+    const scratch_ptr: [*]u8 = &scratch_buf;
+    const scratch_end_ptr: [*]u8 = scratch_ptr + scratch_buf.len;
+
     switch (chunk_type) {
         2 => src_used = try huffman.highDecodeBytesType12(payload, dst_buf, dst_size, 1),
         4 => src_used = try huffman.highDecodeBytesType12(payload, dst_buf, dst_size, 2),
-        1, 3, 5 => return error.UnsupportedChunkType,
+        1 => src_used = try tans.highDecodeTans(
+            payload.ptr,
+            payload.len,
+            dst_buf,
+            dst_size,
+            scratch_ptr,
+            scratch_end_ptr,
+        ),
+        3, 5 => return error.UnsupportedChunkType,
         else => return error.BadChunkHeader,
     }
 
