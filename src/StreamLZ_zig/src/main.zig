@@ -414,6 +414,7 @@ test {
     _ = @import("format/block_header.zig");
     _ = @import("io/bit_reader.zig");
     _ = @import("io/bit_writer.zig");
+    _ = @import("io/bit_writer_64.zig");
     _ = @import("io/copy_helpers.zig");
     _ = @import("decode/streamlz_decoder.zig");
     _ = @import("decode/huffman_decoder.zig");
@@ -423,7 +424,9 @@ test {
     _ = @import("decode/high_lz_process_runs.zig");
     _ = @import("decode/tans_decoder.zig");
     _ = @import("decode/fixture_tests.zig");
+    _ = @import("encode/byte_histogram.zig");
     _ = @import("encode/fast_constants.zig");
+    _ = @import("encode/tans_encoder.zig");
     _ = @import("encode/fast_match_hasher.zig");
     _ = @import("encode/fast_stream_writer.zig");
     _ = @import("encode/fast_token_writer.zig");

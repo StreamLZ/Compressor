@@ -33,7 +33,8 @@ src/StreamLZ_zig/
     │
     ├── io/                              # Low-level byte / bit primitives
     │   ├── bit_reader.zig               32-bit MSB bit reader (forward + backward refill)
-    │   ├── bit_writer.zig               4 bit-writer variants (fwd/bwd × 32/64)
+    │   ├── bit_writer.zig               4 bit-writer variants (fwd/bwd × 32/64, older stub)
+    │   ├── bit_writer_64.zig            [phase 10] 64-bit forward + backward bit writers
     │   └── copy_helpers.zig             copy64 / copy64Bytes / wildCopy16 / copy64Add
     │                                    (scalar now; @Vector in phase 7)
     │

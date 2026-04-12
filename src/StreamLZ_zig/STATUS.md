@@ -36,10 +36,12 @@ zero coupling to the .NET solution.
 | 7b | High decoder hot loop | `@prefetch` 128 tokens ahead in `executeTokensType1`; same-iteration prefetch in `processLzRunsType0`; 8-byte cascading literal copy |
 | 8 | Fixture corpus + roundtrip tests | `scripts/gen_fixtures.sh` builds 20 raws × 7 levels = 140 `.slz` under `c:/tmp/fixtures/`. `decode/fixture_tests.zig` walks `$STREAMLZ_FIXTURES_DIR/slz/*.slz`, decodes, and diffs against `raw/<stem>.raw`. Skips cleanly if env var unset. Debug + ReleaseFast both 48/48 green, 140/140 bit-exact |
 | 9 (raw) | Fast encoder L1/L2 (raw-literal mode) | `encode/{fast_constants,fast_match_hasher,fast_stream_writer,fast_token_writer,fast_lz_parser,fast_lz_encoder,streamlz_encoder}.zig`. Greedy parser with `FastMatchHasher(u32)`, `@prefetch`-friendly hot loop, `comptime level` folding. `streamlz compress [-l N] <in> <out>` CLI. Roundtrip corpus: 40/40 Zig encode → Zig decode + Zig encode → C# decode, byte-exact across all 4 shapes × 5 sizes |
+| 10a-c | Entropy infra scaffolding | `encode/byte_histogram.zig`, `io/bit_writer_64.zig` (forward + backward), `encode/tans_encoder.zig` (normalize + init_table + get_bit_count + encode_bytes + encode_table scaffolding). Compiles clean, 90/90 passing; 2 tANS roundtrip tests skipped (see caveats) |
 
 ### Pending
 | # | phase | notes |
 |---|---|---|
+| 10d (debug) | tANS encoder roundtrip | `tansInitTable` + `tansEncodeBytes` + `tansEncodeTable` all compile but the round-trip through `decode/tans_decoder.zig` produces scrambled output. First two bytes of a 256-byte "abcabc…" test decode correctly, then diverge. Bug is likely in the state-table initialization (`base_offset` math for the weight-1 path or the 4-way distribution) or the stream-swap semantics. Debug is cheapest with a minimal 2-symbol test + side-by-side C# reference |
 | 9 (entropy) | Fast encoder L3–L5 (entropy mode) | Same parser, different assembly path: `EntropyEncoder.EncodeArrayU8` for literal/token streams, off16 split + entropy, chunk type selection. Blocked on Phase 10 |
 | 10 | Huffman + tANS encoders | `encode/multi_array_huffman_encoder.zig` (2 KLOC in C#), `encode/tans_encoder.zig`, `encode/offset_encoder.zig`, `encode/byte_histogram.zig` |
 | 11 | High encoder | `encode/high_lz_encoder.zig`, `encode/optimal_parser.zig` (DP), `encode/cost_model.zig` |
