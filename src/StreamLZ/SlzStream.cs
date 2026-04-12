@@ -13,8 +13,7 @@ namespace StreamLZ;
 
 /// <summary>
 /// Provides methods and properties for compressing and decompressing streams
-/// using the StreamLZ algorithm, following the same pattern as
-/// <see cref="GZipStream"/> and <see cref="System.IO.Compression.BrotliStream"/>.
+/// using the StreamLZ algorithm.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -30,6 +29,11 @@ namespace StreamLZ;
 /// Supports both self-contained and cross-block-referenced streams (all compression levels).
 /// Memory usage is bounded by block size + window size.
 /// </para>
+/// <para><b>Thread safety:</b> This class is not thread-safe. Do not call methods
+/// on the same instance from multiple threads concurrently.</para>
+/// <para><b>Differences from GZipStream:</b> <see cref="Flush"/> is a no-op (data
+/// flushes on Dispose). <see cref="WriteAsync(byte[], int, int, CancellationToken)"/>
+/// performs synchronous compression. Compression is single-threaded.</para>
 /// </remarks>
 public sealed class SlzStream : Stream, IAsyncDisposable
 {

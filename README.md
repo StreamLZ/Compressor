@@ -201,7 +201,19 @@ Slz.WarmUp();
 | Zstd 19 | 24.9% | 3.2 MB/s | 1,052 MB/s | | |
 | **SLZ L11** | **24.2%** | **3.0 MB/s** | **1,439 MB/s** | | **partial** |
 
-*All benchmarks on Intel Arrow Lake-S (Ultra 9 285K), 24-core, .NET 10.*
+*All benchmarks on Intel Arrow Lake-S (Ultra 9 285K), 24-core, .NET 10.
+LZ4, Snappy, and Zstd are single-threaded. SLZ rows marked with checkmarks
+use parallel compression and/or decompression — see the Parallel columns.*
+
+## Choosing a Level
+
+| Use case | Recommended | Why |
+|----------|-------------|-----|
+| Logging, IPC, hot caches | L1 | Fastest compress (300+ MB/s), 5+ GB/s decompress |
+| Network transfer, databases | L5 or L6 | L5 is single-threaded; L6 adds parallel compress/decompress |
+| General storage | **L6** (default) | Best balance: 27% ratio, 10+ GB/s parallel decompress |
+| Maximum parallel ratio | L8 | BT4 match finder, slightly better ratio than L6 |
+| Archival, cold storage | L11 | Best ratio (22%), accepts slow compress |
 
 ## Threading Model
 
@@ -216,6 +228,20 @@ StreamLZ uses different threading strategies depending on the compression level:
   Then the next batch starts. This yields ~47% faster decompression than fully serial on a 24-core machine.
 
 Compression thread count can be limited with the `maxThreads` parameter (e.g. for server workloads). Decompression threading is automatic and cannot be disabled.
+
+## Thread Safety
+
+- **`Slz` static methods** (`CompressFramed`, `DecompressFramed`, `CompressStream`, etc.): thread-safe. Multiple threads can compress/decompress concurrently.
+- **`SlzStream`**: not thread-safe. Each instance must be used by one thread at a time, like `GZipStream`.
+
+## Limitations
+
+- **Async compression** (`CompressStreamAsync`, `CompressFileAsync`): uses the serial single-block path. No parallel large-chunk mode. Prefer the synchronous overloads for maximum throughput.
+- **`SlzStream.Flush()`**: no-op. Data is accumulated until a full block is ready, then compressed and written. Call `Dispose()` to finalize and flush the last block.
+- **`SlzStream.WriteAsync()`**: performs synchronous compression and returns a completed task. The I/O is non-blocking but the CPU work is not offloaded.
+- **L11 memory**: single-threaded compression of large files (1GB+) uses ~6.5GB working set due to BT4 match finder arrays and 64MB sliding window dictionary. L9-L10 use hash-based matching and require less memory.
+- **L6-L8 memory**: parallel compression uses memory proportional to thread count (each thread processes a 1MB group with its own match finder).
+- **Breaking change in v1.4.0**: L6-L8 compressed output contains cross-chunk references within 4-chunk groups. Decompressors older than v1.4.0 cannot decode this data.
 
 ## License
 

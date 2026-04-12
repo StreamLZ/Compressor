@@ -175,6 +175,7 @@ public static class Slz
     /// <param name="source">The data to compress.</param>
     /// <param name="level">Compression level 1-11 (default: 6).</param>
     /// <returns>Compressed byte array in SLZ1 frame format.</returns>
+    /// <exception cref="OutOfMemoryException">Thrown when the input is too large to compress in memory.</exception>
     public static byte[] CompressFramed(ReadOnlySpan<byte> source, int level = DefaultLevel)
     {
         if (source.Length == 0)
