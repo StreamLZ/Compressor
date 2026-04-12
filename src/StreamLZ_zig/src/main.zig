@@ -248,6 +248,8 @@ test {
     _ = @import("io/copy_helpers.zig");
     _ = @import("decode/streamlz_decoder.zig");
     _ = @import("decode/huffman_decoder.zig");
+    _ = @import("decode/entropy_decoder.zig");
+    _ = @import("decode/fast_lz_decoder.zig");
 }
 
 test "Command.parse recognises known commands" {

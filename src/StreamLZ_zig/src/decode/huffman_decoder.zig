@@ -493,7 +493,8 @@ pub fn huffReadCodeLengthsOld(
         const forced_bits_raw = bitReaderReadBitsNoRefill(br, 2);
         const forced_bits: u5 = @intCast(forced_bits_raw);
 
-        const tfvgb_shift: u5 = @intCast(31 - (20 >> forced_bits));
+        const shift_amount: u32 = @as(u32, 20) >> forced_bits;
+        const tfvgb_shift: u5 = @intCast(31 - shift_amount);
         const thres_for_valid_gamma_bits: u32 = @as(u32, 1) << tfvgb_shift;
 
         var skip_zeros: bool = bitReaderReadBit(br) != 0;
@@ -680,7 +681,7 @@ pub fn highDecodeBytesCore(hr: *HuffReader, lut: *const HuffRevLut) DecodeError!
             const src_end_word_le: u32 = std.mem.readInt(u32, src_end[0..4], .little);
             const src_end_word_be: u32 = @byteSwap(src_end_word_le);
             src_end_bits |= src_end_word_be << @intCast(src_end_bitpos);
-            src_end -= @intCast((31 - src_end_bitpos) >> 3);
+            src_end -= @as(usize, @intCast((31 - src_end_bitpos) >> 3));
 
             // Middle stream refill.
             const src_mid_word: u32 = std.mem.readInt(u32, src_mid[0..4], .little);
@@ -733,11 +734,11 @@ pub fn highDecodeBytesCore(hr: *HuffReader, lut: *const HuffRevLut) DecodeError!
         }
 
         dst_end += 5;
-        src -= @intCast(@as(u32, @bitCast(src_bitpos)) >> 3);
+        src -= @as(usize, @intCast(@as(u32, @bitCast(src_bitpos)) >> 3));
         src_bitpos &= 7;
-        src_end += @intCast(4 + (@as(u32, @bitCast(src_end_bitpos)) >> 3));
+        src_end += @as(usize, @intCast(4 + (@as(u32, @bitCast(src_end_bitpos)) >> 3)));
         src_end_bitpos &= 7;
-        src_mid -= @intCast(@as(u32, @bitCast(src_mid_bitpos)) >> 3);
+        src_mid -= @as(usize, @intCast(@as(u32, @bitCast(src_mid_bitpos)) >> 3));
         src_mid_bitpos &= 7;
     }
 
@@ -761,7 +762,7 @@ pub fn highDecodeBytesCore(hr: *HuffReader, lut: *const HuffRevLut) DecodeError!
         src_bits >>= @intCast(cbl);
         dst[0] = lut.bits2_sym[lut_index];
         dst += 1;
-        src += @intCast((7 - src_bitpos) >> 3);
+        src += @as(usize, @intCast((7 - src_bitpos) >> 3));
         src_bitpos &= 7;
 
         if (@intFromPtr(dst) < @intFromPtr(dst_end)) {
@@ -788,7 +789,7 @@ pub fn highDecodeBytesCore(hr: *HuffReader, lut: *const HuffRevLut) DecodeError!
             dst += 1;
             src_end_bitpos -= @intCast(cbl);
             src_end_bits >>= @intCast(cbl);
-            src_end -= @intCast((7 - src_end_bitpos) >> 3);
+            src_end -= @as(usize, @intCast((7 - src_end_bitpos) >> 3));
             src_end_bitpos &= 7;
 
             if (@intFromPtr(dst) < @intFromPtr(dst_end)) {
@@ -798,7 +799,7 @@ pub fn highDecodeBytesCore(hr: *HuffReader, lut: *const HuffRevLut) DecodeError!
                 dst += 1;
                 src_mid_bitpos -= @intCast(cbl);
                 src_mid_bits >>= @intCast(cbl);
-                src_mid += @intCast((7 - src_mid_bitpos) >> 3);
+                src_mid += @as(usize, @intCast((7 - src_mid_bitpos) >> 3));
                 src_mid_bitpos &= 7;
             }
         }
