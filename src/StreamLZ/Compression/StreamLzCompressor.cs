@@ -419,6 +419,8 @@ internal static unsafe partial class StreamLZCompressor
         return written;
     }
 
+    [ThreadStatic] private static LzTemp? t_lztemp;
+
     /// <summary>
     /// Main compression loop. Orchestrates match finding, block compression
     /// dispatch, and self-contained prefix accumulation.
@@ -429,8 +431,6 @@ internal static unsafe partial class StreamLZCompressor
     /// <param name="srcSize">Size of the source data in bytes.</param>
     /// <param name="srcWindowBase">Base of the dictionary window for match references.</param>
     /// <returns>Total number of compressed bytes written.</returns>
-    [ThreadStatic] private static LzTemp? t_lztemp;
-
     [SkipLocalsInit]
     internal static int CompressInternal(
         LzCoder coder, byte* srcIn, byte* dst, int srcSize,
