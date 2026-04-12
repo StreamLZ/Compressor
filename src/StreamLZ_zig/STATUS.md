@@ -35,11 +35,12 @@ zero coupling to the .NET solution.
 | 7 | Vectorize CopyHelpers | `@Vector(16, u8)` × 4 for `copy64Bytes`, `@Vector(8, u8)` `+%` for `copy64Add`. `streamlz bench` subcommand for in-memory timing |
 | 7b | High decoder hot loop | `@prefetch` 128 tokens ahead in `executeTokensType1`; same-iteration prefetch in `processLzRunsType0`; 8-byte cascading literal copy |
 | 8 | Fixture corpus + roundtrip tests | `scripts/gen_fixtures.sh` builds 20 raws × 7 levels = 140 `.slz` under `c:/tmp/fixtures/`. `decode/fixture_tests.zig` walks `$STREAMLZ_FIXTURES_DIR/slz/*.slz`, decodes, and diffs against `raw/<stem>.raw`. Skips cleanly if env var unset. Debug + ReleaseFast both 48/48 green, 140/140 bit-exact |
+| 9 (raw) | Fast encoder L1/L2 (raw-literal mode) | `encode/{fast_constants,fast_match_hasher,fast_stream_writer,fast_token_writer,fast_lz_parser,fast_lz_encoder,streamlz_encoder}.zig`. Greedy parser with `FastMatchHasher(u32)`, `@prefetch`-friendly hot loop, `comptime level` folding. `streamlz compress [-l N] <in> <out>` CLI. Roundtrip corpus: 40/40 Zig encode → Zig decode + Zig encode → C# decode, byte-exact across all 4 shapes × 5 sizes |
 
 ### Pending
 | # | phase | notes |
 |---|---|---|
-| 9 | Fast encoder (L1-L5) | Hash matcher, greedy/lazy parser, token encoder → `encode/fast_lz_encoder.zig`, `encode/match_hasher.zig` |
+| 9 (entropy) | Fast encoder L3–L5 (entropy mode) | Same parser, different assembly path: `EntropyEncoder.EncodeArrayU8` for literal/token streams, off16 split + entropy, chunk type selection. Blocked on Phase 10 |
 | 10 | Huffman + tANS encoders | `encode/multi_array_huffman_encoder.zig` (2 KLOC in C#), `encode/tans_encoder.zig`, `encode/offset_encoder.zig`, `encode/byte_histogram.zig` |
 | 11 | High encoder | `encode/high_lz_encoder.zig`, `encode/optimal_parser.zig` (DP), `encode/cost_model.zig` |
 | 12 | BT4 match finder | `encode/match_finder_bt4.zig` — needed for L11 only |
@@ -155,6 +156,22 @@ apples-to-apples against the single-threaded Zig port.
    once at the start of a command chain — never re-prefixing every
    call.
 
+8. **Fast encoder min-match-length table index.** C# uses
+   `31 - Log2(offset)` to index the min-match-length table, where
+   `Log2` is the position of the highest set bit. In Zig 0.15 the
+   equivalent is `@clz(offset)` (leading-zero count), NOT
+   `31 - @clz(offset)`. Getting this wrong silently accepts 4-byte
+   matches at far offsets that need 14+. It bit-exact passed every
+   test case with source length ≤ 66754, but corrupted output for
+   anything that produced a far-offset match. The bug was in
+   `encode/fast_lz_parser.zig:runGreedyParser`.
+
+9. **Raw-mode literal in-place.** For L1/L2 the parser writes literal
+   bytes directly into the destination buffer, past a reserved 3-byte
+   count header (`literal_data_ptr = dst + 3 + initial_bytes`). The
+   assembly step backfills the 3-byte count. Scratch holds only
+   token/off16/off32/length streams. Matches C#'s FastParser init.
+
 ## Known caveats / TODOs
 
 - **Multi-array recursive decode (Type 5 bit-7 variant)** returns
@@ -194,13 +211,11 @@ Base (pre-session): `4a0451a` (`Add concurrent access test verifying Slz thread 
 
 ## Recommended next session entry points (in order)
 
-1. **Phase 9 — Fast encoder.** Start with level 1 (simplest: greedy hash
-   matcher + short-token encoder). Pair with `match_hasher.zig`.
-   Validate by round-tripping through my decoder and comparing against
-   the C# encoder's output (they don't have to match byte-for-byte;
-   only need to decode correctly via the C# decoder). With Phase 8 in
-   place, every new encoder output can be pushed through the fixture
-   test as regression protection for the decoder.
+1. **Phase 10 — Entropy encoders.** Port `multi_array_huffman_encoder.zig`
+   (~2 KLOC in C#), `tans_encoder.zig`, `offset_encoder.zig`, and
+   `byte_histogram.zig`. Once landed, L3–L5 light up by flipping
+   `useLiteralEntropyCoding` on the Fast encoder's assembly path and
+   threading `EntropyEncoder.EncodeArrayU8` through it.
 
 2. **Phase 13 — Parallel decompress.** This is what closes the 0.7-0.8×
    gap on L6-L11. Uses `std.Thread.Pool` and a pre-scan over chunks.
@@ -210,12 +225,13 @@ Base (pre-session): `4a0451a` (`Add concurrent access test verifying Slz thread 
 
 ## Unit test count
 
-48 Zig unit tests passing, wired via `main.zig` test aggregator:
+79 Zig unit tests passing, wired via `main.zig` test aggregator:
 
 ```
 $ STREAMLZ_FIXTURES_DIR=c:/tmp/fixtures zig build test --summary all
   [fixture_tests] all 140 fixtures passed
-Build Summary: 3/3 steps succeeded; 48/48 tests passed
+  [encode_fixture_tests] all 40 encode roundtrips passed
+Build Summary: 3/3 steps succeeded; 79/79 tests passed
 ```
 
 The `fixture_tests` block is self-skipping when `STREAMLZ_FIXTURES_DIR`

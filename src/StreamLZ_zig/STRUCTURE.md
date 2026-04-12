@@ -48,11 +48,17 @@ src/StreamLZ_zig/
     │   └── fixture_tests.zig            [phase 8] exhaustive corpus roundtrip test
     │
     └── encode/                          # Everything write-side
-        ├── streamlz_encoder.zig         [phase 9] Top-level compress dispatcher
-        ├── fast_lz_encoder.zig          [phase 9] Fast codec: parser + encoder
+        ├── streamlz_encoder.zig         [phase 9] Top-level framed compress dispatcher
+        ├── fast_constants.zig           [phase 9] FastConstants + level-mapping helpers
+        ├── fast_match_hasher.zig        [phase 9] FastMatchHasher(T) single-entry Fibonacci hash
+        ├── fast_stream_writer.zig       [phase 9] 6-parallel-stream output buffer (raw + entropy)
+        ├── fast_token_writer.zig        [phase 9] writeOffset / writeComplexOffset / writeLengthValue / writeOffset32
+        ├── fast_lz_parser.zig           [phase 9] Greedy match-finding hot loop (comptime level)
+        ├── fast_lz_encoder.zig          [phase 9] encodeSubChunkRaw — raw-mode (L1/L2) assembly
+        ├── encode_fixture_tests.zig     [phase 9] corpus-driven encode→decode roundtrip tests
         ├── high_lz_encoder.zig          [phase 11] High codec: token emitter
         ├── optimal_parser.zig           [phase 11] DP optimal parser
-        ├── match_hasher.zig             [phase 9] Hash-chain match finder
+        ├── match_hasher.zig             [phase 9] (superseded — see fast_match_hasher.zig)
         ├── match_finder_bt4.zig         [phase 12] Binary-tree match finder for L11
         ├── multi_array_huffman_encoder.zig [phase 10] Multi-stream Huffman encoder (big one)
         ├── tans_encoder.zig             [phase 10] tANS encoder (freq-norm heap + state machine)

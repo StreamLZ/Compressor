@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const frame = @import("format/frame_format.zig");
 const decoder = @import("decode/streamlz_decoder.zig");
+const encoder = @import("encode/streamlz_encoder.zig");
 
 const version_string = "0.0.0-phase3a";
 
@@ -68,11 +69,7 @@ pub fn main() !void {
         .info => try runInfo(allocator, stdout, args[2..]),
         .decompress => try runDecompress(allocator, stdout, args[2..]),
         .bench => try runBench(allocator, stdout, args[2..]),
-        .compress => {
-            try stdout.print("error: 'compress' is not implemented yet (coming in phase 9)\n", .{});
-            try stdout.flush();
-            std.process.exit(2);
-        },
+        .compress => try runCompress(allocator, stdout, args[2..]),
     }
 }
 
@@ -178,10 +175,95 @@ fn printUsage(w: *std.Io.Writer) !void {
         \\  version              Print the version and toolchain info
         \\  help                 Print this message
         \\  info       <file>    Dump SLZ1 frame header + block list
-        \\  decompress <in> <out>  [phase 3] Decompress an SLZ1 file
-        \\  compress   <in> <out>  [phase 9] Compress a file to SLZ1
+        \\  decompress <in> <out>      Decompress an SLZ1 file
+        \\  compress [-l N] <in> <out> Compress a file to SLZ1 (N=1 or 2)
+        \\  bench      <file> [runs]   Benchmark decompress on a preloaded file
         \\
     );
+}
+
+fn runCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const []const u8) !void {
+    var level: u8 = 1;
+    var in_path: ?[]const u8 = null;
+    var out_path: ?[]const u8 = null;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (std.mem.eql(u8, a, "-l") and i + 1 < args.len) {
+            level = std.fmt.parseInt(u8, args[i + 1], 10) catch {
+                try w.print("error: invalid level '{s}'\n", .{args[i + 1]});
+                try w.flush();
+                std.process.exit(2);
+            };
+            i += 1;
+        } else if (in_path == null) {
+            in_path = a;
+        } else if (out_path == null) {
+            out_path = a;
+        } else {
+            try w.writeAll("usage: streamlz compress [-l N] <in> <out>\n");
+            try w.flush();
+            std.process.exit(2);
+        }
+    }
+    if (in_path == null or out_path == null) {
+        try w.writeAll("usage: streamlz compress [-l N] <in> <out>\n");
+        try w.flush();
+        std.process.exit(2);
+    }
+
+    if (level < 1 or level > 2) {
+        try w.print("error: only levels 1 and 2 are supported in Phase 9 (got {d})\n", .{level});
+        try w.flush();
+        std.process.exit(2);
+    }
+
+    const in_file = std.fs.cwd().openFile(in_path.?, .{}) catch |err| {
+        try w.print("error: cannot open '{s}': {s}\n", .{ in_path.?, @errorName(err) });
+        try w.flush();
+        std.process.exit(1);
+    };
+    defer in_file.close();
+
+    const max_bytes: usize = 1 << 31;
+    const src = in_file.readToEndAlloc(allocator, max_bytes) catch |err| {
+        try w.print("error: cannot read '{s}': {s}\n", .{ in_path.?, @errorName(err) });
+        try w.flush();
+        std.process.exit(1);
+    };
+    defer allocator.free(src);
+
+    const bound = encoder.compressBound(src.len);
+    const dst = allocator.alloc(u8, bound) catch |err| {
+        try w.print("error: cannot allocate {d} bytes: {s}\n", .{ bound, @errorName(err) });
+        try w.flush();
+        std.process.exit(1);
+    };
+    defer allocator.free(dst);
+
+    const written = encoder.compressFramed(allocator, src, dst, .{ .level = level }) catch |err| {
+        try w.print("error: compression failed: {s}\n", .{@errorName(err)});
+        try w.flush();
+        std.process.exit(1);
+    };
+
+    const out_file = std.fs.cwd().createFile(out_path.?, .{}) catch |err| {
+        try w.print("error: cannot create '{s}': {s}\n", .{ out_path.?, @errorName(err) });
+        try w.flush();
+        std.process.exit(1);
+    };
+    defer out_file.close();
+    out_file.writeAll(dst[0..written]) catch |err| {
+        try w.print("error: cannot write '{s}': {s}\n", .{ out_path.?, @errorName(err) });
+        try w.flush();
+        std.process.exit(1);
+    };
+
+    const ratio: f64 = @as(f64, @floatFromInt(written)) / @as(f64, @floatFromInt(@max(src.len, 1))) * 100.0;
+    try w.print("compressed {d} → {d} bytes  ({d:.1}%)  L{d}  ({s} → {s})\n", .{
+        src.len, written, ratio, level, in_path.?, out_path.?,
+    });
 }
 
 fn runDecompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const []const u8) !void {
@@ -341,6 +423,14 @@ test {
     _ = @import("decode/high_lz_process_runs.zig");
     _ = @import("decode/tans_decoder.zig");
     _ = @import("decode/fixture_tests.zig");
+    _ = @import("encode/fast_constants.zig");
+    _ = @import("encode/fast_match_hasher.zig");
+    _ = @import("encode/fast_stream_writer.zig");
+    _ = @import("encode/fast_token_writer.zig");
+    _ = @import("encode/fast_lz_parser.zig");
+    _ = @import("encode/fast_lz_encoder.zig");
+    _ = @import("encode/streamlz_encoder.zig");
+    _ = @import("encode/encode_fixture_tests.zig");
 }
 
 test "Command.parse recognises known commands" {
