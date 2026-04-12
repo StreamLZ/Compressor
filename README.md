@@ -112,7 +112,7 @@ Slz.DecompressFile("output.slz", "restored.txt");
 Slz.CompressStream(input, output, level: 6);
 Slz.DecompressStream(input, output);
 
-// Async
+// Async (uses serial compression path — prefer sync overloads for max throughput)
 await Slz.CompressFileAsync("input.txt", "output.slz", cancellationToken: ct);
 await Slz.DecompressFileAsync("output.slz", "restored.txt", cancellationToken: ct);
 
@@ -123,7 +123,11 @@ Slz.CompressFile("input.txt", "output.slz", useContentChecksum: true);
 Slz.CompressFile("input.txt", "output.slz", maxThreads: 4);
 ```
 
-### SlzStream (GZipStream-style wrapper)
+### SlzStream (streaming wrapper)
+
+Similar to `GZipStream`, but with some differences: `Flush()` is a no-op
+(data is flushed on `Dispose`), `WriteAsync` performs synchronous compression,
+and compression is single-threaded (one block at a time).
 
 ```csharp
 // Compress (supports await using for async disposal)
