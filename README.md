@@ -238,7 +238,7 @@ Compression thread count can be limited with the `maxThreads` parameter (e.g. fo
 
 - **Async compression** (`CompressStreamAsync`, `CompressFileAsync`): uses the serial single-block path. No parallel large-chunk mode. Prefer the synchronous overloads for maximum throughput.
 - **`SlzStream.Flush()`**: no-op. Data is accumulated until a full block is ready, then compressed and written. Call `Dispose()` to finalize and flush the last block.
-- **`SlzStream.WriteAsync()`**: performs synchronous compression and returns a completed task. The I/O is non-blocking but the CPU work is not offloaded.
+- **`SlzStream.WriteAsync()`**: async-shaped but fully synchronous — both compression and any resulting inner-stream writes happen on the calling thread. Returns a completed task.
 - **L11 memory**: single-threaded compression of large files (1GB+) uses ~6.5GB working set due to BT4 match finder arrays and 64MB sliding window dictionary. L9-L10 use hash-based matching and require less memory.
 - **L6-L8 memory**: parallel compression uses memory proportional to thread count (each thread processes a 1MB group with its own match finder).
 - **Breaking change in v1.4.0**: L6-L8 compressed output contains cross-chunk references within 4-chunk groups. Decompressors older than v1.4.0 cannot decode this data.
