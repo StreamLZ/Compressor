@@ -412,7 +412,13 @@ internal static unsafe partial class StreamLZCompressor
         int written = 0;
         for (int i = 1; i < numChunks; i++)
         {
-            Buffer.MemoryCopy(srcIn + i * StreamLZConstants.ChunkSize, dst, 8, 8);
+            int chunkStart = i * StreamLZConstants.ChunkSize;
+            int copySize = Math.Min(8, srcSize - chunkStart);
+            if (copySize <= 0) break;
+            // Zero-fill the 8-byte slot, then copy only the valid bytes.
+            // The decoder restores min(8, dstSize) so the padding is harmless.
+            *(long*)dst = 0;
+            Buffer.MemoryCopy(srcIn + chunkStart, dst, copySize, copySize);
             dst += 8;
             written += 8;
         }
