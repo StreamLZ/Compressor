@@ -7,3 +7,8 @@ obj/
 assets/enwik8.txt
 .nuget-key
 publish.md
+b3.txt
+
+# Zig
+src/StreamLZ_zig/.zig-cache/
+src/StreamLZ_zig/zig-out/
