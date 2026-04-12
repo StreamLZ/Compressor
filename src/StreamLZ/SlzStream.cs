@@ -196,15 +196,17 @@ public sealed class SlzStream : Stream, IAsyncDisposable
         return ValueTask.CompletedTask;
     }
 
-    /// <inheritdoc/>
+    /// <summary>
+    /// No-op. StreamLZ accumulates data until a full block is ready, then compresses
+    /// and writes it. Flushing a partial block is not supported — call <see cref="Stream.Dispose()"/>
+    /// to finalize and flush the last block.
+    /// </summary>
     public override void Flush()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        // Don't flush a partial block here — that would start a new frame.
-        // Partial block is flushed on Dispose.
     }
 
-    /// <inheritdoc/>
+    /// <inheritdoc cref="Flush"/>
     public override Task FlushAsync(CancellationToken cancellationToken)
     {
         Flush();
@@ -683,10 +685,11 @@ public class SlzStreamOptions
         }
     }
 
-    /// <summary>Maximum compression threads. 0 = auto (one per core, limited by available memory). Default: 0.
-    /// This property is used by <see cref="Slz.CompressStream(Stream, Stream, int, long, bool, int, IProgress{long}, CancellationToken)"/>,
-    /// <see cref="Slz.CompressFile(string, string, int, bool, int, IProgress{long}, CancellationToken)"/>, and their async variants.
-    /// <see cref="SlzStream"/> compresses one block at a time and does not use this value.</summary>
+    /// <summary>Maximum compression threads. 0 = auto. Default: 0.
+    /// <para><b>Not currently used.</b> <see cref="SlzStream"/> compresses one block at a time
+    /// and does not parallelize. The Slz.CompressStream and Slz.CompressFile
+    /// APIs accept <c>maxThreads</c> as a parameter, not from this property. Reserved for
+    /// future use.</para></summary>
     public int MaxThreads { get; set; }
 
     /// <summary>Sliding window size in bytes. Must be between 64KB and 1GB. Default: 4MB.</summary>

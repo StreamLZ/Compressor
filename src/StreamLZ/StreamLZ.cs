@@ -509,6 +509,9 @@ public static class Slz
     /// <summary>
     /// Asynchronously compresses data from <paramref name="input"/> to <paramref name="output"/>
     /// using the SLZ1 frame format. Supports cancellation and non-blocking I/O.
+    /// <para><b>Note:</b> The async implementation uses the serial single-block compression
+    /// path (no parallel large-chunk mode). For maximum throughput on large inputs, prefer
+    /// the synchronous CompressStream overload which supports parallel compression at L6+.</para>
     /// </summary>
     /// <param name="input">Source stream.</param>
     /// <param name="output">Destination stream.</param>
@@ -642,6 +645,8 @@ public static class Slz
 
     /// <summary>
     /// Asynchronously compresses a file using the SLZ1 frame format.
+    /// <para><b>Note:</b> Uses the serial compression path (no parallel large-chunk mode).
+    /// For maximum throughput, prefer the synchronous CompressFile overload.</para>
     /// </summary>
     /// <param name="inputPath">Path to the input file.</param>
     /// <param name="outputPath">Path to the compressed output file.</param>
