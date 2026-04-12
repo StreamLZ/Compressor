@@ -1868,6 +1868,51 @@ public class AsyncStreamTests
     }
 
     [Fact]
+    public async Task CompressStreamAsync_SelfContainedMultiBlock_RepeatedBlocks_RoundTrips()
+    {
+        const int blockSize = FrameConstants.DefaultBlockSize;
+        byte[] blockPattern = GenerateTestData(blockSize);
+        byte[] source = new byte[blockSize * 4];
+        for (int i = 0; i < 4; i++)
+        {
+            Buffer.BlockCopy(blockPattern, 0, source, i * blockSize, blockSize);
+        }
+
+        using var inputStream = new MemoryStream(source);
+        using var compressedStream = new MemoryStream();
+        long compressedSize = await Slz.CompressStreamAsync(inputStream, compressedStream, level: 6);
+        Assert.True(compressedSize > 0);
+
+        compressedStream.Position = 0;
+        using var decompressedStream = new MemoryStream();
+        long decompressedSize = await Slz.DecompressStreamAsync(compressedStream, decompressedStream);
+        Assert.Equal(source.Length, decompressedSize);
+        Assert.Equal(source, decompressedStream.ToArray());
+    }
+
+    [Theory]
+    [InlineData(1)]  // 1 byte final chunk
+    [InlineData(3)]  // 3 bytes — below InitialRecentOffset (8)
+    [InlineData(7)]  // 7 bytes — just under 8-byte prefix copy
+    [InlineData(100)] // normal short chunk
+    public void CompressFramed_SC_ShortFinalChunk_RoundTrips(int tailBytes)
+    {
+        // Regression test: AppendSelfContainedPrefixTable used to read 8 bytes
+        // from each chunk start unconditionally, reading past the source buffer
+        // when the final chunk was shorter than 8 bytes.
+        int size = StreamLZ.Common.StreamLZConstants.ChunkSize + tailBytes;
+        byte[] source = GenerateTestData(size);
+
+        foreach (int level in new[] { 6, 8 })
+        {
+            byte[] compressed = Slz.CompressFramed(source, level);
+            byte[] decompressed = Slz.DecompressFramed(compressed);
+            Assert.Equal(source.Length, decompressed.Length);
+            Assert.Equal(source, decompressed);
+        }
+    }
+
+    [Fact]
     public async Task CompressStreamAsync_RespectsСancellation()
     {
         byte[] source = GenerateTestData(500_000);
