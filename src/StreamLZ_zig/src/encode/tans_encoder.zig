@@ -536,7 +536,7 @@ pub fn tansEncodeBytes(
     log_table_bits: u32,
     forward_bits_pad: u32,
     backward_bits_pad: u32,
-) [*]u8 {
+) TansEncodeBytesResult {
     var forward = BitWriter64Forward.init(dst);
     var backward = BitWriter64Backward.init(dst_end);
 
@@ -656,7 +656,6 @@ pub fn tansEncodeBytes(
         backward.flush();
         forward.flush();
     }
-
     // Write final states (mirror of C# Tans_EncodeBytes final-state block).
     const mask_L: u32 = L - 1;
     const ltb_u5: u5 = @intCast(log_table_bits);
@@ -674,19 +673,24 @@ pub fn tansEncodeBytes(
     const forward_bytes: usize = @intFromPtr(forward.position) - @intFromPtr(dst);
     const backward_bytes: usize = @intFromPtr(dst_end) - @intFromPtr(backward.position);
 
-    // Decoder reads backward stream first. Swap in-place.
-    // Copy the backward tail to a scratch, shift forward bytes to the right
-    // by `backward_bytes`, then copy the backward stream to `dst[0..]`.
-    var temp_buf: [32 * 1024]u8 = undefined;
-    std.debug.assert(backward_bytes <= temp_buf.len);
-    @memcpy(temp_buf[0..backward_bytes], (backward.position)[0..backward_bytes]);
-    // Use memmove semantics to avoid aliasing issues when shifting forward
-    // bytes. `std.mem.copyBackwards` handles forward overlap safely.
-    std.mem.copyBackwards(u8, dst[backward_bytes .. backward_bytes + forward_bytes], dst[0..forward_bytes]);
-    @memcpy(dst[0..backward_bytes], temp_buf[0..backward_bytes]);
-
-    return dst + forward_bytes + backward_bytes;
+    // Caller is responsible for reading the two streams from `dst[0..forward_bytes]`
+    // and `backward.position[0..backward_bytes]` and assembling them in the
+    // correct order (backward first, then forward — the decoder reads the
+    // backward stream from the start of the output).
+    return .{
+        .forward_bytes = forward_bytes,
+        .backward_bytes = backward_bytes,
+        .forward_start = dst,
+        .backward_start = backward.position,
+    };
 }
+
+pub const TansEncodeBytesResult = struct {
+    forward_bytes: usize,
+    backward_bytes: usize,
+    forward_start: [*]const u8,
+    backward_start: [*]const u8,
+};
 
 // ────────────────────────────────────────────────────────────
 //  Table encoding — sparse and Golomb-Rice paths
@@ -990,8 +994,9 @@ pub fn encodeArrayU8Tans(
     );
     if (used_symbols <= 1) return error.TooFewSymbols;
 
-    // Emit the table into a scratch buffer.
-    var table_buf: [512]u8 = undefined;
+    // Emit the table into a scratch buffer. We use a separate scratch so
+    // the bit writer's 8-byte overshoot stores don't clobber adjacent data.
+    var table_buf: [512]u8 = @splat(0);
     var bw = BitWriter64Forward.init(&table_buf);
     bw.writeNoFlush(log_table_bits - 8, 3);
     tansEncodeTable(&bw, log_table_bits, &weights, weights_size, used_symbols);
@@ -1013,14 +1018,33 @@ pub fn encodeArrayU8Tans(
     if (total_size + 8 > dst.len) return error.DestinationTooSmall;
     if (total_size >= src.len - 5) return error.TansNotBeneficial;
 
-    // Copy the table, then run the encoder on the trailing space.
-    @memcpy(dst[0..table_bytes], table_buf[0..table_bytes]);
+    // Encode the body with SEPARATE scratch regions for the forward and
+    // backward bit writers, with 16 bytes of slack on both ends so the
+    // writers' 8-byte overshoot stores can't collide. The forward writer
+    // writes at body_scratch[16..], the backward writer writes ending at
+    // body_scratch[len - 16], so there's guaranteed separation.
+    var body_scratch: [8 * 1024 + 64]u8 = @splat(0);
+    std.debug.assert(payload_bytes + 48 <= body_scratch.len);
 
-    const body_dst: [*]u8 = dst.ptr + table_bytes;
-    const body_dst_end: [*]u8 = dst.ptr + table_bytes + payload_bytes;
-    const end_ptr = tansEncodeBytes(
-        body_dst,
-        body_dst_end,
+    // Layout:
+    //   [0..16]             = slack (below forward start; unused)
+    //   [16..16+fwd]        = forward stream (written up)
+    //   [16+fwd..16+fwd+16] = gap (forward overflow + backward overflow)
+    //   [16+fwd+16..+bwd]   = backward stream (written down)
+    //   [end-16..end]       = slack (above backward start; unused)
+    //
+    // But since fwd and bwd byte counts aren't known until after encoding,
+    // we use a conservative layout:
+    //   forward writer starts at body_scratch[16]
+    //   backward writer starts at body_scratch[body_scratch.len - 16]
+    // Each has at least 16 bytes of slack around its write range,
+    // and between them there's `body_scratch.len - 32 - payload_bytes >= 16`
+    // bytes of gap.
+    const fwd_start: [*]u8 = body_scratch[16..].ptr;
+    const bwd_end: [*]u8 = body_scratch[body_scratch.len - 16 ..].ptr;
+    const body = tansEncodeBytes(
+        fwd_start,
+        bwd_end,
         &te,
         &te_data,
         src,
@@ -1028,8 +1052,15 @@ pub fn encodeArrayU8Tans(
         counts.forward,
         counts.backward,
     );
-    const written: usize = @intFromPtr(end_ptr) - @intFromPtr(dst.ptr);
-    return written;
+    std.debug.assert(body.forward_bytes + body.backward_bytes == payload_bytes);
+
+    // Assemble: table, then backward stream, then forward stream. The
+    // decoder reads the backward stream (= our "backward writer" output)
+    // from the START of the payload.
+    @memcpy(dst[0..table_bytes], table_buf[0..table_bytes]);
+    @memcpy(dst[table_bytes..][0..body.backward_bytes], body.backward_start[0..body.backward_bytes]);
+    @memcpy(dst[table_bytes + body.backward_bytes ..][0..body.forward_bytes], body.forward_start[0..body.forward_bytes]);
+    return table_bytes + payload_bytes;
 }
 
 inline fn bitsUp(bits: u32) usize {
@@ -1081,12 +1112,76 @@ test "tansInitTable runs without panicking on a small histogram" {
     tansInitTable(&te, &te_data, &weights, 256, 8);
 }
 
-// Roundtrip tests for tANS encode→decode currently fail — marked as
-// skip until the state-table / stream-swap debugging lands.
-test "tANS roundtrip: 256 bytes of 'abc' repeating" {
-    if (true) return error.SkipZigTest;
+test "tANS roundtrip: 32 bytes of 'abab' (2-symbol sparse path)" {
+    const tans_dec = @import("../decode/tans_decoder.zig");
+    var src: [32]u8 = undefined;
+    for (&src, 0..) |*b, i| b.* = @intCast('a' + (i % 2));
+
+    var histo: ByteHistogram = .{};
+    histo.count_bytes(&src);
+
+    var dst: [512]u8 = @splat(0);
+    const n = try encodeArrayU8Tans(&dst, &src, &histo);
+
+    var decoded: [src.len + 16]u8 = @splat(0);
+    var scratch: [32 * 1024]u8 align(16) = undefined;
+    _ = try tans_dec.highDecodeTans(
+        dst[0..].ptr,
+        n,
+        decoded[0..].ptr,
+        src.len,
+        scratch[0..].ptr,
+        scratch[0..].ptr + scratch.len,
+    );
+    try testing.expectEqualSlices(u8, &src, decoded[0..src.len]);
 }
 
-test "tANS roundtrip: 512 bytes of varied English text" {
-    if (true) return error.SkipZigTest;
+test "tANS roundtrip: 256 bytes of 'abc' repeating (3-symbol sparse)" {
+    const tans_dec = @import("../decode/tans_decoder.zig");
+    var src: [256]u8 = undefined;
+    for (&src, 0..) |*b, i| b.* = @intCast('a' + (i % 3));
+
+    var histo: ByteHistogram = .{};
+    histo.count_bytes(&src);
+
+    var dst: [2048]u8 = @splat(0);
+    const n = try encodeArrayU8Tans(&dst, &src, &histo);
+
+    var decoded: [src.len + 16]u8 = @splat(0);
+    var scratch: [32 * 1024]u8 align(16) = undefined;
+    _ = try tans_dec.highDecodeTans(
+        dst[0..].ptr,
+        n,
+        decoded[0..].ptr,
+        src.len,
+        scratch[0..].ptr,
+        scratch[0..].ptr + scratch.len,
+    );
+    try testing.expectEqualSlices(u8, &src, decoded[0..src.len]);
+}
+
+test "tANS roundtrip: 512 bytes of varied English text (Golomb-Rice path)" {
+    const tans_dec = @import("../decode/tans_decoder.zig");
+    const pattern = "The quick brown fox jumps over the lazy dog. ";
+    var src: [512]u8 = undefined;
+    var i: usize = 0;
+    while (i < src.len) : (i += 1) src[i] = pattern[i % pattern.len];
+
+    var histo: ByteHistogram = .{};
+    histo.count_bytes(&src);
+
+    var dst: [2048]u8 = @splat(0);
+    const n = try encodeArrayU8Tans(&dst, &src, &histo);
+
+    var decoded: [src.len + 16]u8 = @splat(0);
+    var scratch: [32 * 1024]u8 align(16) = undefined;
+    _ = try tans_dec.highDecodeTans(
+        dst[0..].ptr,
+        n,
+        decoded[0..].ptr,
+        src.len,
+        scratch[0..].ptr,
+        scratch[0..].ptr + scratch.len,
+    );
+    try testing.expectEqualSlices(u8, &src, decoded[0..src.len]);
 }
