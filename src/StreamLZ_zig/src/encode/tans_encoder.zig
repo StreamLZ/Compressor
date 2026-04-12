@@ -40,7 +40,7 @@ pub const EncodeError = error{
     TooFewSymbols,
     DestinationTooSmall,
     BadParameters,
-};
+} || std.mem.Allocator.Error;
 
 // ────────────────────────────────────────────────────────────
 //  Constants + small helpers
@@ -953,6 +953,7 @@ pub fn tansEncodeTable(
 /// enough). The decoder's `highDecodeBytes` reads that header and
 /// dispatches to `highDecodeTans`.
 pub fn encodeArrayU8Tans(
+    allocator: std.mem.Allocator,
     dst: []u8,
     src: []const u8,
     histo: *ByteHistogram,
@@ -1018,28 +1019,16 @@ pub fn encodeArrayU8Tans(
     if (total_size + 8 > dst.len) return error.DestinationTooSmall;
     if (total_size >= src.len - 5) return error.TansNotBeneficial;
 
-    // Encode the body with SEPARATE scratch regions for the forward and
-    // backward bit writers, with 16 bytes of slack on both ends so the
-    // writers' 8-byte overshoot stores can't collide. The forward writer
-    // writes at body_scratch[16..], the backward writer writes ending at
-    // body_scratch[len - 16], so there's guaranteed separation.
-    var body_scratch: [8 * 1024 + 64]u8 = @splat(0);
-    std.debug.assert(payload_bytes + 48 <= body_scratch.len);
+    // Encode the body into a scratch buffer sized to the payload plus
+    // 48 bytes of slack (16 at each end + 16 for the writers' overshoot
+    // gap). Both writers retain ≥ 16 bytes of headroom around their
+    // working range so their 8-byte flush stores never collide with
+    // each other or the table bytes.
+    const body_scratch_size: usize = payload_bytes + 64;
+    const body_scratch = try allocator.alloc(u8, body_scratch_size);
+    defer allocator.free(body_scratch);
+    @memset(body_scratch, 0);
 
-    // Layout:
-    //   [0..16]             = slack (below forward start; unused)
-    //   [16..16+fwd]        = forward stream (written up)
-    //   [16+fwd..16+fwd+16] = gap (forward overflow + backward overflow)
-    //   [16+fwd+16..+bwd]   = backward stream (written down)
-    //   [end-16..end]       = slack (above backward start; unused)
-    //
-    // But since fwd and bwd byte counts aren't known until after encoding,
-    // we use a conservative layout:
-    //   forward writer starts at body_scratch[16]
-    //   backward writer starts at body_scratch[body_scratch.len - 16]
-    // Each has at least 16 bytes of slack around its write range,
-    // and between them there's `body_scratch.len - 32 - payload_bytes >= 16`
-    // bytes of gap.
     const fwd_start: [*]u8 = body_scratch[16..].ptr;
     const bwd_end: [*]u8 = body_scratch[body_scratch.len - 16 ..].ptr;
     const body = tansEncodeBytes(
@@ -1121,7 +1110,7 @@ test "tANS roundtrip: 32 bytes of 'abab' (2-symbol sparse path)" {
     histo.count_bytes(&src);
 
     var dst: [512]u8 = @splat(0);
-    const n = try encodeArrayU8Tans(&dst, &src, &histo);
+    const n = try encodeArrayU8Tans(testing.allocator, &dst, &src, &histo);
 
     var decoded: [src.len + 16]u8 = @splat(0);
     var scratch: [32 * 1024]u8 align(16) = undefined;
@@ -1145,7 +1134,7 @@ test "tANS roundtrip: 256 bytes of 'abc' repeating (3-symbol sparse)" {
     histo.count_bytes(&src);
 
     var dst: [2048]u8 = @splat(0);
-    const n = try encodeArrayU8Tans(&dst, &src, &histo);
+    const n = try encodeArrayU8Tans(testing.allocator, &dst, &src, &histo);
 
     var decoded: [src.len + 16]u8 = @splat(0);
     var scratch: [32 * 1024]u8 align(16) = undefined;
@@ -1171,7 +1160,7 @@ test "tANS roundtrip: 512 bytes of varied English text (Golomb-Rice path)" {
     histo.count_bytes(&src);
 
     var dst: [2048]u8 = @splat(0);
-    const n = try encodeArrayU8Tans(&dst, &src, &histo);
+    const n = try encodeArrayU8Tans(testing.allocator, &dst, &src, &histo);
 
     var decoded: [src.len + 16]u8 = @splat(0);
     var scratch: [32 * 1024]u8 align(16) = undefined;
@@ -1184,4 +1173,103 @@ test "tANS roundtrip: 512 bytes of varied English text (Golomb-Rice path)" {
         scratch[0..].ptr + scratch.len,
     );
     try testing.expectEqualSlices(u8, &src, decoded[0..src.len]);
+}
+
+/// Roundtrip a single byte chunk through the tANS encoder and decoder.
+fn tansRoundtripChunk(allocator: std.mem.Allocator, src: []const u8) !void {
+    const tans_dec = @import("../decode/tans_decoder.zig");
+    var histo: ByteHistogram = .{};
+    histo.count_bytes(src);
+
+    const dst = try allocator.alloc(u8, src.len + 256);
+    defer allocator.free(dst);
+    @memset(dst, 0);
+
+    const n = try encodeArrayU8Tans(allocator, dst, src, &histo);
+    try testing.expect(n > 8);
+
+    const decoded = try allocator.alloc(u8, src.len + 16);
+    defer allocator.free(decoded);
+    @memset(decoded, 0);
+
+    const scratch = try allocator.alignedAlloc(u8, .@"16", 64 * 1024);
+    defer allocator.free(scratch);
+
+    _ = try tans_dec.highDecodeTans(
+        dst.ptr,
+        n,
+        decoded.ptr,
+        src.len,
+        scratch.ptr,
+        scratch.ptr + scratch.len,
+    );
+    try testing.expectEqualSlices(u8, src, decoded[0..src.len]);
+}
+
+test "tANS roundtrip: enwik8 first 64 KB" {
+    const allocator = testing.allocator;
+    const file = std.fs.cwd().openFile(
+        "c:/Users/james.JAMESWORK2025/Repos/StreamLZ/assets/enwik8.txt",
+        .{},
+    ) catch return; // Skip if asset missing.
+    defer file.close();
+
+    const src = try allocator.alloc(u8, 64 * 1024);
+    defer allocator.free(src);
+    const read = try file.readAll(src);
+    if (read != src.len) return error.SkipZigTest;
+
+    try tansRoundtripChunk(allocator, src);
+}
+
+test "tANS roundtrip: enwik8 offset 1 MB, 128 KB chunk" {
+    const allocator = testing.allocator;
+    const file = std.fs.cwd().openFile(
+        "c:/Users/james.JAMESWORK2025/Repos/StreamLZ/assets/enwik8.txt",
+        .{},
+    ) catch return;
+    defer file.close();
+
+    try file.seekTo(1024 * 1024);
+    const src = try allocator.alloc(u8, 128 * 1024);
+    defer allocator.free(src);
+    const read = try file.readAll(src);
+    if (read != src.len) return error.SkipZigTest;
+
+    try tansRoundtripChunk(allocator, src);
+}
+
+test "tANS roundtrip: silesia first 64 KB (binary-ish)" {
+    const allocator = testing.allocator;
+    const file = std.fs.cwd().openFile(
+        "c:/Users/james.JAMESWORK2025/Repos/StreamLZ/assets/silesia_all.tar",
+        .{},
+    ) catch return;
+    defer file.close();
+
+    // Skip the tar header zero padding at the very start.
+    try file.seekTo(1024 * 1024);
+    const src = try allocator.alloc(u8, 64 * 1024);
+    defer allocator.free(src);
+    const read = try file.readAll(src);
+    if (read != src.len) return error.SkipZigTest;
+
+    try tansRoundtripChunk(allocator, src);
+}
+
+test "tANS roundtrip: silesia 128 KB at offset 2 MB" {
+    const allocator = testing.allocator;
+    const file = std.fs.cwd().openFile(
+        "c:/Users/james.JAMESWORK2025/Repos/StreamLZ/assets/silesia_all.tar",
+        .{},
+    ) catch return;
+    defer file.close();
+
+    try file.seekTo(2 * 1024 * 1024);
+    const src = try allocator.alloc(u8, 128 * 1024);
+    defer allocator.free(src);
+    const read = try file.readAll(src);
+    if (read != src.len) return error.SkipZigTest;
+
+    try tansRoundtripChunk(allocator, src);
 }
