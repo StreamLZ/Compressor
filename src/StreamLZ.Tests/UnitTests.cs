@@ -1913,6 +1913,34 @@ public class AsyncStreamTests
     }
 
     [Fact]
+    public async Task CompressFramed_ConcurrentAccess_IsThreadSafe()
+    {
+        // Verify that Slz static methods can be called from multiple threads
+        // concurrently without corruption. Each task compresses and decompresses
+        // unique data at a different level and verifies the round-trip.
+        const int taskCount = 24;
+        var tasks = new Task[taskCount];
+        for (int t = 0; t < taskCount; t++)
+        {
+            int taskId = t;
+            int level = (taskId % 11) + 1; // levels 1-11
+            tasks[t] = Task.Run(() =>
+            {
+                // Each task gets unique data so cross-contamination is detectable
+                byte[] source = new byte[100_000];
+                new Random(taskId * 31337).NextBytes(source);
+
+                byte[] compressed = Slz.CompressFramed(source, level);
+                byte[] decompressed = Slz.DecompressFramed(compressed);
+
+                Assert.Equal(source.Length, decompressed.Length);
+                Assert.Equal(source, decompressed);
+            });
+        }
+        await Task.WhenAll(tasks);
+    }
+
+    [Fact]
     public async Task CompressStreamAsync_RespectsСancellation()
     {
         byte[] source = GenerateTestData(500_000);
