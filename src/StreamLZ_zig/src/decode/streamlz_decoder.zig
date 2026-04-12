@@ -14,6 +14,7 @@ const frame = @import("../format/frame_format.zig");
 const block_header = @import("../format/block_header.zig");
 const constants = @import("../format/streamlz_constants.zig");
 const fast = @import("fast_lz_decoder.zig");
+const high = @import("high_lz_decoder.zig");
 
 /// Extra bytes the decoder is allowed to write past `dst_len`.
 /// Ported from `StreamLZDecoder.SafeSpace` (64 in C#).
@@ -29,7 +30,7 @@ pub const DecompressError = error{
     BlockDataTruncated,
     OutputTooSmall,
     HighNotImplemented,
-} || fast.DecodeError;
+} || fast.DecodeError || high.DecodeError;
 
 /// Streams `src` (an SLZ1-framed buffer) into `dst`, returning the number
 /// of bytes written to `dst`. `dst.len` must be at least `content_size + safe_space`
@@ -174,7 +175,27 @@ fn decompressCompressedBlock(
                 );
                 if (n != comp_size) return error.SizeMismatch;
             },
-            .high => return error.HighNotImplemented,
+            .high => {
+                if (dst_off + dst_this_chunk + safe_space > dst.len) return error.OutputTooSmall;
+                const src_slice_start: [*]const u8 = block_src[src_pos..].ptr;
+                const src_slice_end: [*]const u8 = src_slice_start + comp_size;
+                const dst_ptr: [*]u8 = dst[dst_off..].ptr;
+                const dst_end_ptr: [*]u8 = dst_ptr + dst_this_chunk;
+                const dst_start_ptr: [*]const u8 = dst.ptr;
+                const scratch_ptr: [*]u8 = scratch.ptr;
+                const scratch_end_ptr: [*]u8 = scratch.ptr + scratch.len;
+
+                const n = try high.decodeChunk(
+                    dst_ptr,
+                    dst_end_ptr,
+                    dst_start_ptr,
+                    src_slice_start,
+                    src_slice_end,
+                    scratch_ptr,
+                    scratch_end_ptr,
+                );
+                if (n != comp_size) return error.SizeMismatch;
+            },
             else => return error.InvalidInternalHeader,
         }
 

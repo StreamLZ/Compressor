@@ -250,6 +250,8 @@ test {
     _ = @import("decode/huffman_decoder.zig");
     _ = @import("decode/entropy_decoder.zig");
     _ = @import("decode/fast_lz_decoder.zig");
+    _ = @import("decode/high_lz_decoder.zig");
+    _ = @import("decode/high_lz_process_runs.zig");
 }
 
 test "Command.parse recognises known commands" {
