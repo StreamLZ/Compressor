@@ -90,13 +90,42 @@ pub fn decompressFramed(src: []const u8, dst: []u8) DecompressError!usize {
 /// Walks 256 KB chunks inside a single compressed frame block. Parses the
 /// internal 2-byte block header at every 256 KB boundary and the 4-byte
 /// chunk header before each chunk's payload, dispatching to the codec.
+///
+/// **Self-contained (L6–L8) handling:** when the first internal block
+/// header has `self_contained` set, the encoder stores `(num_chunks-1)*8`
+/// "delta prefix" bytes at the very end of the block payload. After the
+/// main decode, the first 8 bytes of every chunk except chunk 0 are
+/// overwritten with those tail bytes. C# parallelizes SC decode and
+/// forms per-group dst_start boundaries; our serial equivalent just
+/// decodes sequentially with a buffer-wide dst_start (which is safe
+/// because a well-formed encoder emits no cross-group references
+/// beyond what the tail-prefix restoration then overwrites).
 fn decompressCompressedBlock(
-    block_src: []const u8,
+    block_src_in: []const u8,
     dst: []u8,
     dst_off_inout: *usize,
     decompressed_size: usize,
     scratch: []u8,
 ) DecompressError!void {
+    // Peek the first 2-byte internal block header to detect SC mode up-front.
+    const is_sc = blk: {
+        if (block_src_in.len < 2) break :blk false;
+        const peek = block_header.parseBlockHeader(block_src_in) catch break :blk false;
+        break :blk peek.self_contained;
+    };
+    const num_chunks: usize = if (is_sc)
+        (decompressed_size + constants.chunk_size - 1) / constants.chunk_size
+    else
+        0;
+    const prefix_size: usize = if (is_sc and num_chunks > 1) (num_chunks - 1) * 8 else 0;
+    if (prefix_size > block_src_in.len) return error.Truncated;
+    const block_src: []const u8 = block_src_in[0 .. block_src_in.len - prefix_size];
+    const sc_start_dst_off: usize = dst_off_inout.*;
+    // Index of the chunk within this frame block (0-based). Used to compute
+    // the group-local dst_start for SC mode so each group's first chunk
+    // decodes with base_offset == 0 and fires the initial 8-byte Copy64.
+    var chunk_idx_in_block: usize = 0;
+
     var src_pos: usize = 0;
     var dst_remaining: usize = decompressed_size;
     var internal_hdr: ?block_header.BlockHeader = null;
@@ -181,7 +210,16 @@ fn decompressCompressedBlock(
                 const src_slice_end: [*]const u8 = src_slice_start + comp_size;
                 const dst_ptr: [*]u8 = dst[dst_off..].ptr;
                 const dst_end_ptr: [*]u8 = dst_ptr + dst_this_chunk;
-                const dst_start_ptr: [*]const u8 = dst.ptr;
+                // For SC mode, dst_start must be the FIRST chunk of the
+                // current SC group (not the whole output) so that the
+                // encoder's per-group `base_offset == 0` assumption holds
+                // and the initial 8-byte Copy64 fires at each group start.
+                // For non-SC, use the whole-buffer start (sliding window).
+                const dst_start_ptr: [*]const u8 = if (is_sc) blk: {
+                    const group_start_chunk = (chunk_idx_in_block / constants.sc_group_size) * constants.sc_group_size;
+                    const group_start_offset = sc_start_dst_off + group_start_chunk * constants.chunk_size;
+                    break :blk dst[group_start_offset..].ptr;
+                } else dst.ptr;
                 const scratch_ptr: [*]u8 = scratch.ptr;
                 const scratch_end_ptr: [*]u8 = scratch.ptr + scratch.len;
 
@@ -202,10 +240,28 @@ fn decompressCompressedBlock(
         dst_off_inout.* += dst_this_chunk;
         dst_remaining -= dst_this_chunk;
         src_pos += comp_size;
+        chunk_idx_in_block += 1;
     }
 
     // Any trailing source bytes in the frame block are a corruption signal.
     if (src_pos != block_src.len) return error.SizeMismatch;
+
+    // SC: restore the first 8 bytes of each chunk (except chunk 0) from the
+    // tail prefix table that we excluded from `block_src` above.
+    if (prefix_size != 0) {
+        const prefix_base: [*]const u8 = block_src_in[block_src_in.len - prefix_size ..].ptr;
+        var i: usize = 0;
+        while (i + 1 < num_chunks) : (i += 1) {
+            const chunk_dst_off: usize = sc_start_dst_off + (i + 1) * constants.chunk_size;
+            var copy_size: usize = 8;
+            const remaining_in_chunk: usize = decompressed_size - (i + 1) * constants.chunk_size;
+            if (copy_size > remaining_in_chunk) copy_size = remaining_in_chunk;
+            @memcpy(
+                dst[chunk_dst_off..][0..copy_size],
+                prefix_base[i * 8 ..][0..copy_size],
+            );
+        }
+    }
 }
 
 // ────────────────────────────────────────────────────────────
