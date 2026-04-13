@@ -1,0 +1,151 @@
+# StreamLZ Zig port — full-parity punch list
+
+Goal: 100% parity between `src/StreamLZ_zig/` and `src/StreamLZ/` — no skipped branches, no deferred stubs, no hidden API differences. The list below was produced by manual audit on 2026-04-13. All gaps must be closed before the port is considered complete.
+
+**How to apply:** When picking up the port, start from the first unchecked item in the "execution order" section. Each item lists its file/line citations. When an item lands, mark `[x]` and move on. Do not reorder without user permission.
+
+## Execution order (numbered steps; groups in brackets cross-reference item IDs below)
+
+- [x] **1. B3 + B4** — fix recursive stack-scratch bug + `dst == scratch` alias handling. `highDecodeBytes` / `highDecodeBytesInternal` now take `scratch` + `scratch_end` params; stack 64 KB buffer removed; alias shift ported from C# `EntropyDecoder.High_DecodeBytesInternal:770-778`. All 137 unit tests + 140 decode fixtures + 100 encode roundtrips passing.
+- [x] **2. A3** — dictionary / `dstOffset` decompress entry. Added `decompressBlock(src, dst, decompressed_size)` and `decompressBlockWithDict(src, dst, dst_offset, decompressed_size)` at `streamlz_decoder.zig:89-134`. Reuses existing `decompressCompressedBlock` helper. Test coverage: 4 new tests (roundtrip no-dict, uncompressed-block dst_offset, equivalence, param validation). **Caveat**: end-to-end dict semantics with `dst_offset > 0` can only be exercised once the stream frame compressor lands (step 41 / D7), because the internal `srcWindowBase` plumbing (matching the buffer origin to where the dictionary lives) is what lets the encoder produce compressed blocks where `start_position != 0` and the initial 8-byte Copy64 is skipped. Until then, `decompressBlockWithDict` with `dst_offset > 0` only works reliably on uncompressed blocks.
+- [x] **3. A4 + 4. A5** — `decompressStream(allocator, src, writer, opts)` at `streamlz_decoder.zig:90-196`. Port of C# `StreamLzFrameDecompressor.Decompress`. Owns the sliding window (clamps `opts.window_size` to `[block_size, max_window_size]`), calls `decompressBlockWithDict` per block, writes decoded bytes to any `std.Io.Writer`, slides the window when `total_used > window_size`, enforces `max_decompressed_size` cap, and verifies XXH32 content checksum via `std.hash.XxHash32` when the frame sets `content_checksum`. New error variant `ChecksumMismatch`. 4 new tests: roundtrip, max-size cap, empty-source, checksum path. Defers the `DecompressAsync` / `DecompressFile` convenience wrappers — the core streaming primitive is in place; those can land with the CLI/public-API pass.
+- [x] **5. A7 + A8** — `copyWholeMatch` helper at `streamlz_decoder.zig:91-104` (8-byte chunk path when `offset >= 8`, scalar tail). Wired into `decompressCompressedBlock` memset branch so `ch.whole_match_distance != 0` triggers whole-match copy. Dead code in practice (no encoder populates the field) but structurally symmetric with C# `StreamLzDecoder.cs:142-157, 253-269`. 2 new tests for the helper.
+- [x] **6. A9** — `RestartDecoder` flag was already parsed by `parseBlockHeader` into `BlockHeader.restart_decoder`. Encoder already writes bit 6 of the 2-byte internal block header via `if (keyframe) flags0 |= 0x40`. Matches C# behaviour exactly (neither side acts on the flag). Added a roundtrip test asserting the encoder sets `restart_decoder` on the first block.
+- [x] **7. B1 + B2** — Added `decodeMultiArray` / `decodeMultiArrayInternal` in `entropy_decoder.zig` (~300 lines). Ports `High_DecodeMultiArrayInternal` from C# `EntropyDecoder.cs:344-638`: header + `num_arrays_in_file` → nested entropy blocks into scratch → Q value → index-count header → interval-index + lenlog2 streams (packed-or-separate) → bidirectional varbit decode with `std.math.rotl` on `bits | 1` sentinel → assembly loop with zero-terminator per output array. Wired into `decodeRecursive`'s bit-7 branch. 147 unit + 140 fixture + 100 encode tests pass. Note: no fixture actively exercises the multi-array path (no encoder emits it yet); structural port is complete but not roundtrip-validated against a real multi-array block.
+- [x] **8. B4** — Bundled into step 1 (see there). The `dst == scratch` alias shift was ported alongside the scratch-threading fix.
+- [x] **9. D10** — `Options` struct at `streamlz_encoder.zig:46-119` now mirrors C# `CompressOptions` field-for-field: `hash_bits`, `min_match_length`, `dictionary_size`, `max_local_dictionary_size`, `seek_chunk_len`, `seek_chunk_reset`, `space_speed_tradeoff_bytes`, `generate_chunk_header_checksum`, `self_contained`, `two_phase`, and the three `decode_cost_*` knobs. Plumbing only — behavior lands in subsequent steps.
+- [x] **10. D1** — SelfContained mode implemented in `compressFramed`. Per-block hasher reset + block-local `window_base` (matching C# `CompressOneBlock`), block header bit 4 set on every internal chunk, tail prefix table appended after all chunks (8 bytes × `num_chunks - 1`, port of `AppendSelfContainedPrefixTable`). `compressBound` updated to account for the worst-case prefix table. Every block is a keyframe in SC mode (C# `CompressOneBlock:707`). Uncompressed fallback also sets the SC bit. Roundtrip tests at 64 KB / 256 KB / 768 KB / 1 MB + all-levels + block-header-bit check + fixture corpus still byte-exact.
+- [x] **11. D2** — `two_phase` implies `self_contained = true` (C# `StreamLZCompressor.Compress:90-95`), sets bit 5 of the block header byte 0 via `two_phase_flag_bit`. Roundtrip test asserting bits 4 + 5 + 6 all set and end-to-end decode.
+- [~] **12. D11** — FOLDED INTO STEP 41 (D7). `srcWindowBase` is not a user-facing dictionary API; it's internal plumbing used only by `StreamLzFrameCompressor` at `StreamLzFrameCompressor.cs:222` where `srcWindowBase = pWindow` and `srcIn = pWindow + dictBytes`. Every other C# caller of `CompressBlock` passes `srcWindowBase: null`. When we port the stream frame compressor (step 41), it will naturally require internal per-block `window_base` + hasher preload, but no standalone "dictionary mode" feature exists to mirror. Audit originally listed D11 as a separate gap based on a misread of the parameter's purpose.
+- [~] **13. D12** — DEFERRED until step 25 (G5). `CompressLazy` depends on `MatchHasherBase` / `MatchHasher2x`, which step 25 ports wholesale for the High codec. Once G5 lands we add a thin `runLazyParser` + wire a new dispatch path. Doing D12 standalone now would duplicate most of the G5 work. Also: `Slz.MapLevel` skips codec level 4 entirely so no public API reaches `CompressLazy` — it's only accessible via the internal `StreamLZCompressor.CompressBlock_Fast(codecId, codecLevel=4)` which isn't exposed outside the C# library. Port stays on the list for structural parity.
+- [~] **14. D13** — DEFERRED until phase 14 (parallel compress, step 37+). Zig's current compress path allocates hashers fresh per `compressFramed` call. The C# `[ThreadStatic] LzTemp t_lztemp` exists because `CompressBlocks` / `CompressBlocksParallel` reuse `LzTemp` across many calls per thread. Until Zig gets a thread pool this optimization is moot — one compress call per thread = no reuse possible. Revisit when step 37 lands.
+- [x] **15. H7 (phase 10d)** — Already done by prior commits `6519c42` (stream layout fix) + `98023bf` (allocator scratch + enwik8/silesia roundtrips). STATUS.md was stale. Verified: all 6 tANS roundtrip tests pass — synthetic `'abab'` × 16 (2-symbol sparse), `'abc'` × 85 (3-symbol sparse), 512-byte English text (Golomb-Rice path), enwik8 first 64 KB, enwik8 offset 1 MB × 128 KB, silesia first 64 KB + silesia 128 KB at offset 2 MB. Enwik8 (100 MB) + silesia (212 MB) asset files present and exercised.
+- [x] **16. H1 + H10** — `encodeArrayU8` / `encodeArrayU8WithHisto` / `encodeArrayU8CompactHeader` now match C# signature: `(allocator, dst, src, options, speed_tradeoff, cost_out, level, histo_out)`. `encodeArrayU8Tans` takes `speed_tradeoff` + writes `cost_out` = payload byte count. `encodeArrayU8CoreWithHisto` compares `tans_cost < memcpy_cost` before accepting the tANS path (match C# `EntropyEncoder.cs:108`). `makeCompactChunkHdr` decrements `cost_out` by 1 / 2 on compact shrink (match C# `EntropyEncoder.cs:154, 176`). Fast encoder call sites (4) updated to pass `config.speed_tradeoff` and `null` cost (Fast computes its own). `encodeArrayU8WithHisto` now takes the histogram by value so its internal adjustments don't leak. Tests widened + new assertion that `makeCompactChunkHdr` drops cost by 1 on memcpy shrink. 154 unit + 140 fixture + 100 encode roundtrips still pass.
+- [ ] **17. H8 + H9** — `OffsetEncoder`: `GetLog2Interpolate`, `ConvertHistoToCost`, `GetHistoCostApprox` (×2), `GetCostModularOffsets`, `GetBestOffsetEncodingFast`, `GetBestOffsetEncodingSlow`, `EncodeNewOffsets`, `WriteLzOffsetBits`, `EncodeLzOffsets`. Plus `EntropyEncoder.EncodeLzOffsets` / `WriteLzOffsetBits` wrappers.
+- [ ] **18. H2 + H3** — Huffman 2-way and 4-way split encoders (chunk types 2 and 4). Canonical Huffman + 3-stream backward/forward.
+- [ ] **19. H4 + H5** — RLE encoder (chunk type 3) + simple Recursive sub-block encoder (chunk type 5, bit-7 clear).
+- [ ] **20. H6** — `MultiArrayEncoder` (chunk type 5 bit-7 set, 2026 lines). The interleaved-array + Q-encoded varbits path.
+- [ ] **21. I3** — `CostCoefficients` full platform table (not just Fast subset).
+- [ ] **22. I4** — extract shared `MatchEvaluation` helpers from `fast_lz_parser.zig` so High parsers can reuse them: `GetMatchLengthQuick*`, `CountMatchingBytes`, `IsBetterThanRecent`, `IsMatchBetter`, `GetLazyScore`.
+- [ ] **23. I5** — extract `BlockHeaderWriter` helpers from `streamlz_encoder.zig` as shared module.
+- [ ] **24. I6** — add `isBlockProbablyText` (per-16 KB) variant to `text_detector.zig`.
+- [ ] **25. G5** — `MatchHasherBase` / `MatchHasher2x` / `AdaptivePreloadLoop` / `MatchHasherPreload`. Chain-walking hash families the High parser uses.
+- [ ] **26. G1** — `MatchFinder.FindMatchesHashBased` (521 lines; hash-based LAO storage for L6-L10).
+- [ ] **27. G3 + G4** — `ManagedMatchLenStorage` + `ExtractLaoFromMls` / `ExtractLengthFromMls` / `ExtractOffsetFromMls` / `VarLenWrite*`. Variable-length LAO (de)serialization.
+- [ ] **28. F1 + F6 + F7** — `High.Compressor` (DoCompress / SetupEncoder / CreateLzHasher), `High.Matcher` (GetBestMatch / GetRecentOffsetIndex / CheckMatchValidLength), `HighTypes` structs (HighRecentOffs / HighStreamWriter / Stats / Token / State).
+- [ ] **29. F2** — `High.FastParser.CompressFast` + `GetMatch` + `CheckRecentMatch`. Hash-based High parser for L6-L8 SC path.
+- [ ] **30. F4** — `High.Encoder.AssembleCompressedOutput` + `EncodeTokenArray` + `AddToken` + `AddFinalLiterals` + `WriteFarOffset` / `WriteNearOffset` / `WriteOffset` / `WriteMatchLength` / `WriteLiterals*`.
+- [ ] **31. F5** — `High.CostModel`: `UpdateStats`, `MakeCostModel`, `BitsForLiteral*`, `BitsForToken`, `BitsForOffset`, `RescaleStats`, `RescaleAddStats`. DP cost engine.
+- [ ] **32. F3** — `High.OptimalParser.Optimal` + `CollectStatistics` + `UpdateState` + `UpdateStatesZ`. DP optimal parser (phase 11).
+- [ ] **33. G2** — `MatchFinder.FindMatchesBT4` + `BT4InsertOnly` + `BT4SearchAndInsert`. Binary-tree match finder for L11 (phase 12).
+- [ ] **34. D9** — expose unified levels L6-L11 via `compressFramed` now that High is implemented.
+- [ ] **35. A1** — `DecompressCoreParallel` (SC parallel decompress; phase 13).
+- [ ] **36. A2** — `DecompressCoreTwoPhase` + `TwoPhasePreScan` + `TwoPhaseParallelDecode` + `TwoPhaseSerialResolve` + `High.LzDecoder.Phase1_ProcessChunk` (phase 13).
+- [ ] **37. D3** — `CompressBlocksParallel` (phase 14).
+- [ ] **38. D4** — `CompressInternalParallelSC` (phase 14).
+- [ ] **39. D5** — multi-piece compress with OOM fallback.
+- [ ] **40. D6** — `CalculateMaxThreads` / `EstimateSharedMemory` / `PerThreadMemoryEstimate`.
+- [ ] **41. D7** — `StreamLzFrameCompressor.Compress` / `CompressAsync` / `CompressFile` (stream-based compressor with sliding window).
+- [ ] **42. D8 + J1** — `SlzStream` public type (Stream-wrapping compressor/decompressor).
+- [ ] **43. J2** — `SlzCompressionLevel` enum.
+- [ ] **44. C1** — Fast decoder `@prefetch` hints in cmd==2 / medium paths (perf).
+- [ ] **45. A6** — CRC24 chunk-header checksum verification (opt-in).
+
+## The gaps, keyed by ID (for cross-reference)
+
+### A. Decompression — top-level framed/block
+
+- **A1**: Parallel SC decompress — `StreamLzDecoder.cs:689-777` → phase 13.
+- **A2**: Two-phase parallel decompress — `StreamLzDecoder.cs:780-1000` + `High/LzDecoder.TwoPhase.cs`. Phase 13.
+- **A3**: Dictionary `dstOffset` decompress — `StreamLzDecoder.cs:392-475`. Missing.
+- **A4**: Stream-based decompressor — `StreamLzFrameDecompressor.cs:28-388`. Missing (in-memory only).
+- **A5**: XXH32 content checksum verify — `StreamLzFrameDecompressor.cs:172-187`. Missing.
+- **A6**: CRC24 chunk checksum verify — `StreamLzDecoder.cs:272-276`. Parsed, never verified (both sides).
+- **A7**: `ChunkHeader.WholeMatchDistance != 0` branch — `StreamLzDecoder.cs:255-266`. Zig field exists but never populated/read.
+- **A8**: `CopyWholeMatch` helper — `StreamLzDecoder.cs:142-157`, `High/LzDecoder.cs:65`. Missing.
+- **A9**: `RestartDecoder` flag — `StreamLzDecoder.cs:59`. Parsed, unused.
+
+### B. Decompression — entropy layer
+
+- **B1**: Type 5 multi-array (bit-7 set) — `EntropyDecoder.cs:344-638`. Returns `MultiArrayNotSupported` at `entropy_decoder.zig:315`.
+- **B2**: `High_DecodeMultiArray` public entry — `EntropyDecoder.cs:334-342`. Missing.
+- **B3**: Recursive stack-scratch bug — `entropy_decoder.zig:138` allocates 64 KB per recursion level; with depth 16 = 1 MB stack. C# passes scratch through (`EntropyDecoder.cs:770-778`). **Real correctness bug.** **[DONE: step 1]**
+- **B4**: `dst == scratch` alias handling — `EntropyDecoder.cs:770-778` + `376-382`. Not ported. **[DONE: step 1 — ported alongside B3]**
+
+### C. Decompression — Fast LZ hot loop
+
+- **C1**: `Sse.Prefetch0` prefetch hints in cmd==2 / medium paths — `Fast/LzDecoder.cs:478-481, 623-626`. Missing at `fast_lz_decoder.zig:447`. Perf only.
+
+### D. Compression — top-level framed compressor
+
+- **D1**: SelfContained mode + prefix table — `StreamLzCompressor.cs:407-427, 510-513`, `StreamLZ.cs:90-106`. Not exposed in Zig `Options`.
+- **D2**: TwoPhase flag — `StreamLzCompressor.cs:90-95`. Missing.
+- **D3**: `CompressBlocksParallel` — `StreamLzCompressor.cs:777-841`. Phase 14.
+- **D4**: `CompressInternalParallelSC` — `StreamLzCompressor.cs:527-648`. Phase 14.
+- **D5**: Multi-piece compress with OOM fallback — `StreamLzCompressor.cs:101-148`. Missing.
+- **D6**: `CalculateMaxThreads` / `EstimateSharedMemory` — `StreamLzCompressor.cs:160-192`. Missing.
+- **D7**: Stream-based frame compressor — `StreamLzFrameCompressor.cs:34-423`. Missing.
+- **D8**: `SlzStream` public type — `SlzStream.cs` (711 lines). Missing.
+- **D9**: Unified levels L6-L11 — `StreamLZ.cs:90-106`. `streamlz_encoder.zig:204` rejects `level > 5`.
+- **D10**: `CompressOptions` fields — `CompressOptions.cs`. Zig `Options` is a subset.
+- **D11**: ~~External dictionary / `srcWindowBase`~~ — **FOLDED INTO D7**. `srcWindowBase` is internal sliding-window plumbing used only by `StreamLzFrameCompressor.cs:222`, not a user-facing dictionary API. Port lands with the stream frame compressor.
+- **D12**: `MatchHasher2x` / `CompressLazy` parser — `Fast/FastParser.cs:193-258`. Intentionally skipped to match `Slz.MapLevel`; blocks direct-codec-level API.
+- **D13**: Thread-static `LzTemp` reuse — `StreamLzCompressor.cs:428`. Missing.
+
+### E. Compression — Fast codec (L1-L5)
+
+Byte-exact-validated across 100 fixtures + enwik8 + silesia. **No functional gaps.**
+
+### F. Compression — High codec (L6-L11)
+
+- **F1**: `High.Compressor` — `High/Compressor.cs` (169 lines). Missing.
+- **F2**: `High.FastParser.CompressFast` — `High/FastParser.cs` (264 lines). Missing.
+- **F3**: `High.OptimalParser.Optimal` — `High/OptimalParser.cs` (933 lines). Stub.
+- **F4**: `High.Encoder.AssembleCompressedOutput` — `High/Encoder.cs` (472 lines). Missing.
+- **F5**: `High.CostModel` — `High/CostModel.cs` (331 lines). Missing.
+- **F6**: `High.Matcher` — `High/Matcher.cs` (117 lines). Missing.
+- **F7**: `HighTypes` — `High/HighTypes.cs` (164 lines). Missing.
+
+### G. Compression — match finding
+
+- **G1**: `MatchFinder.FindMatchesHashBased` — `MatchFinding/MatchFinder.cs:289-521`. Missing.
+- **G2**: `MatchFinder.FindMatchesBT4` — `MatchFinding/MatchFinder.cs:680-900`. Stub. Phase 12.
+- **G3**: `ManagedMatchLenStorage` — `MatchFinding/ManagedMatchLenStorage.cs`. Missing.
+- **G4**: `ExtractLaoFromMls` + `VarLenWrite*` — `MatchFinding/MatchFinder.cs:522-678`. Missing.
+- **G5**: `MatchHasherBase` / `MatchHasher2x` / `MatchHasherPreload` / `AdaptivePreloadLoop` — `MatchFinding/MatchHasher.cs`. Zig has `MatchHasher2` only.
+
+### H. Compression — entropy layer
+
+- **H1**: `EncodeArrayU8` signature — `EntropyEncoder.cs:45-124`. Zig `entropy_encoder.zig:120-137` missing cost out-param, level, speed tradeoff, scratch.
+- **H2**: Huffman 2-way split encoder (chunk type 2). Missing.
+- **H3**: Huffman 4-way split encoder (chunk type 4). Missing.
+- **H4**: RLE encoder (chunk type 3). Missing.
+- **H5**: Recursive/sub-block encoder (chunk type 5 simple path). Missing.
+- **H6**: `MultiArrayEncoder` (chunk type 5 bit-7 set) — `MultiArrayEncoder.cs` (2026 lines). 7-line stub.
+- **H7**: tANS encoder roundtrip — `TansEncoder.cs` (1010 lines). `tans_encoder.zig` (1275 lines) scaffolded, roundtrip broken. Phase 10d.
+- **H8**: `EncodeLzOffsets` / `WriteLzOffsetBits` — `EntropyEncoder.cs:185-207`, `OffsetEncoder.cs:402-680`. Missing.
+- **H9**: `OffsetEncoder` — `OffsetEncoder.cs:112-680`. `offset_encoder.zig` has only `subtractBytes` helpers.
+- **H10**: `MakeCompactChunkHdr` cost-reporting out-param — `EntropyEncoder.cs:140-184`. Zig has the rewrite without cost.
+
+### I. Shared / Common
+
+- **I1**: `StreamLzConstants` — 44 C# constants vs 43 Zig. Spot-check for 1 missing.
+- **I2**: `LzCoder` / `LzTemp` — `LzCoder.cs`. No Zig equivalent; per-call local state instead.
+- **I3**: `CostCoefficients.Current` platform table — `CostCoefficients.cs` (241 lines). Zig has Fast subset only.
+- **I4**: `MatchUtils` / `MatchEvaluation` — `MatchEvaluation.cs` (168 lines). Inlined into Zig `fast_lz_parser.zig`; needs extraction for High reuse.
+- **I5**: `BlockHeaderWriter` helpers — `BlockHeaderWriter.cs`. Inlined into `streamlz_encoder.zig`; needs extraction.
+- **I6**: `TextDetector.IsBlockProbablyText` (per-16 KB) — `TextDetector.cs:47`. Zig has whole-input only.
+- **I7**: `BitWriter64Forward` / `Backward` — `BitWriter.cs`. Zig equivalent in `io/bit_writer_64.zig` appears complete. Flag only if gap found.
+
+### J. CLI / UX
+
+- **J1**: `SlzStream` public type — `SlzStream.cs` (711 lines). Missing.
+- **J2**: `SlzCompressionLevel` enum — `SlzCompressionLevel.cs`. Missing.
+
+## Rules
+
+- Do not reorder steps without user permission.
+- Do not skip branches within a step to "ship faster" — mark `[x]` only when the whole C# reference for that item is ported.
+- Use fixture tests + C# reference diff to validate every step that touches a code path reachable from `compressFramed` / `decompressFramed`.
+- Update STATUS.md phase tracker whenever a step closes out a numbered phase.
+- **This file (`src/StreamLZ_zig/PARITY.md`) is the source of truth for what's left.** STATUS.md can lag, but this list must always reflect reality. Previously lived in memory as `project_parity_punch_list.md`; moved into the repo so it's version-controlled and visible in diffs.

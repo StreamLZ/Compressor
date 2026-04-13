@@ -957,7 +957,12 @@ pub fn encodeArrayU8Tans(
     dst: []u8,
     src: []const u8,
     histo: *ByteHistogram,
+    speed_tradeoff: f32,
+    cost_out: *f32,
 ) EncodeError!usize {
+    _ = speed_tradeoff; // reserved: C# uses this in TansEncoder to bias the
+    // normalize step + size tradeoff decision. Our current `tansNormalizeCounts`
+    // doesn't yet weight by speed_tradeoff — placeholder for parity.
     if (src.len < 32) return error.TansNotBeneficial;
 
     // Temporarily subtract last 5 bytes from histogram.
@@ -1049,6 +1054,14 @@ pub fn encodeArrayU8Tans(
     @memcpy(dst[0..table_bytes], table_buf[0..table_bytes]);
     @memcpy(dst[table_bytes..][0..body.backward_bytes], body.backward_start[0..body.backward_bytes]);
     @memcpy(dst[table_bytes + body.backward_bytes ..][0..body.forward_bytes], body.forward_start[0..body.forward_bytes]);
+
+    // Cost for the tANS branch = payload byte count (which is the number
+    // of compressed bytes NOT including the 5-byte non-compact chunk
+    // header the caller writes). Mirrors C# `TansEncoder.EncodeArrayU8_tANS`
+    // which reports `*cost = tansTotalBytes` in the same way. The caller's
+    // `encodeArrayU8Core` compares this against `memcpyCost = src.len + 3`
+    // and picks the cheaper path.
+    cost_out.* = @floatFromInt(total_size);
     return table_bytes + payload_bytes;
 }
 
@@ -1110,7 +1123,8 @@ test "tANS roundtrip: 32 bytes of 'abab' (2-symbol sparse path)" {
     histo.count_bytes(&src);
 
     var dst: [512]u8 = @splat(0);
-    const n = try encodeArrayU8Tans(testing.allocator, &dst, &src, &histo);
+    var tans_cost: f32 = std.math.inf(f32);
+    const n = try encodeArrayU8Tans(testing.allocator, &dst, &src, &histo, 1.0, &tans_cost);
 
     var decoded: [src.len + 16]u8 = @splat(0);
     var scratch: [32 * 1024]u8 align(16) = undefined;
@@ -1134,7 +1148,8 @@ test "tANS roundtrip: 256 bytes of 'abc' repeating (3-symbol sparse)" {
     histo.count_bytes(&src);
 
     var dst: [2048]u8 = @splat(0);
-    const n = try encodeArrayU8Tans(testing.allocator, &dst, &src, &histo);
+    var tans_cost: f32 = std.math.inf(f32);
+    const n = try encodeArrayU8Tans(testing.allocator, &dst, &src, &histo, 1.0, &tans_cost);
 
     var decoded: [src.len + 16]u8 = @splat(0);
     var scratch: [32 * 1024]u8 align(16) = undefined;
@@ -1160,7 +1175,8 @@ test "tANS roundtrip: 512 bytes of varied English text (Golomb-Rice path)" {
     histo.count_bytes(&src);
 
     var dst: [2048]u8 = @splat(0);
-    const n = try encodeArrayU8Tans(testing.allocator, &dst, &src, &histo);
+    var tans_cost: f32 = std.math.inf(f32);
+    const n = try encodeArrayU8Tans(testing.allocator, &dst, &src, &histo, 1.0, &tans_cost);
 
     var decoded: [src.len + 16]u8 = @splat(0);
     var scratch: [32 * 1024]u8 align(16) = undefined;
@@ -1185,7 +1201,8 @@ fn tansRoundtripChunk(allocator: std.mem.Allocator, src: []const u8) !void {
     defer allocator.free(dst);
     @memset(dst, 0);
 
-    const n = try encodeArrayU8Tans(allocator, dst, src, &histo);
+    var tans_cost: f32 = std.math.inf(f32);
+    const n = try encodeArrayU8Tans(allocator, dst, src, &histo, 1.0, &tans_cost);
     try testing.expect(n > 8);
 
     const decoded = try allocator.alloc(u8, src.len + 16);

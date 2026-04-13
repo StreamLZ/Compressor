@@ -65,8 +65,10 @@ fn writeNonCompactChunkHeader(dst: []u8, chunk_type: u8, compressed_size: u32, d
 
 /// Convert a fresh 5-byte non-compact header (or Type-0 3-byte memcpy
 /// header) into a compact variant when possible. Mirrors
-/// `MakeCompactChunkHdr` in C#. Returns the new total byte count.
-fn makeCompactChunkHdr(dst: []u8, total_n: usize) usize {
+/// `MakeCompactChunkHdr` in C# (`EntropyEncoder.cs:140-184`): decrements
+/// `cost_ptr` by 1 (memcpy shrink) or 2 (compressed shrink) when the
+/// header compacts. Returns the new total byte count.
+fn makeCompactChunkHdr(dst: []u8, total_n: usize, cost_ptr: ?*f32) usize {
     const chunk_type: u32 = (dst[0] >> 4) & 0x7;
     if (chunk_type == 0) {
         // Memcpy: try a compact 2-byte header.
@@ -79,6 +81,7 @@ fn makeCompactChunkHdr(dst: []u8, total_n: usize) usize {
             std.mem.copyForwards(u8, dst[2 .. 2 + src_size], dst[3 .. 3 + src_size]);
             dst[0] = h0;
             dst[1] = h1;
+            if (cost_ptr) |c| c.* -= 1;
             return total_n - 1;
         }
         return total_n;
@@ -106,6 +109,7 @@ fn makeCompactChunkHdr(dst: []u8, total_n: usize) usize {
         dst[0] = b0;
         dst[1] = b1;
         dst[2] = b2;
+        if (cost_ptr) |c| c.* -= 2;
         return total_n - 2;
     }
     return total_n;
@@ -115,17 +119,25 @@ fn makeCompactChunkHdr(dst: []u8, total_n: usize) usize {
 /// the chunk header (non-compact 5 bytes for compressed, 3 bytes for
 /// memcpy). Returns the total byte count written.
 ///
-/// Optionally fills `histo_out` with the computed histogram (useful
-/// for callers that want to reuse it).
+/// Port of C# `EntropyEncoder.EncodeArrayU8` signature: `speed_tradeoff`
+/// biases tANS vs memcpy cost comparison, `cost_out` receives the
+/// rate-distortion cost of the chosen encoding (used by callers to
+/// pick between multiple candidates), `level` gates level-dependent
+/// algorithm choices. `histo_out` optionally receives the computed
+/// histogram so callers can reuse it.
 pub fn encodeArrayU8(
     allocator: std.mem.Allocator,
     dst: []u8,
     src: []const u8,
     options: EntropyOptions,
+    speed_tradeoff: f32,
+    cost_out: ?*f32,
+    level: u32,
     histo_out: ?*ByteHistogram,
 ) EncodeError!usize {
     if (src.len <= 32) {
         if (histo_out) |h| h.count_bytes(src);
+        if (cost_out) |c| c.* = @floatFromInt(src.len + 3);
         return encodeArrayU8Memcpy(dst, src);
     }
 
@@ -133,19 +145,29 @@ pub fn encodeArrayU8(
     histo.count_bytes(src);
     if (histo_out) |h| h.* = histo;
 
-    return encodeArrayU8CoreWithHisto(allocator, dst, src, &histo, options);
+    return encodeArrayU8CoreWithHisto(allocator, dst, src, &histo, options, speed_tradeoff, cost_out, level);
 }
 
-/// Core encode with pre-computed histogram.
+/// Core encode with pre-computed histogram. Mirrors C#
+/// `EntropyEncoder.EncodeArrayU8WithHisto` — takes the histogram by
+/// value (copies internally so the caller's copy is untouched by any
+/// in-place adjustments the encoders make).
 pub fn encodeArrayU8WithHisto(
     allocator: std.mem.Allocator,
     dst: []u8,
     src: []const u8,
-    histo: *ByteHistogram,
+    histo: ByteHistogram,
     options: EntropyOptions,
+    speed_tradeoff: f32,
+    cost_out: ?*f32,
+    level: u32,
 ) EncodeError!usize {
-    if (src.len <= 32) return encodeArrayU8Memcpy(dst, src);
-    return encodeArrayU8CoreWithHisto(allocator, dst, src, histo, options);
+    if (src.len <= 32) {
+        if (cost_out) |c| c.* = @floatFromInt(src.len + 3);
+        return encodeArrayU8Memcpy(dst, src);
+    }
+    var histo_copy = histo;
+    return encodeArrayU8CoreWithHisto(allocator, dst, src, &histo_copy, options, speed_tradeoff, cost_out, level);
 }
 
 fn encodeArrayU8CoreWithHisto(
@@ -154,37 +176,51 @@ fn encodeArrayU8CoreWithHisto(
     src: []const u8,
     histo: *ByteHistogram,
     options: EntropyOptions,
+    speed_tradeoff: f32,
+    cost_out: ?*f32,
+    level: u32,
 ) EncodeError!usize {
+    _ = level; // currently unused; reserved for Huffman / multi-array paths
+
+    const memcpy_cost: f32 = @floatFromInt(src.len + 3);
+
     // Try tANS if allowed.
     if (options.allow_tans and dst.len > 5 + 8) {
-        const tans_n = tans.encodeArrayU8Tans(allocator, dst[5..], src, histo) catch |err| switch (err) {
+        var tans_cost: f32 = memcpy_cost;
+        const tans_n = tans.encodeArrayU8Tans(allocator, dst[5..], src, histo, speed_tradeoff, &tans_cost) catch |err| switch (err) {
             error.TansNotBeneficial, error.TooFewSymbols, error.DestinationTooSmall => {
+                if (cost_out) |c| c.* = memcpy_cost;
                 return encodeArrayU8Memcpy(dst, src);
             },
             error.BadParameters => return error.DestinationTooSmall,
             error.OutOfMemory => return error.OutOfMemory,
         };
-        if (tans_n > 0 and tans_n < src.len) {
-            // Accept tANS. Write the 5-byte non-compact header and return.
+        if (tans_n > 0 and tans_n < src.len and tans_cost < memcpy_cost) {
             writeNonCompactChunkHeader(dst, 1, @intCast(tans_n), @intCast(src.len));
+            if (cost_out) |c| c.* = tans_cost;
             return 5 + tans_n;
         }
     }
     // Fall back to memcpy.
+    if (cost_out) |c| c.* = memcpy_cost;
     return encodeArrayU8Memcpy(dst, src);
 }
 
 /// Same as `encodeArrayU8` but converts the result to a compact
-/// chunk header where possible (saving 1–2 bytes).
+/// chunk header where possible (saving 1–2 bytes). When the header
+/// shrinks, `cost_out` is decremented to reflect the smaller output.
 pub fn encodeArrayU8CompactHeader(
     allocator: std.mem.Allocator,
     dst: []u8,
     src: []const u8,
     options: EntropyOptions,
+    speed_tradeoff: f32,
+    cost_out: ?*f32,
+    level: u32,
     histo_out: ?*ByteHistogram,
 ) EncodeError!usize {
-    const n = try encodeArrayU8(allocator, dst, src, options, histo_out);
-    return makeCompactChunkHdr(dst, n);
+    const n = try encodeArrayU8(allocator, dst, src, options, speed_tradeoff, cost_out, level, histo_out);
+    return makeCompactChunkHdr(dst, n, cost_out);
 }
 
 // ────────────────────────────────────────────────────────────
@@ -214,14 +250,19 @@ test "encodeArrayU8 with tANS picks compressed path for compressible data" {
     while (i < src.len) : (i += 1) src[i] = pattern[i % pattern.len];
 
     var dst: [2048]u8 = @splat(0);
+    var cost: f32 = std.math.inf(f32);
     const n = try encodeArrayU8(
         testing.allocator,
         &dst,
         &src,
         .{ .allow_tans = true },
+        1.0,
+        &cost,
+        0,
         null,
     );
     try testing.expect(n < src.len);
+    try testing.expect(cost < @as(f32, @floatFromInt(src.len + 3)));
 
     // Check that the header is the 5-byte non-compact form with chunk type 1.
     try testing.expect((dst[0] >> 4) & 0x7 == 1);
@@ -241,29 +282,42 @@ test "encodeArrayU8 without allow_tans falls back to memcpy" {
     while (i < src.len) : (i += 1) src[i] = pattern[i % pattern.len];
 
     var dst: [2048]u8 = @splat(0);
+    var cost: f32 = 0;
     const n = try encodeArrayU8(
         testing.allocator,
         &dst,
         &src,
         .{},
+        1.0,
+        &cost,
+        0,
         null,
     );
     try testing.expectEqual(src.len + 3, n); // 3-byte BE24 memcpy header
     try testing.expectEqual(@as(u8, 0), (dst[0] >> 4) & 0x7);
+    // Memcpy cost matches the encoded byte count.
+    try testing.expectEqual(@as(f32, @floatFromInt(src.len + 3)), cost);
 }
 
 test "encodeArrayU8CompactHeader shrinks memcpy header for small input" {
     const src = "small";
     var dst: [128]u8 = @splat(0);
+    var cost: f32 = 0;
     const n = try encodeArrayU8CompactHeader(
         testing.allocator,
         &dst,
         src,
         .{},
+        1.0,
+        &cost,
+        0,
         null,
     );
     // 5-byte string -> compact memcpy header = 2 bytes + 5 payload = 7 bytes
     try testing.expectEqual(@as(usize, 2 + src.len), n);
     // High bit of first byte set for compact memcpy
     try testing.expect((dst[0] & 0x80) != 0);
+    // Cost should drop by 1 due to the compact memcpy shrink:
+    //   initial cost = src.len + 3 = 8, after shrink = 7.
+    try testing.expectEqual(@as(f32, 7), cost);
 }

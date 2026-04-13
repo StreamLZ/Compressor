@@ -513,6 +513,9 @@ fn assembleEntropyOutput(
                     delta_scratch,
                     dls[0..literal_count],
                     options,
+                    config.speed_tradeoff,
+                    null, // Fast computes its own cost via histogram cost approx
+                    0,
                     null,
                 );
                 literal_cost = @as(f32, @floatFromInt(delta_n)) + delta_literal_time_cost;
@@ -553,6 +556,9 @@ fn assembleEntropyOutput(
             enc_scratch,
             w.token_start[0..token_count],
             options,
+            config.speed_tradeoff,
+            null,
+            0,
             null,
         );
         if (@intFromPtr(out_cursor) + token_n > @intFromPtr(dst_end)) return bail_result;
@@ -593,8 +599,8 @@ fn assembleEntropyOutput(
         }
         const split_enc = try allocator.alloc(u8, off16_bytes_total + 512);
         defer allocator.free(split_enc);
-        const hi_n = try entropy_enc.encodeArrayU8(allocator, split_enc, hi_bytes, options, null);
-        const lo_n = try entropy_enc.encodeArrayU8(allocator, split_enc[hi_n..], lo_bytes, options, null);
+        const hi_n = try entropy_enc.encodeArrayU8(allocator, split_enc, hi_bytes, options, config.speed_tradeoff, null, 0, null);
+        const lo_n = try entropy_enc.encodeArrayU8(allocator, split_enc[hi_n..], lo_bytes, options, config.speed_tradeoff, null, 0, null);
         const split_total = hi_n + lo_n;
         // Without Huffman/tANS, encodeArrayU8 falls through to memcpy, which
         // emits `bytes + 3` output. C# sets cost = encoded-byte-count for the

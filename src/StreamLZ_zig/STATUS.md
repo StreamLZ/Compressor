@@ -40,12 +40,13 @@ lives under `src/StreamLZ_zig/`, zero coupling to the .NET solution.
 | 9 | Fast encoder L1-L5, byte-exact with C# | `encode/{fast_constants,fast_match_hasher,fast_stream_writer,fast_token_writer,fast_lz_parser,fast_lz_encoder,streamlz_encoder,text_detector,cost_model,cost_coefficients,byte_histogram}.zig`. Greedy parser (engine -2/-1/1/2) + lazy chain parser (engine 4) + raw-mode and entropy-mode sub-chunk assemblers. Bit-exact with C# Fast across 100 fixtures, enwik8 (100 MB), silesia (212 MB) — every Fast level, every file, zero delta. `streamlz c [-l N] <in> <out>` CLI. See `commit log` below for the per-phase breakdown |
 | 10a-c | Entropy infra scaffolding | `encode/byte_histogram.zig` (with `getCostApproxCore`), `io/bit_writer_64.zig` (forward + backward), `encode/tans_encoder.zig` (normalize + init_table + get_bit_count + encode_bytes + encode_table scaffolding). Compiles clean; 2 tANS roundtrip tests skipped (see caveats) |
 | 10i-l | Fast encoder parity sweep | Phase-10 sub-phases that chased the remaining drift to zero: `Slz.MapLevel` alignment, whole-input hasher window, adaptive hash sizing with text detection, `WriteOffsetWithLiteral1`, delta-literal histogram-cost selection, Off16 entropy-split cost compare, EntropyOptions per-level masks, block-/sub-chunk-level `AreAllBytesEqual`, `CheckPlainHuffman` trial-encode arm, per-block cost-vs-memsetCost rewrite, backward-extend whole-input bound, and the final hasher-vs-parser `min_match_length` split. See the commit `437e6a6` body for the full list |
+| 10d | tANS encoder roundtrip | Fixed by commits `6519c42` (stream layout) + `98023bf` (allocator scratch). All tANS roundtrip tests pass: `'abab'` × 16, `'abc'` × 85, 512-byte English text, enwik8 64 KB / 128 KB chunks, silesia 64 KB / 128 KB chunks |
+| parity 1-11, 15 | Zig-port parity punch list | Decoder side: recursive scratch threading, dictionary/dstOffset entry, stream decompressor with sliding window + XXH32, `copyWholeMatch` + `whole_match_distance`, `RestartDecoder` flag wiring, Type 5 multi-array. Encoder side: full `CompressOptions` plumbing, SelfContained mode + prefix table, TwoPhase flag. See `PARITY.md` |
 
 ### Pending
 | # | phase | notes |
 |---|---|---|
-| 10d (debug) | tANS encoder roundtrip | `tansInitTable` + `tansEncodeBytes` + `tansEncodeTable` all compile but the round-trip through `decode/tans_decoder.zig` produces scrambled output. First two bytes of a 256-byte "abcabc…" test decode correctly, then diverge. Bug is likely in the state-table initialization (`base_offset` math for the weight-1 path or the 4-way distribution) or the stream-swap semantics. Not on the critical path — Fast levels disable tANS anyway — but required for High (L6+) parity |
-| 10 | Huffman + tANS encoders | `encode/multi_array_huffman_encoder.zig` (2 KLOC in C#), `encode/offset_encoder.zig`, real `encode/tans_encoder.zig`. Fast L1-L5 works without these because `EntropyOptions` clears `AllowTANS` / `AllowMultiArray` for Fast — `EncodeArrayU8` falls through to memcpy and is already byte-parity with C# |
+| 10 | Huffman + tANS encoders | `encode/multi_array_huffman_encoder.zig` (2 KLOC in C#), `encode/offset_encoder.zig`. Real tANS encoder is done (phase 10d above); other entropy-coder types (Huffman 2/4-way split, RLE, recursive) still stubbed. Fast L1-L5 works without these because `EntropyOptions` clears `AllowTANS` / `AllowMultiArray` for Fast — `EncodeArrayU8` falls through to memcpy and is already byte-parity with C# |
 | 11 | High encoder | `encode/high_lz_encoder.zig`, `encode/optimal_parser.zig` (DP), High-side cost model |
 | 12 | BT4 match finder | `encode/match_finder_bt4.zig` — needed for L11 only |
 | 13 | Parallel decompress | `DecompressCoreTwoPhase` (L9-L11) + `DecompressCoreParallel` (L6-L8 SC) — the multi-GB/s regime lives here |
@@ -203,8 +204,11 @@ apples-to-apples against the single-threaded Zig port.
 - **High encoder (L6-L11) is pending** (phase 11+). Needs optimal
   parser, BT4 match finder, real Huffman/tANS encoders. Not on the
   critical path while Fast L1-L5 is validated.
-- **tANS encoder roundtrip is broken** (phase 10d). Unreachable from
-  Fast levels (they disable tANS), so doesn't block Fast parity.
+- **tANS encoder roundtrip works** (phase 10d complete). Synthetic
+  'abab' / 'abc' / text tests pass, plus enwik8 / silesia corpus
+  roundtrips. Still unreachable from Fast levels (they disable tANS)
+  but the real `EncodeArrayU8` + High-side paths will exercise it once
+  they land (parity steps H1, F4).
 - **Parallel compress** for SC groups is phase 14.
 - **No file-checksum verification** (XXH32 after end mark). The
   decoder skips it; fine for local testing, nice-to-have for
@@ -246,20 +250,27 @@ Base (pre-decoder work): `4a0451a` (`Add concurrent access test verifying Slz th
 
 ## Recommended next session entry points (in order)
 
-1. **Phase 13 — Parallel decompress.** This is what closes the 0.7-0.8×
-   gap on L6-L11. Uses `std.Thread.Pool` and a pre-scan over chunks.
-   Pre-allocate per-worker scratch, spawn via thread pool, wait-group
-   join.
+The authoritative list of remaining parity gaps lives in
+[`PARITY.md`](PARITY.md) — 45-step punch list with file/line citations.
+Steps 1-11 and 15 (tANS encoder) are done. Next up:
 
-2. **Phase 10d — Fix tANS encoder roundtrip.** Unblocks the real
-   `EncodeArrayU8` path. Minimal 2-symbol test + side-by-side C#
-   reference is the cheapest way to bisect the state-table
-   initialization bug. Only matters for High encoder parity.
+1. **Step 16 (H1 + H10) — widen `encodeArrayU8` signature.** Add
+   `speed_tradeoff` / `cost_out` / `level` / `scratch_ptr` params so
+   callers can delegate the LZ-vs-entropy cost decision. Prerequisite
+   for the High codec.
 
-3. **Phase 11 — High encoder.** DP optimal parser + `high_lz_encoder.zig`
-   + High-side cost model. Needs phase 10 done first.
+2. **Steps 17-20 — Huffman 2/4-way, RLE, Recursive, MultiArray encoders.**
+   Chunk types 2-5 on the encode side.
 
-4. **Phase 12 — BT4 match finder.** L11 only, after phase 11.
+3. **Steps 25-33 — High codec (MatchHasherBase, MatchFinder, High.Compressor,
+   FastParser, OptimalParser, CostModel, BT4).** The big chunk.
+
+4. **Steps 35-38 — Parallel decompress + parallel compress** (phase
+   13/14). Closes the 0.7-0.8× serial-decode gap on L6-L11.
+
+5. **Step 41 — `StreamLzFrameCompressor` stream-based API.** Ports the
+   sliding-window streaming compressor; also unlocks full dictionary
+   semantics on the decode side.
 
 5. **Phase 14 — Parallel compress.** Thread pool for SC groups, mostly
    bookkeeping once Fast + High are done.
