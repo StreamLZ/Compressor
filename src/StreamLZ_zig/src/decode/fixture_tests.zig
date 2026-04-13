@@ -1,7 +1,7 @@
 //! Phase 8: exhaustive roundtrip tests over a pre-generated fixture corpus.
 //!
 //! The fixtures live in `$STREAMLZ_FIXTURES_DIR` (by convention
-//! `c:/tmp/fixtures/`), laid out as:
+//! `src/StreamLZ_zig/fixtures/`, gitignored), laid out as:
 //!
 //!     <root>/raw/<shape>_<size>.raw
 //!     <root>/slz/<shape>_<size>_L<level>.slz
@@ -66,7 +66,7 @@ test "fixture corpus roundtrip: every .slz decodes to its matching .raw" {
         error.EnvironmentVariableNotFound => {
             std.debug.print(
                 "\n  [fixture_tests] STREAMLZ_FIXTURES_DIR not set — skipping.\n" ++
-                    "  Run scripts/gen_fixtures.sh and set STREAMLZ_FIXTURES_DIR=c:/tmp/fixtures\n",
+                    "  Run scripts/gen_fixtures.sh and set STREAMLZ_FIXTURES_DIR=./fixtures\n",
                 .{},
             );
             return;

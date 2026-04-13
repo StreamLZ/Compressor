@@ -12,3 +12,4 @@ b3.txt
 # Zig
 src/StreamLZ_zig/.zig-cache/
 src/StreamLZ_zig/zig-out/
+src/StreamLZ_zig/fixtures/

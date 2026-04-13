@@ -567,6 +567,8 @@ test {
     _ = @import("encode/fast_match_hasher.zig");
     _ = @import("encode/match_hasher.zig");
     _ = @import("encode/text_detector.zig");
+    _ = @import("encode/cost_coefficients.zig");
+    _ = @import("encode/cost_model.zig");
     _ = @import("encode/fast_stream_writer.zig");
     _ = @import("encode/fast_token_writer.zig");
     _ = @import("encode/fast_lz_parser.zig");

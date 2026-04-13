@@ -55,21 +55,26 @@ pub fn FastMatchHasher(comptime T: type) type {
         allocator: std.mem.Allocator,
 
         /// Allocates and zeros a new hash table for the given parameters.
+        ///
+        /// Matches C# `FastMatchHasher<T>.AllocateHash` EXACTLY, including
+        /// the special-case for k=4 (the default):
+        ///
+        ///   if (k in [5, 8]):  hashMult = FibonacciHashMultiplier << (8 * (8 - k))
+        ///   else (k = 0 or 4): hashMult = 0x9E3779B100000000UL
+        ///
+        /// This is intentionally DIFFERENT from `MatchHasherBase.AllocateHash`
+        /// which uses `FibonacciHashMultiplier << (8 * (8 - k))` for all k.
         pub fn init(allocator: std.mem.Allocator, params: HasherParams) !Self {
             if (params.hash_bits < 8 or params.hash_bits > 24) return error.HashBitsOutOfRange;
-            const k: u32 = @max(params.min_match_length, 4);
+            const k: u32 = if (params.min_match_length == 0) 4 else params.min_match_length;
             const size: usize = @as(usize, 1) << params.hash_bits;
             const table = try allocator.alloc(T, size);
             @memset(table, 0);
 
-            // Fibonacci multiplier shifted so the top `k` bytes of the source
-            // word dominate the hash. `8 - k` is usually 4.
-            const k_clamped: u32 = if (k >= 8) 8 else k;
-            const shift_bits_val: u32 = (8 - k_clamped) * 8; // 0, 8, 16, ..., 64
-            const mult: u64 = if (shift_bits_val >= 64)
-                0
-            else
-                constants.fibonacci_hash_multiplier << @intCast(shift_bits_val);
+            const mult: u64 = if (k >= 5 and k <= 8) blk: {
+                const shift_bits_val: u32 = (8 - k) * 8;
+                break :blk constants.fibonacci_hash_multiplier << @intCast(shift_bits_val);
+            } else 0x9E3779B100000000;
 
             return .{
                 .hash_table = table,
@@ -103,9 +108,15 @@ test "FastMatchHasher(u32) allocates a power-of-two table and computes shift" {
     defer h.deinit();
     try testing.expectEqual(@as(usize, 1 << 14), h.hash_table.len);
     try testing.expectEqual(@as(u6, 50), h.hash_shift);
-    // Fibonacci multiplier scaled left by 8*(8-4) = 32 bits.
-    try testing.expectEqual(@as(u64, constants.fibonacci_hash_multiplier << 32), h.hash_mult);
+    // k = 4 falls out of the [5,8] band so C# uses the special constant.
+    try testing.expectEqual(@as(u64, 0x9E3779B100000000), h.hash_mult);
     for (h.hash_table) |e| try testing.expectEqual(@as(u32, 0), e);
+}
+
+test "FastMatchHasher(u32) k=5 uses shifted Fibonacci constant" {
+    var h = try FastMatchHasher(u32).init(testing.allocator, .{ .hash_bits = 14, .min_match_length = 5 });
+    defer h.deinit();
+    try testing.expectEqual(@as(u64, constants.fibonacci_hash_multiplier << 24), h.hash_mult);
 }
 
 test "FastMatchHasher(u16) 13-bit table" {

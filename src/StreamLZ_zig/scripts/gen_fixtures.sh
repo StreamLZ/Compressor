@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Generate the Phase 8 fixture corpus.
 #
-# Output: c:/tmp/fixtures/{raw,slz}/<shape>_<size>[_L<level>].{raw,slz}
+# Output: $ZIG_PROJ/fixtures/{raw,slz}/<shape>_<size>[_L<level>].{raw,slz}
 #
 # Matrix:
 #   shapes: text, binary, repetitive, mixed       (4)
@@ -9,11 +9,16 @@
 #   levels: 1 3 5 6 8 9 11                        (7)
 # = 20 raw files, 140 slz files, 160 total.
 #
-# Re-runnable; skips files that already exist.
+# The fixtures directory is gitignored — regenerate anytime by running
+# this script. It's re-runnable; skips files that already exist.
 
 set -euo pipefail
 
-FIX="c:/tmp/fixtures"
+# Resolve the Zig project root relative to this script so the fixtures
+# path is stable regardless of the current working directory.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ZIG_PROJ="$(dirname "$SCRIPT_DIR")"
+FIX="$ZIG_PROJ/fixtures"
 RAW="$FIX/raw"
 SLZ="$FIX/slz"
 SLZEXE="c:/Users/james.JAMESWORK2025/Repos/StreamLZ/src/StreamLZ.Cli/bin/Release/net10.0/win-x64/slz.exe"

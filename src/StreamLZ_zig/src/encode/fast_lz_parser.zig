@@ -40,8 +40,16 @@ pub const LengthAndOffset = struct {
 /// `recent_offset_inout` is read/written — the initial value is -8 at the
 /// top of a sub-chunk; for block2 it carries over from block1.
 ///
-/// `source_block_base` is the base pointer of the source sub-chunk. Used to
-/// compute positions relative to the sub-chunk start.
+/// `source_block_base` is the base pointer of the source SUB-CHUNK. Used for
+/// the bound check `offset <= cursor - source_block_base` which rejects
+/// candidates reaching before the current sub-chunk's start.
+///
+/// `window_base` is the base pointer of the whole COMPRESS WINDOW (the
+/// pointer that hash-table-stored positions are measured from). For the
+/// C# parity behavior we use `src.ptr` — the hash table is persistent
+/// across sub-chunks, and stored positions are in whole-input coordinates.
+/// Cross-sub-chunk stale entries then give huge offsets that fail the
+/// sub-chunk-local bound check, matching C# `RunGreedyParser`.
 ///
 /// `min_match_length_table` has 32 entries indexed by `31 - log2(offset)`.
 pub fn runGreedyParser(
@@ -56,6 +64,7 @@ pub fn runGreedyParser(
     dictionary_size: u32,
     min_match_length_table: *const [32]u32,
     source_block_base: [*]const u8,
+    window_base: [*]const u8,
 ) void {
     // Hoist into locals.
     const hash_table = hasher.hash_table;
@@ -82,10 +91,20 @@ pub fn runGreedyParser(
         const bytes_at_cursor: u32 = std.mem.readInt(u32, source_cursor[0..4], .little);
         const word_at_cursor: u64 = std.mem.readInt(u64, source_cursor[0..8], .little);
         const hash_index: usize = @intCast((word_at_cursor *% hash_mult) >> hash_shift);
-        const stored_pos: u32 = @intCast(hash_table[hash_index]);
+        // `stored_pos` is a position TRUNCATED to T's width (u16 or u32). The
+        // offset is computed as `(cur_pos_T - stored_pos_T)` with wrap-around
+        // mod 2^width, matching C# `T.CreateTruncating(...)` semantics. For
+        // T=u16 this means offsets > 65535 collapse into apparent small
+        // offsets and get filtered by the byte comparison below.
+        const stored_pos_t: T = hash_table[hash_index];
 
+        // Storage coordinate: position within the WHOLE input (measured
+        // from window_base). Bound coordinate: position within the
+        // current SUB-CHUNK (measured from source_block_base).
+        const cur_pos_in_window: usize = @intFromPtr(source_cursor) - @intFromPtr(window_base);
         const cur_pos_in_block: usize = @intFromPtr(source_cursor) - @intFromPtr(source_block_base);
-        hash_table[hash_index] = @intCast(@as(u32, @truncate(cur_pos_in_block)));
+        const cur_pos_t: T = @truncate(cur_pos_in_window);
+        hash_table[hash_index] = cur_pos_t;
 
         // Recent-offset candidate.
         const recent_src_addr: usize = @intFromPtr(source_cursor) +% @as(usize, @bitCast(recent_offset));
@@ -103,20 +122,27 @@ pub fn runGreedyParser(
             // 1-byte literal + at least 3-byte recent match.
             source_cursor += 1;
             offset_or_recent = 0;
-            const pos2: usize = @intFromPtr(source_cursor) - @intFromPtr(source_block_base);
+            // Pre-advance hash insert: store the NEXT cursor (cursor+1) in
+            // whole-input coordinates so the next iteration's lookup sees it.
+            const pos2: usize = @intFromPtr(source_cursor) - @intFromPtr(window_base);
             const word2: u64 = std.mem.readInt(u64, source_cursor[0..8], .little);
             const hi2: usize = @intCast((word2 *% hash_mult) >> hash_shift);
-            hash_table[hi2] = @intCast(@as(u32, @truncate(pos2)));
+            hash_table[hi2] = @truncate(pos2);
             current_offset = recent_offset;
             match_end = token_writer.extendMatchForward(source_cursor + 3, safe_source_end, current_offset);
             found_match = true;
         } else {
-            // Try hash-table match.
-            const cur_pos_u32: u32 = @as(u32, @truncate(cur_pos_in_block));
-            const offset_candidate: u32 = cur_pos_u32 -% stored_pos;
+            // Try hash-table match. Offset is computed T-width and widened.
+            // For T=u16 this wraps mod 65536; stale entries from > 64 KB
+            // ago will appear as small offsets and get filtered by the
+            // byte comparison at `source_cursor[-offset]` which mismatches
+            // for wrong-direction candidates.
+            const offset_candidate_t: T = cur_pos_t -% stored_pos_t;
+            const offset_candidate: u32 = @intCast(offset_candidate_t);
+            const cur_pos_for_bound: u32 = @truncate(cur_pos_in_block);
 
             if (offset_candidate >= 8 and offset_candidate < dictionary_size and
-                offset_candidate <= cur_pos_u32)
+                offset_candidate <= cur_pos_for_bound)
             {
                 const match_base_addr: usize = @intFromPtr(source_cursor) -% offset_candidate;
                 const match_base_ptr: [*]const u8 = @ptrFromInt(match_base_addr);
@@ -186,11 +212,20 @@ pub fn runGreedyParser(
             continue :outer;
         }
 
-        // Extend match backward into the literal run (up to 4 bytes typically).
+        // Extend match backward into the literal run. C# FastParser.cs:142 bounds
+        // the extension with:
+        //   (sourceBlock - sourceCursor) + hasherBaseAdjustment < currentOffset
+        // With hasherBaseAdjustment = SrcBaseOffset - blockBasePosition = -startPos,
+        // and sourceBlock = the current SUB-CHUNK base pointer, this simplifies to
+        //   -(absolutePos) < currentOffset ⟺ absolutePos > |offset|
+        // i.e., the bound is the WHOLE-INPUT base (`window_base`), NOT the sub-chunk
+        // base. Cross-sub-chunk backward extension is legal because earlier sub-chunks
+        // already exist in the output buffer by the time the decoder processes the
+        // current one.
         while (@intFromPtr(source_cursor) > @intFromPtr(literal_start)) {
             const cursor_prev_addr: usize = @intFromPtr(source_cursor) - 1;
             const back_match_addr: usize = cursor_prev_addr +% @as(usize, @bitCast(current_offset));
-            if (back_match_addr < @intFromPtr(source_block_base)) break;
+            if (back_match_addr < @intFromPtr(window_base)) break;
             const cur_byte: u8 = @as([*]const u8, @ptrFromInt(cursor_prev_addr))[0];
             const back_byte: u8 = @as([*]const u8, @ptrFromInt(back_match_addr))[0];
             if (cur_byte != back_byte) break;
@@ -199,6 +234,13 @@ pub fn runGreedyParser(
 
         const match_length: u32 = @intCast(@intFromPtr(match_end) - @intFromPtr(source_cursor));
         const lit_run_length: u32 = @intCast(@intFromPtr(source_cursor) - @intFromPtr(literal_start));
+
+        if (std.process.hasEnvVarConstant("SLZ_TOKEN_TRACE")) {
+            const src_pos: usize = @intFromPtr(source_cursor) - @intFromPtr(source_block_base);
+            std.debug.print("[tok] pos={d} lit={d} mlen={d} off={d} curOff={d}\n", .{
+                src_pos, lit_run_length, match_length, offset_or_recent, current_offset,
+            });
+        }
 
         token_writer.writeOffset(
             w,
@@ -217,6 +259,7 @@ pub fn runGreedyParser(
         if (@intFromPtr(source_cursor) + 5 >= @intFromPtr(safe_source_end)) break :outer;
 
         // Level ≥ 2: rehash match interior at exponential intervals.
+        // Stored positions are in WHOLE-INPUT coordinates (window_base).
         if (comptime level >= 2) {
             const match_start_ptr: [*]const u8 = @ptrFromInt(@intFromPtr(source_cursor) - match_length);
             var i: u32 = 1;
@@ -224,8 +267,8 @@ pub fn runGreedyParser(
                 const rehash_ptr = match_start_ptr + i;
                 const rw: u64 = std.mem.readInt(u64, rehash_ptr[0..8], .little);
                 const rh: usize = @intCast((rw *% hash_mult) >> hash_shift);
-                const rpos: usize = @intFromPtr(rehash_ptr) - @intFromPtr(source_block_base);
-                hash_table[rh] = @intCast(@as(u32, @truncate(rpos)));
+                const rpos: usize = @intFromPtr(rehash_ptr) - @intFromPtr(window_base);
+                hash_table[rh] = @truncate(rpos);
                 if (i >= match_length) break;
             }
         }
@@ -513,7 +556,7 @@ pub fn runLazyParser(
             const lit_run_u: u32 = @intCast(@intFromPtr(source_cursor) - @intFromPtr(literal_start));
             const offset_or_recent: u32 = @intCast(match.offset);
 
-            token_writer.writeOffset(
+            token_writer.writeOffsetWithLiteral1(
                 w,
                 match_length_u,
                 lit_run_u,
@@ -811,7 +854,7 @@ pub fn runLazyParserChain(
             const lit_run_u: u32 = @intCast(@intFromPtr(source_cursor) - @intFromPtr(literal_start));
             const offset_or_recent: u32 = @intCast(match.offset);
 
-            token_writer.writeOffset(
+            token_writer.writeOffsetWithLiteral1(
                 w,
                 match_length_u,
                 lit_run_u,
@@ -866,6 +909,7 @@ test "runGreedyParser runs over a short source without crashing" {
         &recent,
         @intCast(src.len),
         &mmlt,
+        src[0..].ptr,
         src[0..].ptr,
     );
 

@@ -941,6 +941,12 @@ internal static unsafe partial class StreamLZCompressor
                             }
                         }
 
+                        if (Environment.GetEnvironmentVariable("SLZ_COST_TRACE") != null)
+                        {
+                            System.Console.Error.WriteLine(
+                                $"[subchunk] roundBytes={roundBytes} lzCost={lzCost} memsetCost={memsetCost} " +
+                                $"plainHuffCost={plainHuffCost} n={n} decision={(lzCost < memsetCost && lzCost <= plainHuffCost && n >= 0 && n < roundBytes ? "LZ" : (memsetCost <= plainHuffCost ? "RAW" : "HUFF"))}");
+                        }
                         if (lzCost < memsetCost && lzCost <= plainHuffCost && n >= 0 && n < roundBytes)
                         {
                             // Write LZ chunk: 3-byte header then n compressed bytes

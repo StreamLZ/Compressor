@@ -130,16 +130,14 @@ pub inline fn literalRunSlotCount(value: u32) u32 {
 //  Adaptive hash-bit sizing (EntropyEncoder.GetHashBits port)
 // ────────────────────────────────────────────────────────────
 
-/// Compute the hash-table `bits` parameter adaptively from the input length
-/// and engine level. Port of `EntropyEncoder.GetHashBits`. The Fast compressor
-/// calls this as `getHashBits(src_len, @max(level, 2), 16, 20, 17, 24)`.
+/// Direct port of C# `EntropyEncoder.GetHashBits` (Entropy/EntropyEncoder.cs
+/// line 222-232). The Fast compressor's `SetupEncoder` calls THIS function
+/// (not the one in `StreamLzCompressor.cs`):
 ///
-/// Bands:
-///   * level < 3  → clamp(log2(src)+1, min_low, max_low)     — up to 20 bits
-///   * level ∈ 3-4 → clamp(log2(src)+1, min_low, min_high)    — narrow 16-17
-///   * level ≥ 5  → clamp(log2(src)+1, min_low, max_high)    — up to 24 bits
-///
-/// When `user_hash_bits > 0`, that value wins unconditionally.
+///   if (copts.HashBits > 0) return copts.HashBits;
+///   bits = Log2((uint)max(srcLen, 1)) + 1;
+///   upper = level >= 5 ? maxHigh : level >= 3 ? minHigh : maxLow;
+///   return clamp(bits, minLow, upper);
 pub fn getHashBits(
     src_len: usize,
     level: i32,
@@ -151,14 +149,14 @@ pub fn getHashBits(
 ) u6 {
     if (user_hash_bits > 0) return @intCast(user_hash_bits);
     const clamped_src: usize = @max(src_len, 1);
-    const log2_plus_1: u6 = @intCast(std.math.log2_int(usize, clamped_src) + 1);
+    const bits: u6 = @intCast(std.math.log2_int(usize, clamped_src) + 1);
     const upper: u6 = if (level >= 5)
         max_high_level_bits
     else if (level >= 3)
         min_high_level_bits
     else
         max_low_level_bits;
-    return @max(min_low_level_bits, @min(log2_plus_1, upper));
+    return @max(min_low_level_bits, @min(bits, upper));
 }
 
 // ────────────────────────────────────────────────────────────

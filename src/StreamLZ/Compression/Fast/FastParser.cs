@@ -63,6 +63,15 @@ internal static unsafe class FastParser
                 uint bytesAtCursor = *(uint*)sourceCursor;
                 int hashIndex = (int)(*(ulong*)sourceCursor * hashMultiplier >> hashShift);
                 uint hashValue = uint.CreateTruncating(hashTable[hashIndex]);
+                if (Environment.GetEnvironmentVariable("SLZ_HASH_PROBE") != null)
+                {
+                    long probePos = (long)(sourceCursor - sourceBlock) - hasherBaseAdjustment;
+                    if (probePos >= 72050 && probePos <= 72085)
+                    {
+                        System.Console.Error.WriteLine(
+                            $"[probe] cursor={probePos} hash_idx={hashIndex} word={*(ulong*)sourceCursor:x16} stored={hashValue}");
+                    }
+                }
                 hashTable[hashIndex] = T.CreateTruncating((long)(sourceCursor - sourceBlock) - hasherBaseAdjustment);
 
                 uint xorValue = bytesAtCursor ^ *(uint*)(sourceCursor + recentOffset);
@@ -135,6 +144,12 @@ internal static unsafe class FastParser
                     sourceCursor--;
 
                 int matchLength = (int)(matchEnd - sourceCursor);
+                if (Environment.GetEnvironmentVariable("SLZ_TOKEN_TRACE") != null)
+                {
+                    int srcPos = (int)(sourceCursor - sourceBlock);
+                    int litRun = (int)(sourceCursor - literalStart);
+                    System.Console.Error.WriteLine($"[tok] pos={srcPos} lit={litRun} mlen={matchLength} off={offsetOrRecent} curOff={currentOffset}");
+                }
                 Encoder.WriteOffset(ref writer, matchLength,
                     (int)(sourceCursor - literalStart), offsetOrRecent, recentOffset, literalStart);
 

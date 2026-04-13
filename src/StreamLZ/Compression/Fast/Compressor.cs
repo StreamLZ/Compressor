@@ -178,6 +178,8 @@ internal static unsafe class Compressor
         int minimumMatchLength = 4;
         if (sourceLength > 0x4000 && level >= -2 && level <= 3 && StreamLZCompressor.IsProbablyText(sourceStart, sourceLength))
             minimumMatchLength = 6;
+        if (Environment.GetEnvironmentVariable("SLZ_HASH_PROBE") != null)
+            System.Console.Error.WriteLine($"[setup] level={level} srcLen={sourceLength} minMatchLen={minimumMatchLength} hashBits={hashBits}");
 
         if (level == 3)
         {

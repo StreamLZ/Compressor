@@ -277,6 +277,86 @@ pub inline fn writeOffset(
     writeComplexOffset(w, match_length, literal_run_length, offset, recent_offset, literal_start);
 }
 
+/// Lazy-parser entry point: scans literal runs in the [8, 63] range for
+/// 1-byte recent-offset matches, splitting the run into multiple length-1
+/// recent-offset tokens when the slot accounting allows. Port of
+/// `Encoder.WriteOffsetWithLiteral1` / `WriteOffsetWithLiteral1Inner` (C#).
+///
+/// Caller invariant: matches the C# call sites — used after the lazy parser
+/// (chain hasher and 2x hasher) emits a match. For literal runs outside
+/// [8, 63] this collapses to a plain `writeOffset`.
+pub fn writeOffsetWithLiteral1(
+    w: *FastStreamWriter,
+    match_length: u32,
+    literal_run_length: u32,
+    offset: u32,
+    recent_offset: isize,
+    literal_start: [*]const u8,
+) void {
+    if ((literal_run_length -% 8) > 55) {
+        writeOffset(w, match_length, literal_run_length, offset, recent_offset, literal_start);
+        return;
+    }
+    writeOffsetWithLiteral1Inner(w, match_length, literal_run_length, offset, recent_offset, literal_start);
+}
+
+fn writeOffsetWithLiteral1Inner(
+    w: *FastStreamWriter,
+    match_length: u32,
+    literal_run_length_in: u32,
+    offset: u32,
+    recent_offset: isize,
+    literal_start_in: [*]const u8,
+) void {
+    var literal_start = literal_start_in;
+    var literal_run_length = literal_run_length_in;
+
+    var found: [33]u32 = undefined;
+    var found_count: u32 = 0;
+    var last: u32 = 0;
+    var i: u32 = 1;
+    const V16 = @Vector(16, u8);
+    const V16Bool = @Vector(16, bool);
+    while (i < literal_run_length) {
+        const a_ptr = literal_start + i;
+        const b_addr: usize = @intFromPtr(a_ptr) +% @as(usize, @bitCast(recent_offset));
+        const b_ptr: [*]const u8 = @ptrFromInt(b_addr);
+        const a: V16 = a_ptr[0..16].*;
+        const b: V16 = b_ptr[0..16].*;
+        const eq: V16Bool = a == b;
+        const mask: u16 = @bitCast(eq);
+        if (mask == 0) {
+            i += 16;
+        } else {
+            const j: u32 = i + @ctz(mask);
+            if (j >= literal_run_length) break;
+            i = j + 1;
+            if (j != last) {
+                found[found_count] = j - last;
+                found_count += 1;
+                last = i;
+            }
+        }
+    }
+
+    if (found_count != 0) {
+        std.debug.assert(found_count < 33);
+        found[found_count] = literal_run_length - last;
+        var fi: u32 = 0;
+        while (fi < found_count) : (fi += 1) {
+            const current: u32 = found[fi];
+            if (constants.literalRunSlotCount(current) + constants.literalRunSlotCount(found[fi + 1]) + 1 > 7) {
+                writeOffset(w, 1, current, 0, recent_offset, literal_start);
+                literal_start += current + 1;
+                literal_run_length -= current + 1;
+            } else {
+                found[fi + 1] += current + 1;
+            }
+        }
+    }
+    writeOffset(w, match_length, literal_run_length, offset, recent_offset, literal_start);
+}
+
 /// Copy the trailing literals (after the last emitted match) into the stream.
 /// Shared epilogue for all parser variants.
 pub fn copyTrailingLiterals(

@@ -687,6 +687,15 @@ internal static unsafe class Encoder
         float offset32Time = CostModel.GetDecodingTimeOffset32(platforms, offset32Count) * speedTradeoff;
         int extraBytes = (int)(destination - destinationAfterTokens) - offset16Bytes;
         *costOutput = offset32Time + (tokenCost + literalCost + decodingTime * speedTradeoff + extraBytes + offset16Cost + initialBytes);
+        if (Environment.GetEnvironmentVariable("SLZ_COST_TRACE") != null)
+        {
+            System.Console.Error.WriteLine(
+                $"[cost] srcLen={sourceLength} tokens={tokenCount} complex={writer->ComplexTokenCount} lits={literalCount} " +
+                $"off16={offset16Count} off32={offset32Count} " +
+                $"tokCost={tokenCost} litCost={literalCost} off16Cost={offset16Cost} off32Time={offset32Time} " +
+                $"decTime={decodingTime} extraBytes={extraBytes} initBytes={initialBytes} speedTradeoff={speedTradeoff} " +
+                $"TOTAL_COST={*costOutput} totalWritten={(int)(destination - destinationStart)}");
+        }
         return (int)(destination - destinationStart);
     }
 }

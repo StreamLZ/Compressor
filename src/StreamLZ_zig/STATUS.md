@@ -34,7 +34,7 @@ zero coupling to the .NET solution.
 | 5b | SC grouping | Per-group `dst_start` computation so group-first chunks get `base_offset == 0` initial Copy64; tail prefix restoration |
 | 7 | Vectorize CopyHelpers | `@Vector(16, u8)` × 4 for `copy64Bytes`, `@Vector(8, u8)` `+%` for `copy64Add`. `streamlz bench` subcommand for in-memory timing |
 | 7b | High decoder hot loop | `@prefetch` 128 tokens ahead in `executeTokensType1`; same-iteration prefetch in `processLzRunsType0`; 8-byte cascading literal copy |
-| 8 | Fixture corpus + roundtrip tests | `scripts/gen_fixtures.sh` builds 20 raws × 7 levels = 140 `.slz` under `c:/tmp/fixtures/`. `decode/fixture_tests.zig` walks `$STREAMLZ_FIXTURES_DIR/slz/*.slz`, decodes, and diffs against `raw/<stem>.raw`. Skips cleanly if env var unset. Debug + ReleaseFast both 48/48 green, 140/140 bit-exact |
+| 8 | Fixture corpus + roundtrip tests | `scripts/gen_fixtures.sh` builds 20 raws × 7 levels = 140 `.slz` under `src/StreamLZ_zig/fixtures/` (gitignored). `decode/fixture_tests.zig` walks `$STREAMLZ_FIXTURES_DIR/slz/*.slz`, decodes, and diffs against `raw/<stem>.raw`. Skips cleanly if env var unset. Debug + ReleaseFast both 48/48 green, 140/140 bit-exact |
 | 9 (raw) | Fast encoder L1/L2 (raw-literal mode) | `encode/{fast_constants,fast_match_hasher,fast_stream_writer,fast_token_writer,fast_lz_parser,fast_lz_encoder,streamlz_encoder}.zig`. Greedy parser with `FastMatchHasher(u32)`, `@prefetch`-friendly hot loop, `comptime level` folding. `streamlz compress [-l N] <in> <out>` CLI. Roundtrip corpus: 40/40 Zig encode → Zig decode + Zig encode → C# decode, byte-exact across all 4 shapes × 5 sizes |
 | 10a-c | Entropy infra scaffolding | `encode/byte_histogram.zig`, `io/bit_writer_64.zig` (forward + backward), `encode/tans_encoder.zig` (normalize + init_table + get_bit_count + encode_bytes + encode_table scaffolding). Compiles clean, 90/90 passing; 2 tANS roundtrip tests skipped (see caveats) |
 
@@ -230,16 +230,16 @@ Base (pre-session): `4a0451a` (`Add concurrent access test verifying Slz thread 
 79 Zig unit tests passing, wired via `main.zig` test aggregator:
 
 ```
-$ STREAMLZ_FIXTURES_DIR=c:/tmp/fixtures zig build test --summary all
+$ STREAMLZ_FIXTURES_DIR=./fixtures zig build test --summary all
   [fixture_tests] all 140 fixtures passed
-  [encode_fixture_tests] all 40 encode roundtrips passed
-Build Summary: 3/3 steps succeeded; 79/79 tests passed
+  [encode_fixture_tests] all 100 encode roundtrips passed
 ```
 
 The `fixture_tests` block is self-skipping when `STREAMLZ_FIXTURES_DIR`
 is unset, so `zig build test` works on a clean checkout without the
 pre-generated corpus. Run `scripts/gen_fixtures.sh` once to populate
-`c:/tmp/fixtures/{raw,slz}` and then set the env var for full coverage.
+`src/StreamLZ_zig/fixtures/{raw,slz}` (the directory is gitignored) and
+then set the env var for full coverage.
 
 ## Feedback memories the session picked up (saved outside the repo)
 

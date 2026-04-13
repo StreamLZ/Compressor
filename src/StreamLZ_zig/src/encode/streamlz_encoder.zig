@@ -26,6 +26,7 @@ const match_hasher = @import("match_hasher.zig");
 const fast_enc = @import("fast_lz_encoder.zig");
 const entropy_enc = @import("entropy_encoder.zig");
 const text_detector = @import("text_detector.zig");
+const cost_coeffs = @import("cost_coefficients.zig");
 const EntropyOptions = entropy_enc.EntropyOptions;
 
 const MatchHasher2x = match_hasher.MatchHasher2x;
@@ -66,7 +67,15 @@ const ResolvedParams = struct {
     engine_level: i32,
     use_entropy: bool,
     hash_bits: u6,
-    min_match_length: u32,
+    /// Passed to `FastMatchHasher.init` as the hash `k` parameter. C# applies
+    /// the text-detector bump here (6 for text, 4 otherwise). This affects
+    /// the Fibonacci hash multiplier, NOT the parser's acceptance threshold.
+    hasher_min_match_length: u32,
+    /// Passed to the parser's `buildMinimumMatchLengthTable` and is the
+    /// acceptance threshold for match lengths. C# `FastParser.CompressGreedy`
+    /// reads this from `opts.MinMatchLength` (default 0 → floor 4), so the
+    /// text bump DOES NOT apply. Diverging these matches C# behaviour.
+    parser_min_match_length: u32,
     dict_size: u32,
 };
 
@@ -74,16 +83,24 @@ fn resolveParams(src: []const u8, opts: Options) ResolvedParams {
     const mapped = fast_constants.mapLevel(opts.level);
     const eng = mapped.engine_level;
 
-    // Start from the user-supplied or default minimum match length.
-    var min_ml: u32 = if (opts.min_match_length >= 4) opts.min_match_length else 4;
-
-    // Text bump: C# Fast.Compressor.SetupEncoder. Only applies to engine
-    // levels in [-2, 3] (user L1..L4) and inputs > 16 KB.
+    // C# Fast.Compressor.SetupEncoder computes a LOCAL minimumMatchLength that
+    // starts at 4 and is bumped to 6 for text inputs. That local is passed to
+    // `CreateFastHasher<T>.AllocateHash(hashBits, minimumMatchLength)` to pick
+    // the Fibonacci hash multiplier (k=6 shifts differently than k=4).
+    var hasher_k: u32 = if (opts.min_match_length >= 4) opts.min_match_length else 4;
     if (opts.min_match_length == 0 and src.len > 0x4000 and eng >= -2 and eng <= 3) {
         if (text_detector.isProbablyText(src)) {
-            min_ml = 6;
+            hasher_k = 6;
         }
     }
+
+    // C# FastParser.CompressGreedy (line 375) computes `minimumMatchLength`
+    // FRESHLY from `Math.Max(opts.MinMatchLength, 4)` and passes THIS value
+    // to `BuildMinimumMatchLengthTable`. The text-detector bump is NOT
+    // applied to the parser's acceptance threshold, only to the hasher's
+    // hash-multiplier. So the parser accepts 4-byte matches at low offsets
+    // even on text input, which the hasher's higher k hints it was built for.
+    const parser_min_ml: u32 = if (opts.min_match_length >= 4) opts.min_match_length else 4;
 
     const bits = fast_constants.getHashBits(
         src.len,
@@ -101,19 +118,40 @@ fn resolveParams(src: []const u8, opts: Options) ResolvedParams {
         .engine_level = eng,
         .use_entropy = mapped.use_entropy_coding,
         .hash_bits = bits,
-        .min_match_length = min_ml,
+        .hasher_min_match_length = hasher_k,
+        .parser_min_match_length = parser_min_ml,
         .dict_size = dict,
     };
 }
 
-/// Returns the entropy option mask for a given user-level.
+/// Direct port of C# BlockHeaderWriter.AreAllBytesEqual. Returns true when
+/// every byte in `data` is identical (or when len ≤ 1).
+inline fn areAllBytesEqual(data: []const u8) bool {
+    if (data.len <= 1) return true;
+    const first = data[0];
+    for (data[1..]) |b| {
+        if (b != first) return false;
+    }
+    return true;
+}
+
+/// Returns the entropy option mask for a given user-level. Mirrors
+/// C# Fast.Compressor.SetupEncoder exactly:
+///   raw-coded levels (L1, L2) → SupportsShortMemset only
+///   lazy entropy levels (L5 only — engine 4) → full mask minus MultiArrayAdvanced
+///   greedy entropy levels (L3, L4 — engines 1, 2) → full mask minus MultiArrayAdvanced
+///     AND minus TANS AND minus MultiArray
+///     AND minus RLE/RLEEntropy (greedy path clears RLE bits at line 233)
 fn entropyOptionsForLevel(user_level: u8) EntropyOptions {
-    const engine_level = fast_constants.mapLevel(user_level).engine_level;
-    // Mirror Fast.Compressor.SetupEncoder:
-    //   level >= 5 → keep everything except AllowMultiArrayAdvanced (High codec)
-    //   level <  5 → also clear AllowTANS, AllowMultiArray
-    // All Fast levels (engine -2..4) fall into the second branch — no tANS.
-    if (engine_level >= 5) {
+    const mapped = fast_constants.mapLevel(user_level);
+    if (!mapped.use_entropy_coding) {
+        // Raw-coded mode: `coder.EntropyOptions = (int)EntropyOptions.SupportsShortMemset;`
+        return .{ .supports_short_memset = true };
+    }
+    const eng = mapped.engine_level;
+    // Entropy-coded mode. C# starts with 0xff and clears selected flags.
+    if (eng >= 5) {
+        // level >= 5 branch: clear MultiArrayAdvanced only.
         return .{
             .allow_tans = true,
             .allow_rle_entropy = true,
@@ -124,13 +162,22 @@ fn entropyOptionsForLevel(user_level: u8) EntropyOptions {
             .supports_short_memset = true,
         };
     }
-    return .{
+    // Engine level < 5: clear MultiArrayAdvanced, TANS, MultiArray.
+    var opts: EntropyOptions = .{
         .allow_rle_entropy = true,
         .allow_double_huffman = true,
         .allow_rle = true,
         .supports_new_huffman = true,
         .supports_short_memset = true,
     };
+    // Engine levels in {1, 2} → greedy/greedy-rehash parser branch at
+    // C# line 213, which additionally clears AllowRLE | AllowRLEEntropy.
+    // Engine level 4 (user L5) → `level == 4` branch keeps RLE bits.
+    if (eng != 3 and eng != 4) {
+        opts.allow_rle = false;
+        opts.allow_rle_entropy = false;
+    }
+    return opts;
 }
 
 /// Worst-case bound on the compressed size given `src_len`.
@@ -159,10 +206,24 @@ pub fn compressFramed(
     if (dst.len < min_dst) return error.DestinationTooSmall;
 
     // ── Frame header ────────────────────────────────────────────────────
+    //
+    // C# StreamLZ.MapLevel (StreamLZ.cs:90) maps unified level (1-11) to
+    // (codec, codecLevel). For Fast levels 1-5 the mapping is 1→1, 2→2,
+    // 3→3, 4→5 (Fast 4 is skipped), 5→6. The STORED level in the frame
+    // header is the codec-level, not the unified level. Replicate that so
+    // the written byte matches C# exactly.
+    const codec_level: u8 = switch (opts.level) {
+        1 => 1,
+        2 => 2,
+        3 => 3,
+        4 => 5,
+        5 => 6,
+        else => unreachable,
+    };
     var pos: usize = 0;
     const hdr_len = try frame.writeHeader(dst, .{
         .codec = .fast,
-        .level = opts.level,
+        .level = codec_level,
         .block_size = opts.block_size,
         .content_size = if (opts.include_content_size) @as(u64, @intCast(src.len)) else null,
     });
@@ -183,124 +244,216 @@ pub fn compressFramed(
     const greedy_hash_bits: u6 = @min(resolved.hash_bits, engine_level_cap);
 
     // ── Allocate the persistent hasher(s) this level needs ────────────
-    // L1/L2/L3/L4 → FastMatchHasher(u32). L5 → MatchHasher2 chain hasher
-    // (C# Slz.MapLevel skips Fast 4's lazy MatchHasher2x entirely).
-    var greedy_hasher: ?FastMatchHasher(u32) = null;
-    defer if (greedy_hasher) |*h| h.deinit();
+    // Matches C# `Fast.Compressor.SetupEncoder`:
+    //   engine level ≤ -2  → FastMatchHasher<ushort>   (user L1)
+    //   engine level ∈ {-1,1,2} → FastMatchHasher<uint>   (user L2, L3, L4)
+    //   engine level == 4  → MatchHasher2 chain hasher (user L5)
+    // Slz.MapLevel skips Fast 4 entirely, so no MatchHasher2x bucket.
+    var greedy_hasher_u16: ?FastMatchHasher(u16) = null;
+    defer if (greedy_hasher_u16) |*h| h.deinit();
+    var greedy_hasher_u32: ?FastMatchHasher(u32) = null;
+    defer if (greedy_hasher_u32) |*h| h.deinit();
     var chain_hasher: ?MatchHasher2 = null;
     defer if (chain_hasher) |*h| h.deinit();
 
-    if (opts.level == 5) {
-        // L5 → Fast 6 (engine 4): lazy chain hasher with lazy-2 evaluation.
-        chain_hasher = try MatchHasher2.init(allocator, resolved.hash_bits);
-    } else {
-        greedy_hasher = try FastMatchHasher(u32).init(allocator, .{
-            .hash_bits = greedy_hash_bits,
-            .min_match_length = resolved.min_match_length,
-        });
+    switch (opts.level) {
+        1 => {
+            // Fast 1 (engine -2): u16 hash table, 14-bit cap. Hasher gets
+            // the text-bumped min_match_length (affects hash multiplier).
+            greedy_hasher_u16 = try FastMatchHasher(u16).init(allocator, .{
+                .hash_bits = greedy_hash_bits,
+                .min_match_length = resolved.hasher_min_match_length,
+            });
+        },
+        5 => {
+            // Fast 6 (engine 4): lazy chain hasher with lazy-2 evaluation.
+            chain_hasher = try MatchHasher2.init(allocator, resolved.hash_bits);
+        },
+        else => {
+            // Fast 2 (engine -1), Fast 3 (engine 1), Fast 5 (engine 2).
+            greedy_hasher_u32 = try FastMatchHasher(u32).init(allocator, .{
+                .hash_bits = greedy_hash_bits,
+                .min_match_length = resolved.hasher_min_match_length,
+            });
+        },
     }
 
+    const speed_tradeoff = cost_coeffs.speedTradeoffFor(
+        cost_coeffs.default_space_speed_tradeoff_bytes,
+        resolved.use_entropy,
+    );
     const parser_config: fast_enc.ParserConfig = .{
-        .minimum_match_length = resolved.min_match_length,
+        // Parser mmlt uses the UN-bumped value (C# reads opts.MinMatchLength
+        // in FastParser.CompressGreedy regardless of the text bump).
+        .minimum_match_length = resolved.parser_min_match_length,
         .dictionary_size = resolved.dict_size,
+        .speed_tradeoff = speed_tradeoff,
     };
 
-    // Chain hasher (L5 only) sees the whole input as one window — C#
-    // `RunLazyParserChainHasher` bounds candidate offsets against
-    // `hasher.SrcBase` (= src.ptr), so sub-chunk 2 can reach sub-chunk 1.
-    // The greedy hashers reset per sub-chunk inside the sub-chunk encoder,
-    // matching C# `RunGreedyParser`'s `offsetOrRecent <= sourceCursor - sourceBlock`
-    // that confines matches to the current sub-chunk.
+    // Reset all hashers ONCE at the top of compressFramed, matching C#
+    // `SetupEncoder` → `CreateFastHasher<T>.AllocateHash` which clears the
+    // table once per CompressBlock_Fast call and then never re-clears.
+    //
+    // The greedy parser uses the hash table with positions stored in
+    // WHOLE-INPUT coordinates (measured from src.ptr). Stale entries from
+    // sub-chunk N−1 read during sub-chunk N give huge offsets that fail
+    // the `offset <= cursor - source_block_base` bound check — same as C#.
+    if (greedy_hasher_u16) |*h| h.reset();
+    if (greedy_hasher_u32) |*h| h.reset();
     if (chain_hasher) |*h| {
         h.reset();
         h.setSrcBase(src.ptr);
         h.setBaseWithoutPreload(0);
     }
 
-    // ── Loop over 256 KB outer blocks ──────────────────────────────────
+    // ── ONE frame block wraps all internal 256 KB chunks ───────────────
+    // Empty source: C# StreamLzFrameCompressor's stream-based Compress loop
+    // never enters the body (`while (bytesRead > 0)`), so it writes only the
+    // frame header + end mark and returns. Match that here to keep parity
+    // on zero-byte inputs.
+    if (src.len == 0) {
+        if (pos + 4 > dst.len) return error.DestinationTooSmall;
+        frame.writeEndMark(dst[pos..]);
+        pos += 4;
+        return pos;
+    }
+
+    // C# StreamLzFrameCompressor calls StreamLZCompressor.Compress(pSrc, len, ...)
+    // which produces a single buffer of concatenated internal blocks, and
+    // wraps the whole thing in ONE frame block header. Match that.
+    const frame_block_hdr_pos: usize = pos;
+    pos += 8;
+    const frame_block_start: usize = pos;
+
+    const can_compress = src.len > fast_constants.min_source_length;
+
+    // Direct port of C# CompressBlocksSerial → CompressOneBlock → CompressChunk.
+    // Structure:
+    //   per 256 KB block:
+    //     if all-equal → 2-byte block hdr + 5-byte memset chunk hdr, done
+    //     else: 2-byte block hdr + 4-byte chunk hdr placeholder + sub-chunks
+    //            per sub-chunk:
+    //              < 32 → 3-byte raw sub-chunk hdr + memcpy
+    //              all-equal → EncodeArrayU8 memcpy (no compressed flag)
+    //              else → LZ; compare lzCost vs memsetCost vs plainHuffCost
+    //            if totalCost > blockMemsetCost → rewind, emit uncompressed block
+    //            else backfill chunk hdr
+    const check_plain_huffman: bool = resolved.use_entropy and resolved.engine_level >= 4;
+    const window_base_ptr: [*]const u8 = src.ptr;
+
     var src_off: usize = 0;
-    while (src_off < src.len) {
+    while (can_compress and src_off < src.len) {
         const block_src_len: usize = @min(src.len - src_off, lz_constants.chunk_size);
+        const block_src: []const u8 = src[src_off..][0..block_src_len];
 
-        // Reserve space for the 8-byte frame block header.
-        const block_hdr_pos: usize = pos;
-        pos += 8;
         const block_start: usize = pos;
+        const keyframe = src_off == 0;
 
-        // Decide: small input → store uncompressed; else try compressed.
-        const try_compress = block_src_len > fast_constants.min_source_length;
+        // ── Write 2-byte block header (compressed) ──────────────────────
+        if (pos + 2 > dst.len) return error.DestinationTooSmall;
+        var flags0: u8 = 0x05;
+        if (keyframe) flags0 |= 0x40;
+        dst[pos] = flags0;
+        dst[pos + 1] = @intFromEnum(block_header.CodecType.fast);
+        pos += 2;
 
-        var compressed_payload_size: usize = 0;
-        var stored_uncompressed = false;
-
-        if (try_compress) {
-            // Internal block header (2 bytes) — Fast codec, no flags.
-            dst[pos] = 0x05; // magic nibble
-            dst[pos + 1] = @intFromEnum(block_header.CodecType.fast);
-            pos += 2;
-
-            // 4-byte chunk header — the whole 256 KB block is one "chunk"
-            // from the outer decoder's point of view. We write a placeholder
-            // and backfill after encoding.
-            const chunk_hdr_pos: usize = pos;
+        // ── Block-level AreAllBytesEqual → memset chunk header ─────────
+        // Port of StreamLzCompressor.CompressOneBlock line 713-717.
+        if (areAllBytesEqual(block_src)) {
+            if (pos + 4 + 1 > dst.len) return error.DestinationTooSmall;
+            const memset_hdr: u32 = lz_constants.chunk_size_mask | (@as(u32, 1) << lz_constants.chunk_type_shift);
+            std.mem.writeInt(u32, dst[pos..][0..4], memset_hdr, .little);
             pos += 4;
-            const chunk_payload_start: usize = pos;
+            dst[pos] = block_src[0];
+            pos += 1;
+            src_off += block_src_len;
+            continue;
+        }
 
-            // L5 chain hasher sees src.ptr as its window base (set at
-            // compressFramed top). Greedy sub-chunks are strictly local,
-            // so their window_base is unused.
-            const window_base_ptr: [*]const u8 = src.ptr;
+        // ── 4-byte chunk header placeholder ────────────────────────────
+        if (pos + 4 > dst.len) return error.DestinationTooSmall;
+        const chunk_hdr_pos: usize = pos;
+        pos += 4;
+        const chunk_payload_start: usize = pos;
 
-            // Iterate 128 KB sub-chunks within this chunk.
-            var sub_off: usize = 0;
+        // ── Iterate sub-chunks ─────────────────────────────────────────
+        // Port of StreamLzCompressor.CompressChunk. Per sub-chunk:
+        //   * < 32 bytes → raw-flag sub-chunk header + raw bytes
+        //   * all-equal → EncodeArrayU8 (memcpy, no compressed flag)
+        //   * else → LZ encode + cost-based 3-way decision
+        var total_cost: f32 = 0;
+        var sub_off: usize = 0;
 
-            while (sub_off < block_src_len) {
-                const sub_len: usize = @min(block_src_len - sub_off, fast_constants.sub_chunk_size);
-                const sub_src: []const u8 = src[src_off + sub_off ..][0..sub_len];
+        while (sub_off < block_src_len) {
+            const round_bytes: usize = @min(block_src_len - sub_off, fast_constants.sub_chunk_size);
+            const sub_src: []const u8 = src[src_off + sub_off ..][0..round_bytes];
 
-                // Reserve 3-byte sub-chunk header.
+            const round_f: f32 = @floatFromInt(round_bytes);
+            const sub_memset_cost: f32 =
+                (round_f * cost_coeffs.memset_per_byte + cost_coeffs.memset_base) *
+                speed_tradeoff +
+                round_f + 3.0;
+
+            if (round_bytes >= 32) {
+                if (areAllBytesEqual(sub_src)) {
+                    // C# CompressChunk line 882-890: plain memcpy via
+                    // EncodeArrayU8. For Fast (tANS disabled) this falls
+                    // through to a 3-byte BE memcpy header + raw bytes,
+                    // which has the compressed flag CLEAR (size ≤ 18 bits).
+                    if (pos + round_bytes + 3 > dst.len) return error.DestinationTooSmall;
+                    dst[pos + 0] = @intCast((round_bytes >> 16) & 0xFF);
+                    dst[pos + 1] = @intCast((round_bytes >> 8) & 0xFF);
+                    dst[pos + 2] = @intCast(round_bytes & 0xFF);
+                    @memcpy(dst[pos + 3 ..][0..round_bytes], sub_src);
+                    pos += round_bytes + 3;
+                    // EncodeArrayU8 memcpy cost = count + 3.
+                    total_cost += @floatFromInt(round_bytes + 3);
+                    sub_off += round_bytes;
+                    continue;
+                }
+
+                // ── LZ trial encode ────────────────────────────────────
                 const sub_hdr_pos: usize = pos;
                 pos += 3;
                 const sub_payload_start: usize = pos;
-                const sub_payload_cap: usize = dst.len - pos;
-
-                // start_position tells the sub-chunk encoder whether this is
-                // the very first sub-chunk of the whole decompressed output.
-                // Only the first sub-chunk of the first outer chunk (src_off==0
-                // and sub_off==0) gets the initial 8-byte literal copy — every
-                // later sub-chunk's decoder side has `base_offset != 0` and
-                // skips that path.
                 const start_position_for_sub: usize = src_off + sub_off;
                 const entropy_options = entropyOptionsForLevel(opts.level);
                 const result = try switch (opts.level) {
-                    // L1 → Fast 1 (engine -2): greedy, raw streams.
-                    1 => fast_enc.encodeSubChunkRaw(-2, allocator, &greedy_hasher.?, sub_src, dst[sub_payload_start..], start_position_for_sub, parser_config),
-                    // L2 → Fast 2 (engine -1): greedy, raw streams.
-                    2 => fast_enc.encodeSubChunkRaw(-1, allocator, &greedy_hasher.?, sub_src, dst[sub_payload_start..], start_position_for_sub, parser_config),
-                    // L3 → Fast 3 (engine 1): greedy + entropy (delta literals).
-                    3 => fast_enc.encodeSubChunkEntropy(1, allocator, &greedy_hasher.?, sub_src, dst[sub_payload_start..], start_position_for_sub, entropy_options, parser_config),
-                    // L4 → Fast 5 (engine 2): greedy with match rehashing + entropy.
-                    4 => fast_enc.encodeSubChunkEntropy(2, allocator, &greedy_hasher.?, sub_src, dst[sub_payload_start..], start_position_for_sub, entropy_options, parser_config),
-                    // L5 → Fast 6 (engine 4): lazy chain hasher + lazy-2 + entropy.
+                    1 => fast_enc.encodeSubChunkRaw(-2, u16, allocator, &greedy_hasher_u16.?, sub_src, window_base_ptr, dst[sub_payload_start..], start_position_for_sub, parser_config),
+                    2 => fast_enc.encodeSubChunkRaw(-1, u32, allocator, &greedy_hasher_u32.?, sub_src, window_base_ptr, dst[sub_payload_start..], start_position_for_sub, parser_config),
+                    3 => fast_enc.encodeSubChunkEntropy(1, allocator, &greedy_hasher_u32.?, sub_src, window_base_ptr, dst[sub_payload_start..], start_position_for_sub, entropy_options, parser_config),
+                    4 => fast_enc.encodeSubChunkEntropy(2, allocator, &greedy_hasher_u32.?, sub_src, window_base_ptr, dst[sub_payload_start..], start_position_for_sub, entropy_options, parser_config),
                     5 => fast_enc.encodeSubChunkEntropyChain(4, allocator, &chain_hasher.?, sub_src, window_base_ptr, dst[sub_payload_start..], start_position_for_sub, entropy_options, parser_config),
                     else => unreachable,
                 };
-                _ = sub_payload_cap;
+                const lz_cost: f32 = result.cost + 3.0; // +3 for sub-chunk header
 
-                if (result.bail) {
-                    // Store this sub-chunk as uncompressed: clear comp flag.
-                    if (sub_payload_start + sub_len > dst.len) return error.DestinationTooSmall;
-                    @memcpy(dst[sub_payload_start..][0..sub_len], sub_src);
-                    const hdr: u32 = @as(u32, @intCast(sub_len)) | lz_constants.chunk_header_compressed_flag;
-                    // Header format (3-byte BE): [23]=comp | [22:19]=mode | [18:0]=size
-                    // For uncompressed we still set the comp flag but use size == sub_len
-                    // and mode == 0. The decoder treats `comp_size == dst_count` as raw.
-                    dst[sub_hdr_pos + 0] = @intCast((hdr >> 16) & 0xFF);
-                    dst[sub_hdr_pos + 1] = @intCast((hdr >> 8) & 0xFF);
-                    dst[sub_hdr_pos + 2] = @intCast(hdr & 0xFF);
-                    pos = sub_payload_start + sub_len;
-                } else {
-                    // Backfill 3-byte sub-chunk header.
+                // ── Plain-Huffman trial encode (CheckPlainHuffman path) ──
+                // Port of StreamLzCompressor.CompressChunk line 920-942.
+                // For Fast with no tANS/Huffman, EncodeArrayU8 falls back to
+                // memcpy which always returns count+3 bytes (i.e., never
+                // beats raw), so plain_huff_cost is always invalidated.
+                // We still emit the same decision arm to stay byte-parity
+                // with C# in case the order of operations matters.
+                var plain_huff_cost: f32 = std.math.inf(f32);
+                if (check_plain_huffman) {
+                    plain_huff_cost = @min(sub_memset_cost, lz_cost);
+                    // EncodeArrayU8 memcpy returns count + 3. Check matches
+                    // C# `plainHuffN < 0 || plainHuffN >= roundBytes`.
+                    const plain_huff_n: usize = round_bytes + 3;
+                    if (plain_huff_n >= round_bytes) {
+                        plain_huff_cost = std.math.inf(f32);
+                    }
+                }
+
+                const lz_wins = !result.bail and
+                    lz_cost < sub_memset_cost and
+                    lz_cost <= plain_huff_cost and
+                    result.bytes_written > 0 and
+                    result.bytes_written < round_bytes;
+
+                if (lz_wins) {
+                    // LZ path: backfill 3-byte sub-chunk header.
                     const hdr: u32 = @as(u32, @intCast(result.bytes_written)) |
                         (@as(u32, @intFromEnum(result.chunk_type)) << lz_constants.sub_chunk_type_shift) |
                         lz_constants.chunk_header_compressed_flag;
@@ -308,51 +461,98 @@ pub fn compressFramed(
                     dst[sub_hdr_pos + 1] = @intCast((hdr >> 8) & 0xFF);
                     dst[sub_hdr_pos + 2] = @intCast(hdr & 0xFF);
                     pos = sub_payload_start + result.bytes_written;
+                    total_cost += lz_cost;
+                } else if (sub_memset_cost <= plain_huff_cost) {
+                    // Memset (uncompressed) path: 3-byte header with
+                    // compressed flag set, size = round_bytes, then raw
+                    // bytes verbatim. Rewind the LZ-written payload.
+                    pos = sub_hdr_pos;
+                    if (pos + 3 + round_bytes > dst.len) return error.DestinationTooSmall;
+                    const hdr: u32 = @as(u32, @intCast(round_bytes)) | lz_constants.chunk_header_compressed_flag;
+                    dst[pos + 0] = @intCast((hdr >> 16) & 0xFF);
+                    dst[pos + 1] = @intCast((hdr >> 8) & 0xFF);
+                    dst[pos + 2] = @intCast(hdr & 0xFF);
+                    @memcpy(dst[pos + 3 ..][0..round_bytes], sub_src);
+                    pos += 3 + round_bytes;
+                    total_cost += sub_memset_cost;
+                } else {
+                    // Plain-huffman won. Without a real Huffman encoder this
+                    // path is unreachable (plain_huff_cost is always ∞) but
+                    // kept for structural parity with C#.
+                    pos = sub_hdr_pos;
+                    if (pos + round_bytes + 3 > dst.len) return error.DestinationTooSmall;
+                    dst[pos + 0] = @intCast((round_bytes >> 16) & 0xFF);
+                    dst[pos + 1] = @intCast((round_bytes >> 8) & 0xFF);
+                    dst[pos + 2] = @intCast(round_bytes & 0xFF);
+                    @memcpy(dst[pos + 3 ..][0..round_bytes], sub_src);
+                    pos += round_bytes + 3;
+                    total_cost += plain_huff_cost;
                 }
-
-                sub_off += sub_len;
-            }
-
-            // Check that the compressed chunk actually beat uncompressed.
-            // If not, rewind and emit as uncompressed frame block.
-            compressed_payload_size = pos - chunk_payload_start;
-            // Chunk total = 4-byte chunk header + payload + the 2-byte internal block header.
-            const chunk_total_size: usize = 2 + 4 + compressed_payload_size;
-            if (chunk_total_size >= block_src_len) {
-                pos = block_start;
-                stored_uncompressed = true;
             } else {
-                // Backfill the 4-byte chunk header with (compressed_payload_size - 1).
-                const raw: u32 = @intCast(compressed_payload_size - 1);
-                std.mem.writeInt(u32, dst[chunk_hdr_pos..][0..4], raw, .little);
+                // round_bytes < 32: too small to compress. C# line 984-989.
+                if (pos + 3 + round_bytes > dst.len) return error.DestinationTooSmall;
+                const hdr: u32 = @as(u32, @intCast(round_bytes)) | lz_constants.chunk_header_compressed_flag;
+                dst[pos + 0] = @intCast((hdr >> 16) & 0xFF);
+                dst[pos + 1] = @intCast((hdr >> 8) & 0xFF);
+                dst[pos + 2] = @intCast(hdr & 0xFF);
+                @memcpy(dst[pos + 3 ..][0..round_bytes], sub_src);
+                pos += 3 + round_bytes;
+                total_cost += sub_memset_cost;
             }
-        } else {
-            stored_uncompressed = true;
+
+            sub_off += round_bytes;
         }
 
-        if (stored_uncompressed) {
-            // Uncompressed frame block: write the 8-byte block header with
-            // the uncompressed flag set and copy the bytes verbatim.
-            if (pos + block_src_len > dst.len) return error.DestinationTooSmall;
-            frame.writeBlockHeader(dst[block_hdr_pos..], .{
-                .compressed_size = @intCast(block_src_len),
-                .decompressed_size = @intCast(block_src_len),
-                .uncompressed = true,
-            });
-            @memcpy(dst[block_start..][0..block_src_len], src[src_off..][0..block_src_len]);
-            pos = block_start + block_src_len;
+        // ── Block-level cost decision ──────────────────────────────────
+        // Port of StreamLzCompressor.CompressOneBlock line 728. Rewrite
+        // the whole block as uncompressed if either the compressed chunk
+        // didn't shrink the payload OR its cost exceeded the block-level
+        // memset cost.
+        const chunk_compressed_size: usize = pos - chunk_payload_start;
+        const block_f: f32 = @floatFromInt(block_src_len);
+        const block_memset_cost: f32 =
+            (block_f * cost_coeffs.memset_per_byte + cost_coeffs.memset_base) *
+            speed_tradeoff +
+            block_f + 4.0; // +4 = ChunkHeaderSize
+        const should_bail = chunk_compressed_size >= block_src_len or total_cost > block_memset_cost;
+        if (should_bail) {
+            pos = block_start;
+            if (pos + 2 + block_src_len > dst.len) return error.DestinationTooSmall;
+            var unc_flags0: u8 = 0x05 | 0x80;
+            if (keyframe) unc_flags0 |= 0x40;
+            dst[pos] = unc_flags0;
+            dst[pos + 1] = @intFromEnum(block_header.CodecType.fast);
+            pos += 2;
+            @memcpy(dst[pos..][0..block_src_len], block_src);
+            pos += block_src_len;
         } else {
-            // Compressed: write the final 8-byte block header now that we know
-            // compressed_size.
-            const compressed_block_size: usize = pos - block_start;
-            frame.writeBlockHeader(dst[block_hdr_pos..], .{
-                .compressed_size = @intCast(compressed_block_size),
-                .decompressed_size = @intCast(block_src_len),
-                .uncompressed = false,
-            });
+            const raw: u32 = @intCast(chunk_compressed_size - 1);
+            std.mem.writeInt(u32, dst[chunk_hdr_pos..][0..4], raw, .little);
         }
 
         src_off += block_src_len;
+    }
+
+    // Frame block fallback: if compressed total didn't beat uncompressed
+    // (or input too small), rewrite the frame block as one uncompressed
+    // frame block (matching C# StreamLzFrameCompressor.Compress).
+    const frame_block_compressed_size = pos - frame_block_start;
+    if (!can_compress or frame_block_compressed_size >= src.len) {
+        pos = frame_block_start;
+        if (pos + src.len > dst.len) return error.DestinationTooSmall;
+        frame.writeBlockHeader(dst[frame_block_hdr_pos..], .{
+            .compressed_size = @intCast(src.len),
+            .decompressed_size = @intCast(src.len),
+            .uncompressed = true,
+        });
+        @memcpy(dst[pos..][0..src.len], src);
+        pos += src.len;
+    } else {
+        frame.writeBlockHeader(dst[frame_block_hdr_pos..], .{
+            .compressed_size = @intCast(frame_block_compressed_size),
+            .decompressed_size = @intCast(src.len),
+            .uncompressed = false,
+        });
     }
 
     // ── End mark ───────────────────────────────────────────────────────
