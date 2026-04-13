@@ -472,7 +472,7 @@ pub fn optimal(
         min_match_length = @intCast(@max(opts.min_match_length, 3));
     }
 
-    const outer_loop_index: u32 = 0;
+    var outer_loop_index_mut: u32 = 0;
     // NOTE: C# tracks a separate scratch area for stats from the previous
     // chunk (`lzcoder.SymbolStatisticsScratch`). Zig's per-call context is
     // stateless, so we track it locally here — matches the C# semantics
@@ -908,16 +908,172 @@ pub fn optimal(
                 pos += 1;
             }
 
-            // Backtrace + best-final selection would go here. Given the
-            // size of this port, the full back-extraction + stats update
-            // + outer-loop iteration is left for a focused follow-up;
-            // the compile-clean DP scaffold lets the High wiring (step
-            // 34 / D9) treat `optimal` as present-but-bailing.
-            return error.BailOut;
+            // ── Best-final selection (reached end of chunk/block) ──
+            var last_state_index: usize = state_width * max_offset;
+            const reached_end: bool = max_offset >= src_len_usize - 18;
+            var final_lz_offset: usize = max_offset;
+
+            if (reached_end) {
+                var best_bits: i32 = std.math.maxInt(i32);
+                if (state_width == 1) {
+                    var final_offs: usize = @max(chunk_start, if (prev_offset >= 8) prev_offset - 8 else 0);
+                    while (final_offs < src_len_usize) : (final_offs += 1) {
+                        const bits = states[final_offs].best_bit_count;
+                        if (bits == std.math.maxInt(i32)) continue;
+                        const extra: i32 = @intCast(high_cost_model.bitsForLiterals(
+                            source,
+                            final_offs,
+                            src_len_usize - final_offs,
+                            states[final_offs].recent_offs0,
+                            &cost_model,
+                        ));
+                        const total = bits + extra;
+                        if (total < best_bits) {
+                            best_bits = total;
+                            final_lz_offset = final_offs;
+                            last_state_index = final_offs;
+                        }
+                    }
+                } else {
+                    var final_offs: usize = @max(chunk_start, if (max_offset >= 8) max_offset - 8 else 0);
+                    while (final_offs < src_len_usize) : (final_offs += 1) {
+                        var idx: usize = 0;
+                        while (idx < state_width) : (idx += 1) {
+                            const bits = states[state_width * final_offs + idx].best_bit_count;
+                            if (bits == std.math.maxInt(i32)) continue;
+                            const litidx: usize = if (idx == state_width - 1)
+                                (if (lit_indexes) |li| @intCast(li[final_offs]) else 0)
+                            else
+                                idx;
+                            if (final_offs < litidx) continue;
+                            const offs: usize = final_offs - litidx;
+                            if (offs < chunk_start) continue;
+                            const extra: i32 = @intCast(high_cost_model.bitsForLiterals(
+                                source,
+                                final_offs,
+                                src_len_usize - final_offs,
+                                states[state_width * final_offs + idx].recent_offs0,
+                                &cost_model,
+                            ));
+                            const total = bits + extra;
+                            if (total < best_bits) {
+                                best_bits = total;
+                                final_lz_offset = offs;
+                                last_state_index = state_width * final_offs + idx;
+                            }
+                        }
+                    }
+                }
+                max_offset = final_lz_offset;
+            }
+
+            // ── Phase 2: Backward token extraction ──
+            var out_offs: usize = max_offset;
+            var num_tokens: usize = 0;
+            var state_cur_idx: usize = last_state_index;
+
+            while (out_offs != chunk_start) {
+                const state_cur = &states[state_cur_idx];
+                const qrm: u32 = @bitCast(state_cur.quick_recent_match_len_lit_len);
+                if (qrm != 0) {
+                    const extra_ml: usize = qrm >> 8;
+                    const extra_lit: usize = qrm & 0xFF;
+                    out_offs -= extra_ml + extra_lit;
+                    if (num_tokens < tokens_capacity) {
+                        tokens_begin[num_tokens] = .{
+                            .recent_offset0 = state_cur.recent_offs0,
+                            .offset = 0,
+                            .match_len = @intCast(extra_ml),
+                            .lit_len = @intCast(extra_lit),
+                        };
+                        num_tokens += 1;
+                    }
+                }
+                const lit_len_sub: usize = @intCast(state_cur.lit_len);
+                const match_len_sub: usize = @intCast(state_cur.match_len);
+                if (out_offs < lit_len_sub + match_len_sub) break;
+                out_offs -= lit_len_sub + match_len_sub;
+                const prev_idx: usize = @intCast(state_cur.prev_state);
+                const state_prev = &states[prev_idx];
+                const recent0: i32 = state_cur.recent_offs0;
+                const recent_index_opt = high_matcher.getRecentOffsetIndex(state_prev, recent0);
+                const off_field: i32 = if (recent_index_opt) |ri| -@as(i32, ri) else recent0;
+                if (num_tokens < tokens_capacity) {
+                    tokens_begin[num_tokens] = .{
+                        .recent_offset0 = state_prev.recent_offs0,
+                        .lit_len = state_cur.lit_len,
+                        .match_len = state_cur.match_len,
+                        .offset = off_field,
+                    };
+                    num_tokens += 1;
+                }
+                state_cur_idx = prev_idx;
+            }
+
+            // Reverse the backward-walked token list in place.
+            if (num_tokens > 1) {
+                var lo: usize = 0;
+                var hi: usize = num_tokens - 1;
+                while (lo < hi) : ({
+                    lo += 1;
+                    hi -= 1;
+                }) {
+                    const tmp = tokens_begin[lo];
+                    tokens_begin[lo] = tokens_begin[hi];
+                    tokens_begin[hi] = tmp;
+                }
+            }
+
+            // Append this chunk's tokens to the full lz_token_array.
+            if (lz_token_array.size + num_tokens > lz_token_array.capacity) {
+                return error.BailOut;
+            }
+            @memcpy(
+                lz_tokens[lz_token_array.size .. lz_token_array.size + num_tokens],
+                tokens_begin[0..num_tokens],
+            );
+            lz_token_array.size += num_tokens;
+
+            if (reached_end) break;
+
+            // ── Phase 3: Stats update ──
+            high_cost_model.updateStats(&stats, source, chunk_start, tokens_begin[0..num_tokens]);
+            high_cost_model.makeCostModel(&stats, &cost_model);
+            chunk_start = max_offset;
         }
 
-        _ = outer_loop_index;
-        break;
+        // ── Encode the full accumulated token array ──
+        cost = std.math.inf(f32);
+        var tmp_ct: i32 = -1;
+        const n_enc = high_encoder.encodeTokenArray(
+            ctx,
+            source,
+            src_size,
+            tmp_dst_buf.ptr,
+            tmp_dst_buf[tmp_dst_buf.len..].ptr,
+            start_pos,
+            lz_tokens[0..lz_token_array.size],
+            &stats,
+            &cost,
+            &tmp_ct,
+        ) catch {
+            // Encode failure — keep whatever bestLength we already have.
+            break;
+        };
+        if (cost >= best_cost) break;
+
+        chunk_type_out.* = tmp_ct;
+        best_cost = cost;
+        best_length = n_enc;
+        if (n_enc > tmp_dst_size) return error.BailOut;
+        @memcpy(dst[0..n_enc], tmp_dst_buf[0..n_enc]);
+
+        // Outer loop: for L8+, when the chosen chunk type disagrees with
+        // the cost model's expected chunk type, re-run once with fresh
+        // stats (last_chunk_type = -1). Otherwise break.
+        if (ctx.compression_level < 8 or outer_loop_index_mut != 0 or cost_model.chunk_type == tmp_ct) break;
+
+        outer_loop_index_mut = 1;
     }
 
     cost_out.* = best_cost;

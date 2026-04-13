@@ -584,6 +584,70 @@ pub fn assembleCompressedOutput(
 }
 
 // ────────────────────────────────────────────────────────────
+//  Encode a pre-parsed token array
+// ────────────────────────────────────────────────────────────
+
+/// Encodes a pre-parsed token array into `dst`. Walks the tokens in
+/// order, calls `addToken` for each (with do_recent = do_subtract =
+/// true), then `addFinalLiterals`, then `assembleCompressedOutput`.
+///
+/// Port of C# `EncodeTokenArray` (`Encoder.cs:440-471`). The optimal
+/// parser uses this to emit its final token sequence after the DP
+/// phases complete.
+pub fn encodeTokenArray(
+    ctx: *const HighEncoderContext,
+    source: [*]const u8,
+    source_length: i32,
+    dst: [*]u8,
+    dst_end: [*]u8,
+    start_pos: i32,
+    tokens: []const Token,
+    stats: ?*Stats,
+    cost_out: *f32,
+    chunk_type_out: *i32,
+) !usize {
+    cost_out.* = std.math.inf(f32);
+    const src_end: [*]const u8 = source + @as(usize, @intCast(source_length));
+
+    if (tokens.len == 0) return @intCast(source_length);
+
+    var recent = HighRecentOffs.create();
+    var writer: HighStreamWriter = undefined;
+    var storage: HighWriterStorage = undefined;
+    try initializeStreamWriter(&writer, &storage, ctx.allocator, source_length, source, @intCast(ctx.encode_flags));
+    defer storage.deinit();
+
+    var cur_src: [*]const u8 = source;
+    if (start_pos == 0) cur_src += 8;
+
+    for (tokens) |tok| {
+        addToken(
+            &writer,
+            &recent,
+            cur_src,
+            @intCast(tok.lit_len),
+            tok.match_len,
+            tok.offset,
+            true, // do_recent
+            true, // do_subtract
+        );
+        cur_src += @as(usize, @intCast(tok.lit_len)) + @as(usize, @intCast(tok.match_len));
+    }
+    addFinalLiterals(&writer, cur_src, src_end, true);
+
+    return try assembleCompressedOutput(
+        ctx,
+        &writer,
+        stats,
+        dst,
+        dst_end,
+        start_pos,
+        cost_out,
+        chunk_type_out,
+    );
+}
+
+// ────────────────────────────────────────────────────────────
 //  Tests
 // ────────────────────────────────────────────────────────────
 
