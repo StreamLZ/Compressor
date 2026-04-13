@@ -38,7 +38,13 @@ inline fn inRange(a: u8, lo: u8, hi: u8) bool {
     return @as(u8, a -% lo) <= @as(u8, hi -% lo);
 }
 
-fn isBlockProbablyText(block: []const u8) bool {
+/// Classifies a single ≥32-byte block as probably-text. Port of C#
+/// `TextDetector.IsBlockProbablyText` (`TextDetector.cs:47-162`).
+///
+/// Exposed publicly so the High codec (step 29+) can call it directly
+/// on arbitrary window regions without forcing the full `isProbablyText`
+/// sampling pattern.
+pub fn isBlockProbablyText(block: []const u8) bool {
     const min_printable: u8 = 9;
     const max_ascii: u8 = 0x7E;
     const cont_lo: u8 = 0x80;

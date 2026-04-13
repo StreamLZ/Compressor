@@ -48,6 +48,51 @@ pub const single_huffman_per_item: f32 = 3.12304;
 /// Single-Huffman decode overhead: per-symbol.
 pub const single_huffman_per_symbol: f32 = 25.279;
 
+// ── Length encoding timing ───────────────────────────────────────────
+pub const length_u8_per_item: f32 = 0.756596;
+pub const length_base: f32 = 36.9445;
+pub const length_u32_per_item: f32 = 33.0755;
+
+// ── High write-bits timing models ────────────────────────────────────
+pub const high_write_bits_base: f32 = 187.647;
+pub const high_write_bits_per_src_byte: f32 = 0.437702;
+pub const high_write_bits_per_token: f32 = 18.6782;
+pub const high_write_bits_per_lrl: f32 = 11.1832;
+
+// ── Token and literal mode costs ─────────────────────────────────────
+pub const token_encoding_per_token: f32 = 2.75565;
+pub const multi_array_overhead: f32 = 5299.54;
+pub const lit_sub_time_cost: f32 = 0.19282;
+pub const lam_sub_time_cost: f32 = 0.815096;
+pub const lit_sub3_time_cost: f32 = 2.24116;
+pub const lit_subf_time_cost: f32 = 6.19838;
+pub const o1_time_cost: f32 = 10.1537;
+
+// ── Literal subtraction cost (High-only) ─────────────────────────────
+pub const high_lit_sub_extra_cost_per_lit: f32 = 0.310262;
+
+// ── tANS encoding cost model ─────────────────────────────────────────
+pub const tans_base: f32 = 1015.7;
+pub const tans_per_src_byte: f32 = 2.93114;
+pub const tans_per_used_symbol: f32 = 73.1277;
+pub const tans_per_table_entry: f32 = 1.65052;
+
+// ── Multi-array encoding cost ────────────────────────────────────────
+pub const multi_array_per_index: f32 = 78.1526;
+pub const multi_array_per_input_byte: f32 = 0.306832;
+pub const multi_array_single_huffman_approx: f32 = 42.3518;
+pub const multi_array_incompressible_threshold: u16 = 2011;
+
+// ── Speed tradeoff scaling (High-only extras) ────────────────────────
+pub const speed_tradeoff_factor_1: f32 = 0.0036609;
+pub const speed_tradeoff_factor_2: f32 = 0.0095397;
+
+// ── Cost conversion factor ───────────────────────────────────────────
+pub const cost_to_bits_factor: f32 = 0.130525;
+
+// ── Multi-array base cost factor ─────────────────────────────────────
+pub const multi_array_base_cost_factor: f32 = 54.234;
+
 /// Scaling applied to `CompressOptions.SpaceSpeedTradeoffBytes` in
 /// `Fast.Compressor.SetupEncoder` — `1 / 256` so the default `256` yields
 /// a multiplicative factor of 1.

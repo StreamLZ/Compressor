@@ -572,6 +572,8 @@ test {
     _ = @import("encode/fast_stream_writer.zig");
     _ = @import("encode/fast_token_writer.zig");
     _ = @import("encode/fast_lz_parser.zig");
+    _ = @import("encode/match_eval.zig");
+    _ = @import("encode/block_header_writer.zig");
     _ = @import("encode/fast_lz_encoder.zig");
     _ = @import("encode/streamlz_encoder.zig");
     _ = @import("encode/encode_fixture_tests.zig");
