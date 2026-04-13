@@ -20,6 +20,34 @@ pub const memset_per_byte: f32 = 0.161208;
 /// Memset-encoding decode cost base (per block).
 pub const memset_base: f32 = 56.6145;
 
+// ── Offset encoding timing (used by OffsetEncoder / step 17 — H8/H9) ──
+// All values are the C# `CostCoefficients.Current.*` defaults from
+// `CostCoefficients.cs:21-30`. Exact numeric parity is required because
+// these coefficients drive the LZ-vs-entropy cost decisions that pick
+// the final encoding type.
+
+/// Type-0 (legacy) offset decode: per-item cost.
+pub const offset_type0_per_item: f32 = 8.85935;
+/// Type-0 (legacy) offset decode: base cost.
+pub const offset_type0_base: f32 = 44.0563;
+
+/// Type-1 (modular) offset decode: per-item cost.
+pub const offset_type1_per_item: f32 = 6.75172;
+/// Type-1 (modular) offset decode: base cost.
+pub const offset_type1_base: f32 = 76.0104;
+
+/// Modular-coded offset overhead: per-item cost.
+pub const offset_modular_per_item: f32 = 0.978096;
+/// Modular-coded offset overhead: base cost.
+pub const offset_modular_base: f32 = 52.0707;
+
+/// Single-Huffman decode overhead base.
+pub const single_huffman_base: f32 = 2149.44;
+/// Single-Huffman decode overhead: per-item.
+pub const single_huffman_per_item: f32 = 3.12304;
+/// Single-Huffman decode overhead: per-symbol.
+pub const single_huffman_per_symbol: f32 = 25.279;
+
 /// Scaling applied to `CompressOptions.SpaceSpeedTradeoffBytes` in
 /// `Fast.Compressor.SetupEncoder` — `1 / 256` so the default `256` yields
 /// a multiplicative factor of 1.
