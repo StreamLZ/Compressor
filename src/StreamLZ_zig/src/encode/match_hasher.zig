@@ -192,6 +192,17 @@ pub fn MatchHasher(comptime num_hash: u32, comptime dual_hash: bool) type {
             }
         }
 
+        /// Explicit dual-index insert — takes a pre-computed hash value
+        /// plus two bucket indices and writes to both (when `dual_hash`
+        /// is true). Port of C# `MatchHasherBase.Insert(int idx1, int
+        /// idx2, uint he)` at `MatchHasher.cs:287-294`. Used by
+        /// `FindMatchesHashBased` so the hash value can be composed
+        /// inline via `makeHashValue`.
+        pub inline fn insertAtDual(self: *Self, idx1: u32, idx2: u32, hval: u32) void {
+            self.insertAtIndex(idx1, hval);
+            if (dual_hash) self.insertAtIndex(idx2, hval);
+        }
+
         /// Bucket ring-buffer insert — shift entries `[0..num_hash-1]` to
         /// `[1..num_hash]` then write `hval` at `index`.
         pub inline fn insertAtIndex(self: *Self, index: u32, hval: u32) void {

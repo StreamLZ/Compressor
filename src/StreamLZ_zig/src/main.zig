@@ -575,6 +575,7 @@ test {
     _ = @import("encode/match_eval.zig");
     _ = @import("encode/block_header_writer.zig");
     _ = @import("encode/managed_match_len_storage.zig");
+    _ = @import("encode/match_finder.zig");
     _ = @import("encode/fast_lz_encoder.zig");
     _ = @import("encode/streamlz_encoder.zig");
     _ = @import("encode/encode_fixture_tests.zig");

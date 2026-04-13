@@ -216,21 +216,32 @@ pub fn removeIdentical(matches: []LengthAndOffset, count_in: usize) usize {
 /// Reads a variable-length integer from the MLS byte buffer. Port of
 /// C# `MatchFinder.ExtractFromMlsInner` (`MatchFinder.cs:522-541`).
 /// Returns `error.Truncated` on underflow, otherwise the decoded value.
+///
+/// All arithmetic is done via wrapping `u32` ops then bitcast back to
+/// `i32`, matching C# `int` semantics (C# silently wraps on overflow;
+/// Zig's signed ops would panic on `-ftrap-integer-overflow`).
 inline fn extractFromMlsInner(
     src: []const u8,
     pos_in_out: *usize,
     src_end: usize,
     a: u5,
 ) !i32 {
-    var sum: i32 = 0;
-    var bitpos: u5 = 0;
+    var sum: u32 = 0;
+    // bitpos can grow past 32 for garbage inputs; bail out rather than
+    // shifting by >= bit-width of u32 (Zig UB). Valid streams produce
+    // at most ~4 iterations for an 18-bit value with a=3 or a=7.
+    var bitpos: u32 = 0;
     while (true) {
         if (pos_in_out.* >= src_end) return error.Truncated;
-        const byte_val: i32 = src[pos_in_out.*];
+        if (bitpos >= 32) return error.Truncated;
+        const byte_val: u32 = src[pos_in_out.*];
         pos_in_out.* += 1;
-        const t: i32 = byte_val - (@as(i32, 1) << a);
-        if (t >= 0) return sum + (t << bitpos);
-        sum += (t + 256) << bitpos;
+        const t: i32 = @as(i32, @intCast(byte_val)) - (@as(i32, 1) << a);
+        const bitpos_u5: u5 = @intCast(bitpos);
+        if (t >= 0) {
+            return @bitCast(sum +% (@as(u32, @intCast(t)) << bitpos_u5));
+        }
+        sum +%= (@as(u32, @bitCast(t)) +% 256) << bitpos_u5;
         bitpos += a;
     }
 }
@@ -250,7 +261,9 @@ pub fn extractLengthFromMls(
     const t: i32 = byte_val - (@as(i32, 1) << a);
     if (t < 0) {
         const inner = try extractFromMlsInner(src, pos_in_out, src_end, b);
-        return t + (inner << a) + 256;
+        const inner_shifted: u32 = @as(u32, @bitCast(inner)) << a;
+        const result: u32 = @as(u32, @bitCast(t)) +% inner_shifted +% 256;
+        return @bitCast(result);
     }
     return t;
 }
@@ -269,7 +282,9 @@ pub fn extractOffsetFromMls(
     pos_in_out.* += 2;
     if (t < 0) {
         const inner = try extractFromMlsInner(src, pos_in_out, src_end, b);
-        return t + (inner << a) + 65536;
+        const inner_shifted: u32 = @as(u32, @bitCast(inner)) << a;
+        const result: u32 = @as(u32, @bitCast(t)) +% inner_shifted +% 65536;
+        return @bitCast(result);
     }
     return t;
 }
