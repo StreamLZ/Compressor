@@ -87,6 +87,49 @@ pub fn decompressFramed(src: []const u8, dst: []u8) DecompressError!usize {
     return dst_off;
 }
 
+/// Decompresses a raw StreamLZ block (no SLZ1 frame wrapper) into `dst[0..decompressed_size]`.
+///
+/// Port of C# `StreamLZDecoder.Decompress(src, srcLen, dst, dstLen)` at
+/// `StreamLzDecoder.cs:376-379`. `src` is a raw compressed block — a
+/// sequence of internal 2-byte block headers + 4-byte chunk headers +
+/// chunk payloads (no frame header, no end mark). `dst.len` must be at
+/// least `decompressed_size + safe_space`.
+///
+/// Returns the number of bytes decompressed (equal to `decompressed_size`
+/// on success).
+pub fn decompressBlock(
+    src: []const u8,
+    dst: []u8,
+    decompressed_size: usize,
+) DecompressError!usize {
+    return decompressBlockWithDict(src, dst, 0, decompressed_size);
+}
+
+/// Decompresses a raw StreamLZ block into `dst[dst_offset..dst_offset + decompressed_size]`,
+/// with `dst[0..dst_offset]` treated as a pre-populated dictionary window.
+///
+/// Port of C# `StreamLZDecoder.Decompress(src, srcLen, dst, dstLen, dstOffset)`
+/// at `StreamLzDecoder.cs:392-417` and `SerialDecodeLoopWithOffset` at
+/// `StreamLzDecoder.cs:438-469`. LZ back-references in the compressed
+/// stream can reach into the dictionary bytes at `dst[0..dst_offset]`.
+///
+/// `dst.len` must be at least `dst_offset + decompressed_size + safe_space`.
+/// Returns the number of bytes decompressed (NOT including the dictionary).
+pub fn decompressBlockWithDict(
+    src: []const u8,
+    dst: []u8,
+    dst_offset: usize,
+    decompressed_size: usize,
+) DecompressError!usize {
+    if (decompressed_size == 0) return 0;
+    if (dst_offset + decompressed_size + safe_space > dst.len) return error.OutputTooSmall;
+
+    var scratch: [constants.scratch_size]u8 = undefined;
+    var dst_off: usize = dst_offset;
+    try decompressCompressedBlock(src, dst, &dst_off, decompressed_size, &scratch);
+    return dst_off - dst_offset;
+}
+
 /// Walks 256 KB chunks inside a single compressed frame block. Parses the
 /// internal 2-byte block header at every 256 KB boundary and the 4-byte
 /// chunk header before each chunk's payload, dispatching to the codec.
@@ -300,4 +343,103 @@ test "decompressFramed rejects bad magic" {
     const junk = [_]u8{ 'N', 'O', 'P', 'E', 1, 0, 0, 1, 2, 0 };
     var out: [32]u8 = undefined;
     try testing.expectError(error.BadFrame, decompressFramed(&junk, &out));
+}
+
+test "decompressBlock roundtrips a raw compressed block (no frame wrapper)" {
+    // Build a compressible payload large enough to clear min_source_length (128).
+    var payload: [512]u8 = undefined;
+    for (&payload, 0..) |*b, i| b.* = @intCast((i * 37) & 0xFF);
+    // Inject a repeated region so the LZ parser has something to find.
+    @memcpy(payload[100..164], payload[0..64]);
+    @memcpy(payload[300..364], payload[0..64]);
+
+    const allocator = testing.allocator;
+    const encoder = @import("../encode/streamlz_encoder.zig");
+
+    // Compress via the framed API, then strip the SLZ1 frame header + 8-byte
+    // outer block header to get the raw inner compressed block that
+    // `decompressBlock` expects.
+    var framed: [1024]u8 = undefined;
+    const framed_len = try encoder.compressFramed(allocator, &payload, &framed, .{ .level = 1 });
+
+    const hdr = try frame.parseHeader(framed[0..framed_len]);
+    const bh = try frame.parseBlockHeader(framed[hdr.header_size..]);
+    // Only validate the roundtrip when the encoder chose the compressed path.
+    // For very short inputs the frame block may come back uncompressed.
+    if (bh.uncompressed) return;
+    const inner_start = hdr.header_size + 8;
+    const inner = framed[inner_start .. inner_start + bh.compressed_size];
+
+    var out: [1024]u8 = @splat(0);
+    const written = try decompressBlock(inner, &out, payload.len);
+    try testing.expectEqual(payload.len, written);
+    try testing.expectEqualSlices(u8, &payload, out[0..payload.len]);
+}
+
+test "decompressBlockWithDict writes output at dst_offset for an uncompressed block" {
+    // Hand-craft a minimal uncompressed internal block:
+    //   byte 0: magic 0x5 | uncompressed flag 0x80
+    //   byte 1: decoder type 0x01 (fast)
+    //   bytes 2..N: raw payload
+    // No SLZ1 frame wrapper, no outer 8-byte block header — exactly what
+    // `decompressBlock` expects as input.
+    //
+    // The uncompressed path doesn't depend on `base_offset == 0` for an
+    // initial Copy64, so it exercises the dst_offset plumbing cleanly. The
+    // compressed path needs encoder-side dictionary support (D11) to test
+    // end-to-end with dst_offset != 0.
+    const payload_len: usize = 64;
+    var block: [2 + payload_len]u8 = undefined;
+    block[0] = 0x05 | 0x80; // magic nibble + uncompressed flag
+    block[1] = 0x01; // decoder = fast
+    for (block[2..], 0..) |*b, i| b.* = @intCast(i);
+
+    const dict_len: usize = 100;
+    var out: [256]u8 = @splat(0xAA);
+    const written = try decompressBlockWithDict(&block, &out, dict_len, payload_len);
+    try testing.expectEqual(payload_len, written);
+    // Dictionary prefix untouched.
+    for (out[0..dict_len]) |b| try testing.expectEqual(@as(u8, 0xAA), b);
+    // Decoded bytes land at dst[dict_len..dict_len + payload_len].
+    for (out[dict_len .. dict_len + payload_len], 0..) |b, i| {
+        try testing.expectEqual(@as(u8, @intCast(i)), b);
+    }
+    // Post-output trailing bytes untouched (except safe_space slack).
+    for (out[dict_len + payload_len + safe_space ..]) |b| {
+        try testing.expectEqual(@as(u8, 0xAA), b);
+    }
+}
+
+test "decompressBlockWithDict matches decompressBlock when dst_offset == 0" {
+    // Equivalence check: `decompressBlockWithDict(..., 0, ...)` must produce
+    // identical output to `decompressBlock(..., ...)` on the same input.
+    var payload: [384]u8 = undefined;
+    for (&payload, 0..) |*b, i| b.* = @intCast((i * 17) & 0xFF);
+    @memcpy(payload[128..192], payload[0..64]);
+
+    const allocator = testing.allocator;
+    const encoder = @import("../encode/streamlz_encoder.zig");
+
+    var framed: [1024]u8 = undefined;
+    const framed_len = try encoder.compressFramed(allocator, &payload, &framed, .{ .level = 1 });
+
+    const hdr = try frame.parseHeader(framed[0..framed_len]);
+    const bh = try frame.parseBlockHeader(framed[hdr.header_size..]);
+    if (bh.uncompressed) return;
+    const inner_start = hdr.header_size + 8;
+    const inner = framed[inner_start .. inner_start + bh.compressed_size];
+
+    var out_a: [1024]u8 = @splat(0);
+    var out_b: [1024]u8 = @splat(0);
+    const n_a = try decompressBlock(inner, &out_a, payload.len);
+    const n_b = try decompressBlockWithDict(inner, &out_b, 0, payload.len);
+    try testing.expectEqual(n_a, n_b);
+    try testing.expectEqualSlices(u8, out_a[0..n_a], out_b[0..n_b]);
+    try testing.expectEqualSlices(u8, &payload, out_a[0..payload.len]);
+}
+
+test "decompressBlock rejects undersized output buffer" {
+    const dummy_src = [_]u8{ 0x05, 0x01, 0x00, 0x00, 0x00, 0x00 };
+    var out: [16]u8 = undefined;
+    try testing.expectError(error.OutputTooSmall, decompressBlock(&dummy_src, &out, 1024));
 }

@@ -237,7 +237,7 @@ pub fn readLzTable(
     {
         const src_left: usize = @intFromPtr(src_end) - @intFromPtr(src);
         const cap: usize = @intCast(@min(@as(i64, @intCast(@intFromPtr(scratch_end) - @intFromPtr(scratch))), dst_size));
-        const res = try entropy.highDecodeBytes(scratch, cap, src[0..src_left], false);
+        const res = try entropy.highDecodeBytes(scratch, cap, src[0..src_left], false, scratch, scratch_end);
         src += res.bytes_consumed;
         lz.lit_stream = res.out_ptr;
         lz.lit_stream_size = @intCast(res.decoded_size);
@@ -248,7 +248,7 @@ pub fn readLzTable(
     {
         const src_left: usize = @intFromPtr(src_end) - @intFromPtr(src);
         const cap: usize = @intCast(@min(@as(i64, @intCast(@intFromPtr(scratch_end) - @intFromPtr(scratch))), dst_size));
-        const res = try entropy.highDecodeBytes(scratch, cap, src[0..src_left], false);
+        const res = try entropy.highDecodeBytes(scratch, cap, src[0..src_left], false, scratch, scratch_end);
         src += res.bytes_consumed;
         lz.cmd_stream = res.out_ptr;
         lz.cmd_stream_size = @intCast(res.decoded_size);
@@ -269,7 +269,7 @@ pub fn readLzTable(
         const offs_slot: [*]u8 = scratch;
         const src_left: usize = @intFromPtr(src_end) - @intFromPtr(src);
         const cap_o: usize = @intCast(@min(@as(i64, @intCast(@intFromPtr(scratch_end) - @intFromPtr(scratch))), @as(i64, lz.cmd_stream_size)));
-        const res = try entropy.highDecodeBytes(offs_slot, cap_o, src[0..src_left], false);
+        const res = try entropy.highDecodeBytes(offs_slot, cap_o, src[0..src_left], false, scratch, scratch_end);
         src += res.bytes_consumed;
         packed_offs_stream = res.out_ptr;
         packed_offs_stream_size = @intCast(res.decoded_size);
@@ -278,7 +278,7 @@ pub fn readLzTable(
         if (offs_scaling != 1) {
             const src_left2: usize = @intFromPtr(src_end) - @intFromPtr(src);
             const cap_e: usize = @intCast(@min(@as(i64, @intCast(@intFromPtr(scratch_end) - @intFromPtr(scratch))), @as(i64, packed_offs_stream_size)));
-            const res2 = try entropy.highDecodeBytes(scratch, cap_e, src[0..src_left2], false);
+            const res2 = try entropy.highDecodeBytes(scratch, cap_e, src[0..src_left2], false, scratch, scratch_end);
             if (res2.decoded_size != packed_offs_stream_size) return error.StreamMismatch;
             src += res2.bytes_consumed;
             packed_offs_stream_extra = res2.out_ptr;
@@ -288,7 +288,7 @@ pub fn readLzTable(
         const offs_slot: [*]u8 = scratch;
         const src_left: usize = @intFromPtr(src_end) - @intFromPtr(src);
         const cap_o: usize = @intCast(@min(@as(i64, @intCast(@intFromPtr(scratch_end) - @intFromPtr(scratch))), @as(i64, lz.cmd_stream_size)));
-        const res = try entropy.highDecodeBytes(offs_slot, cap_o, src[0..src_left], false);
+        const res = try entropy.highDecodeBytes(offs_slot, cap_o, src[0..src_left], false, scratch, scratch_end);
         src += res.bytes_consumed;
         packed_offs_stream = res.out_ptr;
         packed_offs_stream_size = @intCast(res.decoded_size);
@@ -301,7 +301,7 @@ pub fn readLzTable(
     {
         const src_left: usize = @intFromPtr(src_end) - @intFromPtr(src);
         const cap: usize = @intCast(@min(@as(i64, @intCast(@intFromPtr(scratch_end) - @intFromPtr(scratch))), dst_size >> 2));
-        const res = try entropy.highDecodeBytes(scratch, cap, src[0..src_left], false);
+        const res = try entropy.highDecodeBytes(scratch, cap, src[0..src_left], false, scratch, scratch_end);
         src += res.bytes_consumed;
         packed_len_stream = res.out_ptr;
         packed_len_stream_size = @intCast(res.decoded_size);
@@ -372,7 +372,7 @@ pub fn decodeChunk(
         if ((chunkhdr & constants.chunk_header_compressed_flag) == 0) {
             // Stored as entropy without LZ.
             const src_left: usize = @intFromPtr(src_end) - @intFromPtr(src);
-            const res = try entropy.highDecodeBytes(dst, dst_count, src[0..src_left], false);
+            const res = try entropy.highDecodeBytes(dst, dst_count, src[0..src_left], false, scratch, scratch_end);
             if (res.decoded_size != dst_count) return error.OutputTruncated;
             if (@intFromPtr(res.out_ptr) != @intFromPtr(dst)) {
                 @memcpy(dst[0..dst_count], res.out_ptr[0..dst_count]);

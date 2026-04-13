@@ -201,7 +201,8 @@ test "encodeArrayU8Memcpy + decoder roundtrip" {
     try testing.expect(n == src.len + 3);
 
     var decoded: [128]u8 = @splat(0);
-    const res = try entropy_dec.highDecodeBytes(&decoded, decoded.len, dst[0..n], false);
+    var scratch: [4096]u8 = undefined;
+    const res = try entropy_dec.highDecodeBytes(&decoded, decoded.len, dst[0..n], false, &scratch, scratch[scratch.len..].ptr);
     try testing.expectEqual(src.len, res.decoded_size);
     try testing.expectEqualSlices(u8, src, res.out_ptr[0..res.decoded_size]);
 }
@@ -227,7 +228,8 @@ test "encodeArrayU8 with tANS picks compressed path for compressible data" {
 
     // Decode back.
     var decoded: [2048]u8 = @splat(0);
-    const res = try entropy_dec.highDecodeBytes(&decoded, decoded.len, dst[0..n], false);
+    var scratch: [65536]u8 = undefined;
+    const res = try entropy_dec.highDecodeBytes(&decoded, decoded.len, dst[0..n], false, &scratch, scratch[scratch.len..].ptr);
     try testing.expectEqual(src.len, res.decoded_size);
     try testing.expectEqualSlices(u8, &src, res.out_ptr[0..src.len]);
 }

@@ -43,16 +43,23 @@ pub const DecodeResult = struct {
 };
 
 /// Decode an entropy block starting at `src[0]`.
-/// `dst_buf` is the caller's scratch target; the decoder writes at most
+/// `dst_buf` is the caller's output target; the decoder writes at most
 /// `output_capacity` bytes there. When `force_memmove=true`, Type 0 copies
 /// into `dst_buf`; otherwise the returned `out_ptr` may point into `src`.
+/// `scratch` / `scratch_end` is the workspace for sub-decoders (tANS LUT,
+/// RLE command expansion, recursive sub-block intermediate buffers).
+/// When `dst_buf` aliases `scratch`, the internal code advances scratch
+/// past `dst_size` before handing it to sub-decoders — matching the C#
+/// `dst == scratch` alias check in `EntropyDecoder.High_DecodeBytesInternal`.
 pub fn highDecodeBytes(
     dst_buf: [*]u8,
     output_capacity: usize,
     src_buf: []const u8,
     force_memmove: bool,
+    scratch: [*]u8,
+    scratch_end: [*]u8,
 ) DecodeError!DecodeResult {
-    return highDecodeBytesInternal(dst_buf, output_capacity, src_buf, force_memmove, 16);
+    return highDecodeBytesInternal(dst_buf, output_capacity, src_buf, force_memmove, scratch, scratch_end, 16);
 }
 
 fn highDecodeBytesInternal(
@@ -60,9 +67,11 @@ fn highDecodeBytesInternal(
     output_capacity: usize,
     src_buf: []const u8,
     force_memmove: bool,
+    scratch_in: [*]u8,
+    scratch_end: [*]u8,
     max_depth: u32,
 ) DecodeError!DecodeResult {
-    if (max_depth == 0) return error.BadChunkHeader;
+    if (max_depth == 0) return error.RecursiveDepthExceeded;
 
     if (src_buf.len < 2) return error.SourceTruncated;
 
@@ -132,12 +141,15 @@ fn highDecodeBytesInternal(
     const payload = src_ptr[0..src_size];
     var src_used: usize = undefined;
 
-    // Scratch for sub-decoders. tANS needs up to 32 KB for its LUT; RLE and
-    // Recursive may need more for nested sub-block decode targets. Size
-    // generously — this is one stack frame and is bounded.
-    var scratch_buf: [0x10000]u8 align(16) = undefined;
-    const scratch_ptr: [*]u8 = &scratch_buf;
-    const scratch_end_ptr: [*]u8 = scratch_ptr + scratch_buf.len;
+    // dst == scratch alias handling: caller may have passed the same
+    // pointer for both, in which case sub-decoder workspace must start
+    // past the decoded output. Port of the C# check at
+    // `EntropyDecoder.High_DecodeBytesInternal` lines 770-778.
+    var scratch_ptr: [*]u8 = scratch_in;
+    if (@intFromPtr(dst_buf) == @intFromPtr(scratch_in)) {
+        if (@intFromPtr(scratch_in) + dst_size > @intFromPtr(scratch_end)) return error.OutputTooSmall;
+        scratch_ptr = scratch_in + dst_size;
+    }
 
     switch (chunk_type) {
         2 => src_used = try huffman.highDecodeBytesType12(payload, dst_buf, dst_size, 1),
@@ -148,14 +160,14 @@ fn highDecodeBytesInternal(
             dst_buf,
             dst_size,
             scratch_ptr,
-            scratch_end_ptr,
+            scratch_end,
         ),
         3 => src_used = try decodeRle(
             payload,
             dst_buf,
             dst_size,
             scratch_ptr,
-            scratch_end_ptr,
+            scratch_end,
             max_depth,
         ),
         5 => src_used = try decodeRecursive(
@@ -163,7 +175,7 @@ fn highDecodeBytesInternal(
             dst_buf,
             dst_size,
             scratch_ptr,
-            scratch_end_ptr,
+            scratch_end,
             max_depth,
         ),
         else => return error.BadChunkHeader,
@@ -209,11 +221,17 @@ fn decodeRle(
     var scratch_ptr: [*]u8 = scratch;
     if (src[0] != 0) {
         const remaining: []const u8 = src_start[0..src.len];
+        // Nested entropy decode: pass the advanced scratch cursor as
+        // both dst AND scratch. `highDecodeBytesInternal` will detect
+        // the alias and shift scratch past the decoded output before
+        // routing to sub-decoders.
         const res = try highDecodeBytesInternal(
             scratch_ptr,
             @intFromPtr(scratch_end) - @intFromPtr(scratch_ptr),
             remaining,
             true,
+            scratch_ptr,
+            scratch_end,
             max_depth - 1,
         );
         const n = res.bytes_consumed;
@@ -303,8 +321,6 @@ fn decodeRecursive(
     scratch_end: [*]u8,
     max_depth: u32,
 ) DecodeError!usize {
-    _ = scratch;
-    _ = scratch_end;
     if (src.len < 6) return error.SourceTruncated;
 
     const n0: u8 = src[0] & 0x7F;
@@ -315,7 +331,9 @@ fn decodeRecursive(
     if ((src[0] & 0x80) != 0) return error.MultiArrayNotSupported;
 
     // Simple path: N sub-blocks, each decoded via highDecodeBytesInternal with
-    // `force_memmove=true` so they concatenate into dst_buf.
+    // `force_memmove=true` so they concatenate into dst_buf. The caller's
+    // scratch is reused across every sub-block — each call sees the full
+    // workspace because previous sub-block workspace is released at return.
     var remaining_src: []const u8 = src[1..];
     var dst_cursor: [*]u8 = dst_buf;
     var dst_remaining: usize = dst_size;
@@ -327,6 +345,8 @@ fn decodeRecursive(
             dst_remaining,
             remaining_src,
             true,
+            scratch,
+            scratch_end,
             max_depth - 1,
         );
         dst_cursor += res.decoded_size;
@@ -349,7 +369,8 @@ test "Type 0 short-mode memcopy zero-copy path" {
     // Header byte: 0x80 | 5 (length 5), next byte = 0, then 5 payload bytes.
     var src: [8]u8 = .{ 0x80, 5, 'a', 'b', 'c', 'd', 'e', 0xFF };
     var dst: [32]u8 = @splat(0);
-    const r = try highDecodeBytes(&dst, dst.len, src[0..7], false);
+    var scratch: [256]u8 = undefined;
+    const r = try highDecodeBytes(&dst, dst.len, src[0..7], false, &scratch, scratch[scratch.len..].ptr);
     try testing.expectEqual(@as(usize, 5), r.decoded_size);
     try testing.expectEqual(@as(usize, 7), r.bytes_consumed);
     // Zero-copy: out_ptr points into src at offset 2.
@@ -360,7 +381,8 @@ test "Type 0 short-mode memcopy zero-copy path" {
 test "Type 0 memcopy with force_memmove copies into dst_buf" {
     var src: [7]u8 = .{ 0x80, 5, 'h', 'e', 'l', 'l', 'o' };
     var dst: [16]u8 = @splat(0);
-    const r = try highDecodeBytes(&dst, dst.len, &src, true);
+    var scratch: [256]u8 = undefined;
+    const r = try highDecodeBytes(&dst, dst.len, &src, true, &scratch, scratch[scratch.len..].ptr);
     try testing.expectEqual(@intFromPtr(&dst), @intFromPtr(r.out_ptr));
     try testing.expectEqualSlices(u8, "hello", dst[0..5]);
 }
@@ -372,5 +394,6 @@ test "Type 0 memcopy with force_memmove copies into dst_buf" {
 test "truncated source returns SourceTruncated" {
     const src = [_]u8{0x80};
     var dst: [16]u8 = undefined;
-    try testing.expectError(error.SourceTruncated, highDecodeBytes(&dst, dst.len, &src, false));
+    var scratch: [256]u8 = undefined;
+    try testing.expectError(error.SourceTruncated, highDecodeBytes(&dst, dst.len, &src, false, &scratch, scratch[scratch.len..].ptr));
 }
