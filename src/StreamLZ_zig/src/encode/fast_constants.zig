@@ -64,17 +64,27 @@ pub const InternalLevel = struct {
     use_entropy_coding: bool,
 };
 
-/// Maps a user-facing compression level (1..5 for this phase) to the internal
-/// engine parameters consumed by the parser/encoder.
+/// Maps a user-facing compression level to the internal engine parameters
+/// consumed by the parser/encoder. Matches C# `Slz.MapLevel` composed with
+/// `Fast.Compressor.MapLevel`:
+///
+///   user 1 → Fast 1 → engine -2 (greedy, ushort hash, raw)
+///   user 2 → Fast 2 → engine -1 (greedy, uint hash, raw)
+///   user 3 → Fast 3 → engine  1 (greedy + entropy)
+///   user 4 → Fast 5 → engine  2 (greedy-rehash + entropy)   ← skips Fast 4
+///   user 5 → Fast 6 → engine  4 (lazy chain + lazy-2 + entropy)
+///
+/// C# intentionally skips Fast 4 (lazy MatchHasher2x) because its ratio is
+/// worse than greedy-rehash on most data.
 pub fn mapLevel(user_level: u8) InternalLevel {
     return switch (user_level) {
         0, 1 => .{ .engine_level = -2, .use_entropy_coding = false },
         2 => .{ .engine_level = -1, .use_entropy_coding = false },
         3 => .{ .engine_level = 1, .use_entropy_coding = true },
-        4 => .{ .engine_level = 3, .use_entropy_coding = true },
-        5 => .{ .engine_level = 2, .use_entropy_coding = true },
+        4 => .{ .engine_level = 2, .use_entropy_coding = true },
+        5 => .{ .engine_level = 4, .use_entropy_coding = true },
         // Levels >=6 are routed through the High codec in C#; Phase 9 doesn't handle them.
-        else => .{ .engine_level = 2, .use_entropy_coding = true },
+        else => .{ .engine_level = 4, .use_entropy_coding = true },
     };
 }
 
@@ -157,15 +167,19 @@ pub fn getHashBits(
 
 const testing = std.testing;
 
-test "mapLevel matches C# Fast.Compressor.MapLevel" {
+test "mapLevel matches C# Slz.MapLevel composed with Fast.Compressor.MapLevel" {
     try testing.expectEqual(@as(i32, -2), mapLevel(1).engine_level);
     try testing.expect(!mapLevel(1).use_entropy_coding);
     try testing.expectEqual(@as(i32, -1), mapLevel(2).engine_level);
     try testing.expect(!mapLevel(2).use_entropy_coding);
     try testing.expectEqual(@as(i32, 1), mapLevel(3).engine_level);
     try testing.expect(mapLevel(3).use_entropy_coding);
-    try testing.expectEqual(@as(i32, 3), mapLevel(4).engine_level);
-    try testing.expectEqual(@as(i32, 2), mapLevel(5).engine_level);
+    // user L4 → Fast 5 → engine 2 (greedy rehash)
+    try testing.expectEqual(@as(i32, 2), mapLevel(4).engine_level);
+    try testing.expect(mapLevel(4).use_entropy_coding);
+    // user L5 → Fast 6 → engine 4 (lazy chain + lazy-2)
+    try testing.expectEqual(@as(i32, 4), mapLevel(5).engine_level);
+    try testing.expect(mapLevel(5).use_entropy_coding);
 }
 
 test "buildMinimumMatchLengthTable — raw mode threshold 14" {
