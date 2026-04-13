@@ -20,11 +20,14 @@
 const std = @import("std");
 const fast_constants = @import("fast_constants.zig");
 const FastMatchHasher = @import("fast_match_hasher.zig").FastMatchHasher;
+const match_hasher = @import("match_hasher.zig");
 const writer_mod = @import("fast_stream_writer.zig");
 const parser = @import("fast_lz_parser.zig");
 const token_writer = @import("fast_token_writer.zig");
 const entropy_enc = @import("entropy_encoder.zig");
 const byte_hist = @import("byte_histogram.zig");
+
+const MatchHasher2x = match_hasher.MatchHasher2x;
 
 const FastStreamWriter = writer_mod.FastStreamWriter;
 const EntropyOptions = entropy_enc.EntropyOptions;
@@ -360,16 +363,27 @@ pub fn encodeSubChunkEntropy(
         w.off32_count_block2 = w.off32_count;
     }
 
-    // ── Assemble entropy output ────────────────────────────────────────
+    return assembleEntropyOutput(allocator, &w, dst, dst_cursor, source.len, options);
+}
+
+/// Serialize the parallel streams in `w` into `dst` starting at `dst_cursor`.
+/// Shared between greedy-entropy (L5) and lazy-entropy (L3) paths.
+fn assembleEntropyOutput(
+    allocator: std.mem.Allocator,
+    w: *const FastStreamWriter,
+    dst: []u8,
+    dst_cursor_in: [*]u8,
+    source_len: usize,
+    options: EntropyOptions,
+) EncodeError!EncodeResult {
     const literal_count: usize = w.literalCount();
     const token_count: usize = w.tokenCount();
     const off16_count: usize = w.off16Count();
 
-    var out_cursor: [*]u8 = dst_cursor;
+    var out_cursor: [*]u8 = dst_cursor_in;
     const dst_end: [*]u8 = dst.ptr + dst.len;
     const bail_result: EncodeResult = .{ .bytes_written = 0, .chunk_type = .raw, .bail = true };
 
-    // Shared scratch for the best-of-both encoder picks.
     const enc_scratch = try allocator.alloc(u8, @max(literal_count, token_count) + 512);
     defer allocator.free(enc_scratch);
 
@@ -426,7 +440,7 @@ pub fn encodeSubChunkEntropy(
     }
 
     // ── Optional TokenStream2Offset ────────────────────────────────────
-    if (source.len > fast_constants.block1_max_size) {
+    if (source_len > fast_constants.block1_max_size) {
         if (@intFromPtr(out_cursor) + 2 > @intFromPtr(dst_end)) return bail_result;
         std.mem.writeInt(u16, out_cursor[0..2], @intCast(w.token_stream2_offset), .little);
         out_cursor += 2;
@@ -435,7 +449,6 @@ pub fn encodeSubChunkEntropy(
     // ── Off16 stream: try entropy split, fall back to raw ─────────────
     var used_entropy_off16 = false;
     if (options.allow_tans and off16_count >= 32) {
-        // Split into hi/lo byte arrays.
         const off16_bytes_total: usize = off16_count * 2;
         const split_buf = try allocator.alloc(u8, off16_count * 2);
         defer allocator.free(split_buf);
@@ -453,7 +466,6 @@ pub fn encodeSubChunkEntropy(
         const split_total = hi_n + lo_n;
         if (split_total + 2 < off16_bytes_total + 2) {
             used_entropy_off16 = true;
-            // Write 0xFFFF marker + split bytes.
             if (@intFromPtr(out_cursor) + 2 + split_total > @intFromPtr(dst_end)) return bail_result;
             std.mem.writeInt(u16, out_cursor[0..2], fast_constants.entropy_coded_16_marker, .little);
             out_cursor += 2;
@@ -508,9 +520,119 @@ pub fn encodeSubChunkEntropy(
     }
 
     const total: usize = @intFromPtr(out_cursor) - @intFromPtr(dst.ptr);
-    if (total >= source.len) return bail_result;
+    if (total >= source_len) return bail_result;
 
     return .{ .bytes_written = total, .chunk_type = chunk_type, .bail = false };
+}
+
+/// Encode a sub-chunk in entropy mode using the L3 lazy parser with a
+/// `MatchHasher2x` (2-entry bucket). Mirrors `encodeSubChunkEntropy` but
+/// runs `runLazyParser` instead of the greedy path.
+pub fn encodeSubChunkEntropyLazy(
+    comptime engine_level: i32,
+    allocator: std.mem.Allocator,
+    hasher: *MatchHasher2x,
+    source: []const u8,
+    dst: []u8,
+    start_position: usize,
+    options: EntropyOptions,
+) EncodeError!EncodeResult {
+    if (source.len <= fast_constants.min_source_length) return .{
+        .bytes_written = 0,
+        .chunk_type = .raw,
+        .bail = true,
+    };
+
+    const initial_bytes: usize = if (start_position == 0) fast_constants.initial_copy_bytes else 0;
+    const min_dst = initial_bytes + 32 + source.len + 256;
+    if (dst.len < min_dst) return error.DestinationTooSmall;
+
+    hasher.reset();
+    hasher.setSrcBase(source.ptr);
+    hasher.setBaseWithoutPreload(0);
+
+    var dst_cursor: [*]u8 = dst.ptr;
+    if (initial_bytes != 0) {
+        @memcpy(dst_cursor[0..8], source[0..8]);
+        dst_cursor += 8;
+    }
+
+    var w = try FastStreamWriter.init(allocator, source.ptr, source.len, null, true);
+    defer w.deinit(allocator);
+
+    var mmlt: [32]u32 = undefined;
+    fast_constants.buildMinimumMatchLengthTable(&mmlt, 4, 10);
+
+    const dict_size: u32 = @intCast(fast_constants.block1_max_size * 2);
+
+    var recent: isize = -8;
+    const source_end_ptr: [*]const u8 = source.ptr + source.len;
+    const safe_end: [*]const u8 = if (source.len >= 16) source_end_ptr - 16 else source.ptr;
+
+    // ── Block 1 ─────────────────────────────────────────────────────────
+    {
+        const block1_cursor: [*]const u8 = source.ptr + initial_bytes;
+        const block1_end: [*]const u8 = source.ptr + w.block1_size;
+        const safe_for_block1: [*]const u8 = if (@intFromPtr(block1_end) < @intFromPtr(safe_end))
+            block1_end
+        else
+            safe_end;
+        w.block2_start_offset = 0;
+        w.off32_count = 0;
+        if (@intFromPtr(block1_cursor) < @intFromPtr(safe_for_block1)) {
+            parser.runLazyParser(
+                engine_level,
+                2,
+                &w,
+                hasher,
+                block1_cursor,
+                safe_for_block1,
+                block1_end,
+                &recent,
+                dict_size,
+                &mmlt,
+                4,
+            );
+        } else {
+            token_writer.copyTrailingLiterals(&w, block1_cursor, block1_end, recent);
+        }
+        w.off32_count_block1 = w.off32_count;
+    }
+
+    // ── Block 2 ─────────────────────────────────────────────────────────
+    if (w.block2_size > 0) {
+        w.token_stream2_offset = @intCast(w.tokenCount());
+        w.block2_start_offset = @intCast(w.block1_size);
+        w.off32_count = 0;
+
+        const block2_cursor: [*]const u8 = source.ptr + w.block1_size;
+        const block2_end: [*]const u8 = block2_cursor + w.block2_size;
+        const safe_for_block2: [*]const u8 = if (@intFromPtr(block2_end) < @intFromPtr(safe_end))
+            block2_end
+        else
+            safe_end;
+
+        if (@intFromPtr(block2_cursor) < @intFromPtr(safe_for_block2)) {
+            parser.runLazyParser(
+                engine_level,
+                2,
+                &w,
+                hasher,
+                block2_cursor,
+                safe_for_block2,
+                block2_end,
+                &recent,
+                dict_size,
+                &mmlt,
+                4,
+            );
+        } else {
+            token_writer.copyTrailingLiterals(&w, block2_cursor, block2_end, recent);
+        }
+        w.off32_count_block2 = w.off32_count;
+    }
+
+    return assembleEntropyOutput(allocator, &w, dst, dst_cursor, source.len, options);
 }
 
 // ────────────────────────────────────────────────────────────

@@ -71,7 +71,7 @@ test "encoder roundtrip: every .raw encodes + decodes byte-exact (L1/L2)" {
         };
         defer allocator.free(raw_bytes);
 
-        const levels = [_]u8{ 1, 2, 5 };
+        const levels = [_]u8{ 1, 2, 3, 5 };
         for (levels) |level| {
             total += 1;
             const bound = encoder.compressBound(raw_bytes.len);

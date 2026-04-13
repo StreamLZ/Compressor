@@ -22,9 +22,12 @@ const block_header = @import("../format/block_header.zig");
 const lz_constants = @import("../format/streamlz_constants.zig");
 const fast_constants = @import("fast_constants.zig");
 const FastMatchHasher = @import("fast_match_hasher.zig").FastMatchHasher;
+const match_hasher = @import("match_hasher.zig");
 const fast_enc = @import("fast_lz_encoder.zig");
 const entropy_enc = @import("entropy_encoder.zig");
 const EntropyOptions = entropy_enc.EntropyOptions;
+
+const MatchHasher2x = match_hasher.MatchHasher2x;
 
 pub const CompressError = error{
     BadLevel,
@@ -104,13 +107,26 @@ pub fn compressFramed(
     });
     pos += hdr_len;
 
-    // ── Allocate persistent hasher (reused across sub-chunks) ──────────
+    // ── Allocate the persistent hasher(s) this level needs ────────────
+    // L1/L2/L5 → FastMatchHasher(u32). L3 → MatchHasher2x (2-entry bucket
+    // used by the lazy parser). L4 temporarily routes through the greedy
+    // entropy path until Phase 10g lands the chain hasher.
     const params: @import("fast_match_hasher.zig").HasherParams = .{
         .hash_bits = if (opts.level >= 2) 17 else 16,
         .min_match_length = 4,
     };
-    var hasher = try FastMatchHasher(u32).init(allocator, params);
-    defer hasher.deinit();
+    var greedy_hasher: ?FastMatchHasher(u32) = null;
+    defer if (greedy_hasher) |*h| h.deinit();
+    var lazy_hasher: ?MatchHasher2x = null;
+    defer if (lazy_hasher) |*h| h.deinit();
+
+    if (opts.level == 3) {
+        // Matches SetupEncoder: L3 (engine level 1) defaults hashBits to 17,
+        // capped at 20.
+        lazy_hasher = try MatchHasher2x.init(allocator, 17, 4);
+    } else {
+        greedy_hasher = try FastMatchHasher(u32).init(allocator, params);
+    }
 
     // ── Loop over 256 KB outer blocks ──────────────────────────────────
     var src_off: usize = 0;
@@ -163,13 +179,15 @@ pub fn compressFramed(
                 const start_position_for_sub: usize = src_off + sub_off;
                 const entropy_options = entropyOptionsForLevel(opts.level);
                 const result = try switch (opts.level) {
-                    1 => fast_enc.encodeSubChunkRaw(1, allocator, &hasher, sub_src, dst[sub_payload_start..], start_position_for_sub),
-                    2 => fast_enc.encodeSubChunkRaw(2, allocator, &hasher, sub_src, dst[sub_payload_start..], start_position_for_sub),
-                    // L3/L4 use lazy parsers (not yet wired — fall through to greedy
-                    // via engine level mapping until Phase 10f/g land).
-                    3 => fast_enc.encodeSubChunkEntropy(1, allocator, &hasher, sub_src, dst[sub_payload_start..], start_position_for_sub, entropy_options),
-                    4 => fast_enc.encodeSubChunkEntropy(2, allocator, &hasher, sub_src, dst[sub_payload_start..], start_position_for_sub, entropy_options),
-                    5 => fast_enc.encodeSubChunkEntropy(2, allocator, &hasher, sub_src, dst[sub_payload_start..], start_position_for_sub, entropy_options),
+                    1 => fast_enc.encodeSubChunkRaw(1, allocator, &greedy_hasher.?, sub_src, dst[sub_payload_start..], start_position_for_sub),
+                    2 => fast_enc.encodeSubChunkRaw(2, allocator, &greedy_hasher.?, sub_src, dst[sub_payload_start..], start_position_for_sub),
+                    // L3 (engine level 1): lazy parser, MatchHasher2x.
+                    3 => fast_enc.encodeSubChunkEntropyLazy(1, allocator, &lazy_hasher.?, sub_src, dst[sub_payload_start..], start_position_for_sub, entropy_options),
+                    // L4 (engine level 3): chain hasher lazy — not ported yet; temporarily
+                    // uses greedy-with-rehash until Phase 10g.
+                    4 => fast_enc.encodeSubChunkEntropy(2, allocator, &greedy_hasher.?, sub_src, dst[sub_payload_start..], start_position_for_sub, entropy_options),
+                    // L5 (engine level 2): greedy with match rehashing.
+                    5 => fast_enc.encodeSubChunkEntropy(2, allocator, &greedy_hasher.?, sub_src, dst[sub_payload_start..], start_position_for_sub, entropy_options),
                     else => unreachable,
                 };
                 _ = sub_payload_cap;

@@ -17,10 +17,20 @@
 const std = @import("std");
 const fast_constants = @import("fast_constants.zig");
 const FastMatchHasher = @import("fast_match_hasher.zig").FastMatchHasher;
+const match_hasher = @import("match_hasher.zig");
 const writer_mod = @import("fast_stream_writer.zig");
 const token_writer = @import("fast_token_writer.zig");
 
 const FastStreamWriter = writer_mod.FastStreamWriter;
+const MatchHasher2x = match_hasher.MatchHasher2x;
+const HasherHashPos = match_hasher.HasherHashPos;
+
+/// (length, offset) pair returned by the hash-based match finders. Offset 0
+/// means "reuse the parser's current recent offset".
+pub const LengthAndOffset = struct {
+    length: i32,
+    offset: i32,
+};
 
 /// Runs a single-block greedy parse. On entry, `source_cursor` points at the
 /// first byte to process; `literal_start_in` points at the first unmatched
@@ -218,6 +228,307 @@ pub fn runGreedyParser(
                 hash_table[rh] = @intCast(@as(u32, @truncate(rpos)));
                 if (i >= match_length) break;
             }
+        }
+    }
+
+    token_writer.copyTrailingLiterals(w, literal_start, source_end, recent_offset);
+    recent_offset_inout.* = recent_offset;
+}
+
+// ────────────────────────────────────────────────────────────
+//  Lazy-parser helpers (port of Matcher.cs)
+// ────────────────────────────────────────────────────────────
+
+/// Count matching bytes 8-then-4 wide, starting at `p`. Port of
+/// `MatchEvaluation.CountMatchingBytes`. Returns how many bytes past `p`
+/// continue to match the source at `p - offset`. `offset` is positive.
+inline fn countMatchingBytes(p: [*]const u8, p_end: [*]const u8, offset: usize) usize {
+    var cur = p;
+    var len: usize = 0;
+    while (@intFromPtr(p_end) -| @intFromPtr(cur) >= 8) {
+        const a: u64 = std.mem.readInt(u64, cur[0..8], .little);
+        const b_ptr: [*]const u8 = @ptrFromInt(@intFromPtr(cur) - offset);
+        const b: u64 = std.mem.readInt(u64, b_ptr[0..8], .little);
+        if (a != b) {
+            const xor = a ^ b;
+            return len + (@as(usize, @ctz(xor)) >> 3);
+        }
+        cur += 8;
+        len += 8;
+    }
+    if (@intFromPtr(p_end) -| @intFromPtr(cur) >= 4) {
+        const a: u32 = std.mem.readInt(u32, cur[0..4], .little);
+        const b_ptr: [*]const u8 = @ptrFromInt(@intFromPtr(cur) - offset);
+        const b: u32 = std.mem.readInt(u32, b_ptr[0..4], .little);
+        if (a != b) {
+            const xor = a ^ b;
+            return len + (@as(usize, @ctz(xor)) >> 3);
+        }
+        cur += 4;
+        len += 4;
+    }
+    // Byte-wise tail.
+    while (@intFromPtr(cur) < @intFromPtr(p_end)) {
+        const bp: [*]const u8 = @ptrFromInt(@intFromPtr(cur) - offset);
+        if (cur[0] != bp[0]) break;
+        cur += 1;
+        len += 1;
+    }
+    return len;
+}
+
+/// Is `(match_length, match_offset)` better than `(best_length, best_offset)`?
+/// Straight port of `Matcher.IsMatchBetter`.
+inline fn isMatchBetter(match_length: i32, match_offset: i32, best_length: i32, best_offset: i32) bool {
+    if (match_length == best_length) return match_offset < best_offset;
+    if ((match_offset <= 0xffff) == (best_offset <= 0xffff)) return match_length > best_length;
+    if (best_offset <= 0xffff) return match_length > best_length + 5;
+    return match_length >= best_length - 5;
+}
+
+/// Is the current hash match preferable to reusing the recent-offset match?
+inline fn isBetterThanRecentMatch(recent_match_length: i32, match_length: i32, match_offset: i32) bool {
+    return recent_match_length < 2 or
+        (recent_match_length + 1 < match_length and (recent_match_length + 4 < match_length or match_offset < 65536));
+}
+
+/// Is the lazy candidate worth the step delay over `current`?
+inline fn isLazyMatchBetter(cand: LengthAndOffset, current: LengthAndOffset, step: i32) bool {
+    const bits_cand: i32 = if (cand.offset > 0) (if (cand.offset > 0xffff) 32 else 16) else 0;
+    const bits_cur: i32 = if (current.offset > 0) (if (current.offset > 0xffff) 32 else 16) else 0;
+    return 5 * (cand.length - current.length) - 5 - (bits_cand - bits_cur) > step * 4;
+}
+
+/// Hash-based match finder used by the lazy parser. `comptime num_hash` is
+/// the bucket width (2 for L3). Direct port of `Matcher.FindMatchWithHasher`.
+///
+/// `next_cursor_ptr` is where the caller wants the hasher to prefetch next —
+/// usually `source_cursor + 1` so the next parser iteration finds the hash
+/// bucket hot in L1.
+pub fn findMatchWithHasher(
+    comptime num_hash: u32,
+    source_cursor: [*]const u8,
+    safe_source_end: [*]const u8,
+    literal_start: [*]const u8,
+    recent_offset: isize,
+    hasher: *match_hasher.MatchHasher(num_hash),
+    next_cursor_ptr: [*]const u8,
+    dictionary_size: u32,
+    minimum_match_length_in: u32,
+    min_match_length_table: *const [32]u32,
+) LengthAndOffset {
+    const hp = hasher.getHashPos(source_cursor);
+    const bytes_at_source: u32 = std.mem.readInt(u32, source_cursor[0..4], .little);
+    hasher.setHashPosPrefetch(next_cursor_ptr);
+
+    // ── Recent-offset match path ───────────────────────────────────────
+    const recent_src_addr: usize = @intFromPtr(source_cursor) +% @as(usize, @bitCast(recent_offset));
+    const recent_src_ptr: [*]const u8 = @ptrFromInt(recent_src_addr);
+    const recent_word: u32 = std.mem.readInt(u32, recent_src_ptr[0..4], .little);
+    const xor_value: u32 = recent_word ^ bytes_at_source;
+    if (xor_value == 0) {
+        const ext_end = token_writer.extendMatchForward(source_cursor + 4, safe_source_end, recent_offset);
+        const match_len: usize = 4 + (@intFromPtr(ext_end) - @intFromPtr(source_cursor + 4));
+        hasher.insert(hp);
+        return .{ .length = @intCast(match_len), .offset = 0 };
+    }
+    var recent_match_length: i32 = @intCast(@as(u32, @ctz(xor_value)) >> 3);
+
+    var minimum_match_length: i32 = @intCast(minimum_match_length_in);
+    if (@intFromPtr(source_cursor) - @intFromPtr(literal_start) >= 64) {
+        if (recent_match_length < 3) recent_match_length = 0;
+        minimum_match_length += 1;
+    }
+    var best_offset: i32 = 0;
+    var best_match_length: i32 = minimum_match_length - 1;
+
+    // ── Hash bucket scan ───────────────────────────────────────────────
+    const hash_table = hasher.hash_table;
+    const cur_from_base: usize = @intFromPtr(source_cursor) - @intFromPtr(hasher.src_base);
+    const tag_mask: u32 = 0xfc000000;
+    const off_mask: u32 = 0x3ffffff;
+    const tag_masked: u32 = hp.tag & tag_mask;
+
+    comptime var entry_index: u32 = 0;
+    inline while (entry_index < num_hash) : (entry_index += 1) {
+        const stored: u32 = hash_table[hp.ptr1_index + entry_index];
+        if ((stored & tag_mask) == tag_masked) {
+            const candidate_offset: u32 = (hp.pos -% stored) & off_mask;
+            if (candidate_offset > 8 and candidate_offset < dictionary_size and
+                @as(usize, candidate_offset) <= cur_from_base)
+            {
+                const cand_base: [*]const u8 = @ptrFromInt(@intFromPtr(source_cursor) -% @as(usize, candidate_offset));
+                const cand_word: u32 = std.mem.readInt(u32, cand_base[0..4], .little);
+                if (cand_word == bytes_at_source) {
+                    const ext_end = token_writer.extendMatchForward(
+                        source_cursor + 4,
+                        safe_source_end,
+                        -@as(isize, @intCast(candidate_offset)),
+                    );
+                    const cand_len_u: usize = 4 + (@intFromPtr(ext_end) - @intFromPtr(source_cursor + 4));
+                    const cand_len: i32 = @intCast(cand_len_u);
+                    // Index is `31 - log2(offset) = @clz(offset)` for u32.
+                    const mmlt_idx: u5 = @intCast(@clz(candidate_offset));
+                    const min_len_here: i32 = @intCast(min_match_length_table[mmlt_idx]);
+                    if (cand_len > best_match_length and cand_len >= min_len_here and
+                        isMatchBetter(cand_len, @intCast(candidate_offset), best_match_length, best_offset))
+                    {
+                        best_offset = @intCast(candidate_offset);
+                        best_match_length = cand_len;
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Offset-8 fallback ──────────────────────────────────────────────
+    {
+        const off8_ptr: [*]const u8 = @ptrFromInt(@intFromPtr(source_cursor) -% 8);
+        const off8_word: u32 = std.mem.readInt(u32, off8_ptr[0..4], .little);
+        if (off8_word == bytes_at_source) {
+            const ext_end = token_writer.extendMatchForward(source_cursor + 4, safe_source_end, -8);
+            const cand_len_u: usize = 4 + (@intFromPtr(ext_end) - @intFromPtr(source_cursor + 4));
+            const cand_len: i32 = @intCast(cand_len_u);
+            if (cand_len >= best_match_length and cand_len >= minimum_match_length) {
+                best_match_length = cand_len;
+                best_offset = 8;
+            }
+        }
+    }
+
+    hasher.insert(hp);
+
+    if (best_offset == 0 or !isBetterThanRecentMatch(recent_match_length, best_match_length, best_offset)) {
+        best_match_length = recent_match_length;
+        best_offset = 0;
+    }
+    return .{ .length = best_match_length, .offset = best_offset };
+}
+
+/// Lazy parser driving a `MatchHasher(num_hash)` — port of
+/// `FastParser.RunLazyParser`. Emits directly to the supplied writer; on
+/// return, trailing literals have been copied.
+///
+/// `engine_level` selects the lazy depth:
+///   * <= 1 → lazy-1 only (user level 3)
+///   * > 1  → lazy-1 + lazy-2 (unused by the 2x hasher path today)
+pub fn runLazyParser(
+    comptime engine_level: i32,
+    comptime num_hash: u32,
+    w: *FastStreamWriter,
+    hasher: *match_hasher.MatchHasher(num_hash),
+    source_cursor_in: [*]const u8,
+    safe_source_end: [*]const u8,
+    source_end: [*]const u8,
+    recent_offset_inout: *isize,
+    dictionary_size: u32,
+    min_match_length_table: *const [32]u32,
+    minimum_match_length: u32,
+) void {
+    var recent_offset: isize = recent_offset_inout.*;
+    var source_cursor: [*]const u8 = source_cursor_in;
+    var literal_start: [*]const u8 = source_cursor_in;
+
+    const guard_addr = @intFromPtr(safe_source_end) -| 5;
+    if (@intFromPtr(source_cursor) < guard_addr) {
+        hasher.setHashPos(source_cursor);
+
+        while (@intFromPtr(source_cursor) + 1 < guard_addr) {
+            var match = findMatchWithHasher(
+                num_hash,
+                source_cursor,
+                safe_source_end,
+                literal_start,
+                recent_offset,
+                hasher,
+                source_cursor + 1,
+                dictionary_size,
+                minimum_match_length,
+                min_match_length_table,
+            );
+            if (match.length < 2) {
+                source_cursor += 1;
+                continue;
+            }
+
+            // Lazy evaluation loop.
+            while (@intFromPtr(source_cursor) + 1 < guard_addr) {
+                const lazy1 = findMatchWithHasher(
+                    num_hash,
+                    source_cursor + 1,
+                    safe_source_end,
+                    literal_start,
+                    recent_offset,
+                    hasher,
+                    source_cursor + 2,
+                    dictionary_size,
+                    minimum_match_length,
+                    min_match_length_table,
+                );
+                if (lazy1.length >= 2 and isLazyMatchBetter(lazy1, match, 0)) {
+                    source_cursor += 1;
+                    match = lazy1;
+                } else {
+                    if (comptime engine_level <= 3) break;
+                    if (@intFromPtr(source_cursor) + 2 > guard_addr or match.length == 2) break;
+                    const lazy2 = findMatchWithHasher(
+                        num_hash,
+                        source_cursor + 2,
+                        safe_source_end,
+                        literal_start,
+                        recent_offset,
+                        hasher,
+                        source_cursor + 3,
+                        dictionary_size,
+                        minimum_match_length,
+                        min_match_length_table,
+                    );
+                    if (lazy2.length >= 2 and isLazyMatchBetter(lazy2, match, 1)) {
+                        source_cursor += 2;
+                        match = lazy2;
+                    } else break;
+                }
+            }
+
+            // actual_offset is the positive distance used for writes and for
+            // backward extension. For recent-offset matches it's `-recent`.
+            const actual_offset: isize = if (match.offset == 0)
+                -recent_offset
+            else
+                @intCast(match.offset);
+
+            // Extend backward into the literal run.
+            while (@intFromPtr(source_cursor) > @intFromPtr(literal_start)) {
+                const cursor_prev_addr: usize = @intFromPtr(source_cursor) - 1;
+                if (cursor_prev_addr < @intFromPtr(hasher.src_base) + @as(usize, @bitCast(@as(i64, actual_offset)))) break;
+                const back_addr: usize = cursor_prev_addr - @as(usize, @bitCast(@as(i64, actual_offset)));
+                const cur_b: u8 = @as([*]const u8, @ptrFromInt(cursor_prev_addr))[0];
+                const back_b: u8 = @as([*]const u8, @ptrFromInt(back_addr))[0];
+                if (cur_b != back_b) break;
+                source_cursor -= 1;
+                match.length += 1;
+            }
+
+            const match_length_u: u32 = @intCast(match.length);
+            const lit_run_u: u32 = @intCast(@intFromPtr(source_cursor) - @intFromPtr(literal_start));
+            const offset_or_recent: u32 = @intCast(match.offset);
+
+            token_writer.writeOffset(
+                w,
+                match_length_u,
+                lit_run_u,
+                offset_or_recent,
+                recent_offset,
+                literal_start,
+            );
+
+            recent_offset = -actual_offset;
+            source_cursor += match_length_u;
+            literal_start = source_cursor;
+
+            if (@intFromPtr(source_cursor) >= guard_addr) break;
+            const match_start: [*]const u8 = @ptrFromInt(@intFromPtr(source_cursor) - match_length_u);
+            hasher.insertRange(match_start, match_length_u);
         }
     }
 
