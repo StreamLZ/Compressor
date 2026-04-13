@@ -205,11 +205,12 @@ pub fn compressFramed(
         .dictionary_size = resolved.dict_size,
     };
 
-    // Reset + base-set the hasher ONCE for the entire input. The window
-    // spans the whole source so hash state persists across 256 KB chunks
-    // — cross-chunk matches become free because positions are stored
-    // relative to src.ptr (mod 2^32 for greedy; full u32 pos for chain).
-    if (greedy_hasher) |*h| h.reset();
+    // Chain hasher (L5 only) sees the whole input as one window — C#
+    // `RunLazyParserChainHasher` bounds candidate offsets against
+    // `hasher.SrcBase` (= src.ptr), so sub-chunk 2 can reach sub-chunk 1.
+    // The greedy hashers reset per sub-chunk inside the sub-chunk encoder,
+    // matching C# `RunGreedyParser`'s `offsetOrRecent <= sourceCursor - sourceBlock`
+    // that confines matches to the current sub-chunk.
     if (chain_hasher) |*h| {
         h.reset();
         h.setSrcBase(src.ptr);
@@ -245,10 +246,9 @@ pub fn compressFramed(
             pos += 4;
             const chunk_payload_start: usize = pos;
 
-            // The hasher window spans the whole input (reset once at the
-            // top of compressFramed). Both sub-chunks in this chunk use
-            // src.ptr as their position base so cross-chunk matches are
-            // visible in the hash table.
+            // L5 chain hasher sees src.ptr as its window base (set at
+            // compressFramed top). Greedy sub-chunks are strictly local,
+            // so their window_base is unused.
             const window_base_ptr: [*]const u8 = src.ptr;
 
             // Iterate 128 KB sub-chunks within this chunk.
@@ -274,13 +274,13 @@ pub fn compressFramed(
                 const entropy_options = entropyOptionsForLevel(opts.level);
                 const result = try switch (opts.level) {
                     // L1 → Fast 1 (engine -2): greedy, raw streams.
-                    1 => fast_enc.encodeSubChunkRaw(-2, allocator, &greedy_hasher.?, sub_src, window_base_ptr, dst[sub_payload_start..], start_position_for_sub, parser_config),
+                    1 => fast_enc.encodeSubChunkRaw(-2, allocator, &greedy_hasher.?, sub_src, dst[sub_payload_start..], start_position_for_sub, parser_config),
                     // L2 → Fast 2 (engine -1): greedy, raw streams.
-                    2 => fast_enc.encodeSubChunkRaw(-1, allocator, &greedy_hasher.?, sub_src, window_base_ptr, dst[sub_payload_start..], start_position_for_sub, parser_config),
+                    2 => fast_enc.encodeSubChunkRaw(-1, allocator, &greedy_hasher.?, sub_src, dst[sub_payload_start..], start_position_for_sub, parser_config),
                     // L3 → Fast 3 (engine 1): greedy + entropy (delta literals).
-                    3 => fast_enc.encodeSubChunkEntropy(1, allocator, &greedy_hasher.?, sub_src, window_base_ptr, dst[sub_payload_start..], start_position_for_sub, entropy_options, parser_config),
+                    3 => fast_enc.encodeSubChunkEntropy(1, allocator, &greedy_hasher.?, sub_src, dst[sub_payload_start..], start_position_for_sub, entropy_options, parser_config),
                     // L4 → Fast 5 (engine 2): greedy with match rehashing + entropy.
-                    4 => fast_enc.encodeSubChunkEntropy(2, allocator, &greedy_hasher.?, sub_src, window_base_ptr, dst[sub_payload_start..], start_position_for_sub, entropy_options, parser_config),
+                    4 => fast_enc.encodeSubChunkEntropy(2, allocator, &greedy_hasher.?, sub_src, dst[sub_payload_start..], start_position_for_sub, entropy_options, parser_config),
                     // L5 → Fast 6 (engine 4): lazy chain hasher + lazy-2 + entropy.
                     5 => fast_enc.encodeSubChunkEntropyChain(4, allocator, &chain_hasher.?, sub_src, window_base_ptr, dst[sub_payload_start..], start_position_for_sub, entropy_options, parser_config),
                     else => unreachable,
