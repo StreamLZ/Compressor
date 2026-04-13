@@ -400,12 +400,17 @@ pub fn writeLzOffsetBits(
 
             var nb: u5 = undefined;
             var bits: u32 = u32_offs[i];
+            // C# `uint` silently wraps on underflow in these formulas;
+            // Zig's default signed/unsigned ops would panic on underflow
+            // so use `+%` / `-%` to match C# semantics. The final value
+            // is masked to `nb` bits anyway when written by the bit
+            // writer so any wrapping above that width is harmless.
             if (u8_offs[i] < high_offset_marker) {
                 nb = @intCast((u8_offs[i] >> 4) + 5);
-                bits = ((bits + offset_bias_constant) >> 4) - (@as(u32, 1) << nb);
+                bits = ((bits +% offset_bias_constant) >> 4) -% (@as(u32, 1) << nb);
             } else {
                 nb = @intCast(u8_offs[i] - high_offset_cost_adjust);
-                bits = bits - (@as(u32, 1) << nb) - low_offset_encoding_limit;
+                bits = bits -% (@as(u32, 1) << nb) -% low_offset_encoding_limit;
             }
 
             if ((i & 1) != 0) {

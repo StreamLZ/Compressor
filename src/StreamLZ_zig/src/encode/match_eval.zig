@@ -148,7 +148,13 @@ pub fn isMatchBetter(match_length: u32, offset: u32, best_match_length: u32, bes
 /// against the current match. Positive means the lazy candidate wins.
 ///
 /// Port of C# `MatchUtils.GetLazyScore` (`MatchEvaluation.cs:161-166`).
-pub fn getLazyScore(a: LengthAndOffset, b: LengthAndOffset) i32 {
+///
+/// `a` and `b` can be any struct type with `length: i32` and
+/// `offset: i32` fields — both `fast_lz_parser.LengthAndOffset` and
+/// `managed_match_len_storage.LengthAndOffset` qualify, so the same
+/// function serves both the Fast and High parsers without forcing a
+/// shared struct type.
+pub fn getLazyScore(a: anytype, b: anytype) i32 {
     const bits_a: i32 = if (a.offset > 0)
         @as(i32, @intCast(std.math.log2_int(u32, @intCast(a.offset)))) + 3
     else

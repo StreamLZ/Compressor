@@ -51,8 +51,8 @@ pub fn MatchHasher(comptime num_hash: u32, comptime dual_hash: bool) type {
     }
     return struct {
         const Self = @This();
-        const bucket_width: u32 = num_hash;
-        const uses_dual_hash: bool = dual_hash;
+        pub const bucket_width: u32 = num_hash;
+        pub const uses_dual_hash: bool = dual_hash;
 
         /// Power-of-two-sized hash table. Entry width is 32 bits: tag|pos.
         hash_table: []u32,

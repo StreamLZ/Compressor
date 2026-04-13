@@ -580,6 +580,7 @@ test {
     _ = @import("encode/high_matcher.zig");
     _ = @import("encode/high_cost_model.zig");
     _ = @import("encode/high_encoder.zig");
+    _ = @import("encode/high_fast_parser.zig");
     _ = @import("encode/high_compressor.zig");
     _ = @import("encode/fast_lz_encoder.zig");
     _ = @import("encode/streamlz_encoder.zig");

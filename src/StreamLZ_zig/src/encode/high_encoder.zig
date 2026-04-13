@@ -100,10 +100,12 @@ pub fn initializeStreamWriter(
     writer.near_offsets = p;
     p += u8_offset_capacity;
 
-    // 4-byte align for the u32 streams.
+    // 4-byte align for the u32 streams — required because
+    // `HighStreamWriter` stores them as `[*]u32` (default align=4).
     p = alignUpPtr(p, 4);
-    writer.far_offsets_start = @ptrCast(p);
-    writer.far_offsets = @ptrCast(p);
+    const far_offsets_ptr: [*]u32 = @ptrCast(@alignCast(p));
+    writer.far_offsets_start = far_offsets_ptr;
+    writer.far_offsets = far_offsets_ptr;
     p += u32_offset_capacity * 4;
 
     writer.literal_run_lengths_start = p;
@@ -111,8 +113,9 @@ pub fn initializeStreamWriter(
     p += run_length8_capacity;
 
     p = alignUpPtr(p, 4);
-    writer.overflow_lengths_start = @ptrCast(p);
-    writer.overflow_lengths = @ptrCast(p);
+    const overflow_lengths_ptr: [*]u32 = @ptrCast(@alignCast(p));
+    writer.overflow_lengths_start = overflow_lengths_ptr;
+    writer.overflow_lengths = overflow_lengths_ptr;
 
     writer.recent0 = @intCast(lz_constants.initial_recent_offset);
     writer.encode_flags = encode_flags;

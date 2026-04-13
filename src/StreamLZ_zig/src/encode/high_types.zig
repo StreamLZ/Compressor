@@ -51,14 +51,18 @@ pub const HighStreamWriter = struct {
     near_offsets_start: [*]u8,
     near_offsets: [*]u8,
 
-    far_offsets_start: [*]align(1) u32,
-    far_offsets: [*]align(1) u32,
+    // The High stream writer always allocates 4-byte-aligned regions
+    // for the u32 streams (see `high_encoder.initializeStreamWriter`),
+    // so default-aligned `[*]u32` is safe and keeps the offset encoder
+    // signatures clean.
+    far_offsets_start: [*]u32,
+    far_offsets: [*]u32,
 
     literal_run_lengths_start: [*]u8,
     literal_run_lengths: [*]u8,
 
-    overflow_lengths_start: [*]align(1) u32,
-    overflow_lengths: [*]align(1) u32,
+    overflow_lengths_start: [*]u32,
+    overflow_lengths: [*]u32,
 
     src_len: i32,
     src_ptr: [*]const u8,
