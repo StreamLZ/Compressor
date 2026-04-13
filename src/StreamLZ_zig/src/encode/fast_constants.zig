@@ -117,6 +117,41 @@ pub inline fn literalRunSlotCount(value: u32) u32 {
 }
 
 // ────────────────────────────────────────────────────────────
+//  Adaptive hash-bit sizing (EntropyEncoder.GetHashBits port)
+// ────────────────────────────────────────────────────────────
+
+/// Compute the hash-table `bits` parameter adaptively from the input length
+/// and engine level. Port of `EntropyEncoder.GetHashBits`. The Fast compressor
+/// calls this as `getHashBits(src_len, @max(level, 2), 16, 20, 17, 24)`.
+///
+/// Bands:
+///   * level < 3  → clamp(log2(src)+1, min_low, max_low)     — up to 20 bits
+///   * level ∈ 3-4 → clamp(log2(src)+1, min_low, min_high)    — narrow 16-17
+///   * level ≥ 5  → clamp(log2(src)+1, min_low, max_high)    — up to 24 bits
+///
+/// When `user_hash_bits > 0`, that value wins unconditionally.
+pub fn getHashBits(
+    src_len: usize,
+    level: i32,
+    user_hash_bits: u32,
+    min_low_level_bits: u6,
+    max_low_level_bits: u6,
+    min_high_level_bits: u6,
+    max_high_level_bits: u6,
+) u6 {
+    if (user_hash_bits > 0) return @intCast(user_hash_bits);
+    const clamped_src: usize = @max(src_len, 1);
+    const log2_plus_1: u6 = @intCast(std.math.log2_int(usize, clamped_src) + 1);
+    const upper: u6 = if (level >= 5)
+        max_high_level_bits
+    else if (level >= 3)
+        min_high_level_bits
+    else
+        max_low_level_bits;
+    return @max(min_low_level_bits, @min(log2_plus_1, upper));
+}
+
+// ────────────────────────────────────────────────────────────
 //  Tests
 // ────────────────────────────────────────────────────────────
 
@@ -155,4 +190,23 @@ test "literalRunSlotCount" {
     try testing.expectEqual(@as(u32, 1), literalRunSlotCount(8));
     try testing.expectEqual(@as(u32, 7), literalRunSlotCount(14));
     try testing.expectEqual(@as(u32, 1), literalRunSlotCount(15));
+}
+
+test "getHashBits respects explicit user override" {
+    try testing.expectEqual(@as(u6, 15), getHashBits(100_000, 1, 15, 16, 20, 17, 24));
+}
+
+test "getHashBits clamps low level to [16,20]" {
+    try testing.expectEqual(@as(u6, 16), getHashBits(100, 1, 0, 16, 20, 17, 24));
+    try testing.expectEqual(@as(u6, 20), getHashBits(1 << 25, 1, 0, 16, 20, 17, 24));
+}
+
+test "getHashBits narrow band for level 3-4" {
+    try testing.expectEqual(@as(u6, 17), getHashBits(1 << 20, 3, 0, 16, 20, 17, 24));
+    try testing.expectEqual(@as(u6, 17), getHashBits(1 << 30, 3, 0, 16, 20, 17, 24));
+}
+
+test "getHashBits wide band for level >= 5" {
+    try testing.expectEqual(@as(u6, 24), getHashBits(1 << 28, 5, 0, 16, 20, 17, 24));
+    try testing.expectEqual(@as(u6, 20), getHashBits(1 << 19, 5, 0, 16, 20, 17, 24));
 }

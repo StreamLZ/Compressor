@@ -25,10 +25,15 @@ const FastMatchHasher = @import("fast_match_hasher.zig").FastMatchHasher;
 const match_hasher = @import("match_hasher.zig");
 const fast_enc = @import("fast_lz_encoder.zig");
 const entropy_enc = @import("entropy_encoder.zig");
+const text_detector = @import("text_detector.zig");
 const EntropyOptions = entropy_enc.EntropyOptions;
 
 const MatchHasher2x = match_hasher.MatchHasher2x;
 const MatchHasher2 = match_hasher.MatchHasher2;
+
+/// Default dictionary size when the caller doesn't override. Matches C#
+/// `FastConstants.DefaultDictionarySize = 0x40000000` (1 GB).
+pub const default_dictionary_size: u32 = 0x40000000;
 
 pub const CompressError = error{
     BadLevel,
@@ -46,7 +51,60 @@ pub const Options = struct {
     /// `frame.min_block_size` and `frame.max_block_size`. We always emit
     /// 256 KB blocks internally but the frame header can advertise larger.
     block_size: u32 = lz_constants.chunk_size,
+    /// Override the hash-table bit count (0 = adaptive). Matches
+    /// `CompressOptions.HashBits` in C#.
+    hash_bits: u32 = 0,
+    /// Minimum match length override (0 = auto-derive from level + text detection).
+    /// Values below 4 are ignored.
+    min_match_length: u32 = 0,
+    /// Maximum backward reference distance. 0 = `default_dictionary_size`.
+    dictionary_size: u32 = 0,
 };
+
+/// Resolved per-input parameters derived from `Options` + heuristics.
+const ResolvedParams = struct {
+    engine_level: i32,
+    use_entropy: bool,
+    hash_bits: u6,
+    min_match_length: u32,
+    dict_size: u32,
+};
+
+fn resolveParams(src: []const u8, opts: Options) ResolvedParams {
+    const mapped = fast_constants.mapLevel(opts.level);
+    const eng = mapped.engine_level;
+
+    // Start from the user-supplied or default minimum match length.
+    var min_ml: u32 = if (opts.min_match_length >= 4) opts.min_match_length else 4;
+
+    // Text bump: C# Fast.Compressor.SetupEncoder. Only applies to engine
+    // levels in [-2, 3] (user L1..L4) and inputs > 16 KB.
+    if (opts.min_match_length == 0 and src.len > 0x4000 and eng >= -2 and eng <= 3) {
+        if (text_detector.isProbablyText(src)) {
+            min_ml = 6;
+        }
+    }
+
+    const bits = fast_constants.getHashBits(
+        src.len,
+        @max(eng, 2),
+        opts.hash_bits,
+        16,
+        20,
+        17,
+        24,
+    );
+
+    const dict: u32 = if (opts.dictionary_size != 0) opts.dictionary_size else default_dictionary_size;
+
+    return .{
+        .engine_level = eng,
+        .use_entropy = mapped.use_entropy_coding,
+        .hash_bits = bits,
+        .min_match_length = min_ml,
+        .dict_size = dict,
+    };
+}
 
 /// Returns the entropy option mask for a given user-level.
 fn entropyOptionsForLevel(user_level: u8) EntropyOptions {
@@ -108,14 +166,22 @@ pub fn compressFramed(
     });
     pos += hdr_len;
 
-    // ── Allocate the persistent hasher(s) this level needs ────────────
-    // L1/L2/L5 → FastMatchHasher(u32). L3 → MatchHasher2x (2-entry bucket
-    // used by the lazy parser). L4 temporarily routes through the greedy
-    // entropy path until Phase 10g lands the chain hasher.
-    const params: @import("fast_match_hasher.zig").HasherParams = .{
-        .hash_bits = if (opts.level >= 2) 17 else 16,
-        .min_match_length = 4,
+    // ── Resolve per-input parameters ───────────────────────────────────
+    const resolved = resolveParams(src, opts);
+    // Per-level engine hash-bit caps to match C# Fast.Compressor.SetupEncoder
+    // where `maxHashBits = level switch { -3=>13, -2=>14, -1=>16, 0|1=>17, 2=>19, _ => adaptive }`.
+    const engine_level_cap: u6 = switch (resolved.engine_level) {
+        -3 => 13,
+        -2 => 14,
+        -1 => 16,
+        0, 1 => 17,
+        2 => 19,
+        else => resolved.hash_bits,
     };
+    const greedy_hash_bits: u6 = @min(resolved.hash_bits, engine_level_cap);
+
+    // ── Allocate the persistent hasher(s) this level needs ────────────
+    // L1/L2/L5 → FastMatchHasher(u32). L3 → MatchHasher2x. L4 → MatchHasher2.
     var greedy_hasher: ?FastMatchHasher(u32) = null;
     defer if (greedy_hasher) |*h| h.deinit();
     var lazy_hasher: ?MatchHasher2x = null;
@@ -125,17 +191,23 @@ pub fn compressFramed(
 
     switch (opts.level) {
         3 => {
-            // L3 (engine level 1): MatchHasher2x 2-entry bucket, hash_bits 17.
-            lazy_hasher = try MatchHasher2x.init(allocator, 17, 4);
+            lazy_hasher = try MatchHasher2x.init(allocator, resolved.hash_bits, resolved.min_match_length);
         },
         4 => {
-            // L4 (engine level 3): MatchHasher2 chain hasher, hash_bits 17.
-            chain_hasher = try MatchHasher2.init(allocator, 17);
+            chain_hasher = try MatchHasher2.init(allocator, resolved.hash_bits);
         },
         else => {
-            greedy_hasher = try FastMatchHasher(u32).init(allocator, params);
+            greedy_hasher = try FastMatchHasher(u32).init(allocator, .{
+                .hash_bits = greedy_hash_bits,
+                .min_match_length = resolved.min_match_length,
+            });
         },
     }
+
+    const parser_config: fast_enc.ParserConfig = .{
+        .minimum_match_length = resolved.min_match_length,
+        .dictionary_size = resolved.dict_size,
+    };
 
     // ── Loop over 256 KB outer blocks ──────────────────────────────────
     var src_off: usize = 0;
@@ -188,14 +260,14 @@ pub fn compressFramed(
                 const start_position_for_sub: usize = src_off + sub_off;
                 const entropy_options = entropyOptionsForLevel(opts.level);
                 const result = try switch (opts.level) {
-                    1 => fast_enc.encodeSubChunkRaw(1, allocator, &greedy_hasher.?, sub_src, dst[sub_payload_start..], start_position_for_sub),
-                    2 => fast_enc.encodeSubChunkRaw(2, allocator, &greedy_hasher.?, sub_src, dst[sub_payload_start..], start_position_for_sub),
+                    1 => fast_enc.encodeSubChunkRaw(1, allocator, &greedy_hasher.?, sub_src, dst[sub_payload_start..], start_position_for_sub, parser_config),
+                    2 => fast_enc.encodeSubChunkRaw(2, allocator, &greedy_hasher.?, sub_src, dst[sub_payload_start..], start_position_for_sub, parser_config),
                     // L3 (engine level 1): lazy parser, MatchHasher2x.
-                    3 => fast_enc.encodeSubChunkEntropyLazy(1, allocator, &lazy_hasher.?, sub_src, dst[sub_payload_start..], start_position_for_sub, entropy_options),
+                    3 => fast_enc.encodeSubChunkEntropyLazy(1, allocator, &lazy_hasher.?, sub_src, dst[sub_payload_start..], start_position_for_sub, entropy_options, parser_config),
                     // L4 (engine level 3): chain hasher lazy (MatchHasher2).
-                    4 => fast_enc.encodeSubChunkEntropyChain(3, allocator, &chain_hasher.?, sub_src, dst[sub_payload_start..], start_position_for_sub, entropy_options),
+                    4 => fast_enc.encodeSubChunkEntropyChain(3, allocator, &chain_hasher.?, sub_src, dst[sub_payload_start..], start_position_for_sub, entropy_options, parser_config),
                     // L5 (engine level 2): greedy with match rehashing.
-                    5 => fast_enc.encodeSubChunkEntropy(2, allocator, &greedy_hasher.?, sub_src, dst[sub_payload_start..], start_position_for_sub, entropy_options),
+                    5 => fast_enc.encodeSubChunkEntropy(2, allocator, &greedy_hasher.?, sub_src, dst[sub_payload_start..], start_position_for_sub, entropy_options, parser_config),
                     else => unreachable,
                 };
                 _ = sub_payload_cap;

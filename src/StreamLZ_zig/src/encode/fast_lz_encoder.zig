@@ -47,6 +47,17 @@ pub const EncodeResult = struct {
     bail: bool,
 };
 
+/// Per-sub-chunk parser configuration resolved by the outer driver
+/// (`streamlz_encoder.resolveParams`). Fields mirror C# `CompressOptions`
+/// post-resolution.
+pub const ParserConfig = struct {
+    /// Active minimum match length after text detection. 4 for binary,
+    /// 6 for text at engine levels ≤ 3.
+    minimum_match_length: u32,
+    /// Effective dictionary size, 1 GB by default.
+    dictionary_size: u32,
+};
+
 /// Encode a single Fast sub-chunk in raw-literal mode (no entropy).
 ///
 /// `source`:    source bytes for this sub-chunk (≤ 128 KB).
@@ -62,6 +73,7 @@ pub fn encodeSubChunkRaw(
     source: []const u8,
     dst: []u8,
     start_position: usize,
+    config: ParserConfig,
 ) EncodeError!EncodeResult {
     if (source.len <= fast_constants.min_source_length) return .{
         .bytes_written = 0,
@@ -90,9 +102,9 @@ pub fn encodeSubChunkRaw(
     defer w.deinit(allocator);
 
     var mmlt: [32]u32 = undefined;
-    fast_constants.buildMinimumMatchLengthTable(&mmlt, 4, 14);
+    fast_constants.buildMinimumMatchLengthTable(&mmlt, config.minimum_match_length, 14);
 
-    const dict_size: u32 = @intCast(fast_constants.block1_max_size * 2);
+    const dict_size: u32 = config.dictionary_size;
 
     var recent: isize = -8;
     const source_end_ptr: [*]const u8 = source.ptr + source.len;
@@ -267,6 +279,7 @@ pub fn encodeSubChunkEntropy(
     dst: []u8,
     start_position: usize,
     options: EntropyOptions,
+    config: ParserConfig,
 ) EncodeError!EncodeResult {
     if (source.len <= fast_constants.min_source_length) return .{
         .bytes_written = 0,
@@ -293,9 +306,9 @@ pub fn encodeSubChunkEntropy(
 
     var mmlt: [32]u32 = undefined;
     // `long_offset_threshold = 10` for entropy mode (vs 14 for raw).
-    fast_constants.buildMinimumMatchLengthTable(&mmlt, 4, 10);
+    fast_constants.buildMinimumMatchLengthTable(&mmlt, config.minimum_match_length, 10);
 
-    const dict_size: u32 = @intCast(fast_constants.block1_max_size * 2);
+    const dict_size: u32 = config.dictionary_size;
 
     var recent: isize = -8;
     const source_end_ptr: [*]const u8 = source.ptr + source.len;
@@ -537,6 +550,7 @@ pub fn encodeSubChunkEntropyLazy(
     dst: []u8,
     start_position: usize,
     options: EntropyOptions,
+    config: ParserConfig,
 ) EncodeError!EncodeResult {
     if (source.len <= fast_constants.min_source_length) return .{
         .bytes_written = 0,
@@ -562,9 +576,9 @@ pub fn encodeSubChunkEntropyLazy(
     defer w.deinit(allocator);
 
     var mmlt: [32]u32 = undefined;
-    fast_constants.buildMinimumMatchLengthTable(&mmlt, 4, 10);
+    fast_constants.buildMinimumMatchLengthTable(&mmlt, config.minimum_match_length, 10);
 
-    const dict_size: u32 = @intCast(fast_constants.block1_max_size * 2);
+    const dict_size: u32 = config.dictionary_size;
 
     var recent: isize = -8;
     const source_end_ptr: [*]const u8 = source.ptr + source.len;
@@ -592,7 +606,7 @@ pub fn encodeSubChunkEntropyLazy(
                 &recent,
                 dict_size,
                 &mmlt,
-                4,
+                config.minimum_match_length,
             );
         } else {
             token_writer.copyTrailingLiterals(&w, block1_cursor, block1_end, recent);
@@ -625,7 +639,7 @@ pub fn encodeSubChunkEntropyLazy(
                 &recent,
                 dict_size,
                 &mmlt,
-                4,
+                config.minimum_match_length,
             );
         } else {
             token_writer.copyTrailingLiterals(&w, block2_cursor, block2_end, recent);
@@ -647,6 +661,7 @@ pub fn encodeSubChunkEntropyChain(
     dst: []u8,
     start_position: usize,
     options: EntropyOptions,
+    config: ParserConfig,
 ) EncodeError!EncodeResult {
     if (source.len <= fast_constants.min_source_length) return .{
         .bytes_written = 0,
@@ -672,9 +687,9 @@ pub fn encodeSubChunkEntropyChain(
     defer w.deinit(allocator);
 
     var mmlt: [32]u32 = undefined;
-    fast_constants.buildMinimumMatchLengthTable(&mmlt, 4, 10);
+    fast_constants.buildMinimumMatchLengthTable(&mmlt, config.minimum_match_length, 10);
 
-    const dict_size: u32 = @intCast(fast_constants.block1_max_size * 2);
+    const dict_size: u32 = config.dictionary_size;
 
     var recent: isize = -8;
     const source_end_ptr: [*]const u8 = source.ptr + source.len;
@@ -701,7 +716,7 @@ pub fn encodeSubChunkEntropyChain(
                 &recent,
                 dict_size,
                 &mmlt,
-                4,
+                config.minimum_match_length,
             );
         } else {
             token_writer.copyTrailingLiterals(&w, block1_cursor, block1_end, recent);
@@ -733,7 +748,7 @@ pub fn encodeSubChunkEntropyChain(
                 &recent,
                 dict_size,
                 &mmlt,
-                4,
+                config.minimum_match_length,
             );
         } else {
             token_writer.copyTrailingLiterals(&w, block2_cursor, block2_end, recent);
@@ -790,7 +805,10 @@ test "encodeSubChunkRaw roundtrip: repeating 2 KB pattern" {
     defer hasher.deinit();
 
     var dst: [4096]u8 = undefined;
-    const res = try encodeSubChunkRaw(1, testing.allocator, &hasher, &source, &dst, 0);
+    const res = try encodeSubChunkRaw(1, testing.allocator, &hasher, &source, &dst, 0, .{
+        .minimum_match_length = 4,
+        .dictionary_size = 0x40000000,
+    });
     try testing.expect(!res.bail);
     try testing.expect(res.bytes_written < source.len);
 
@@ -811,7 +829,10 @@ test "encodeSubChunkRaw roundtrip: 4 KB binary-ish input" {
     defer hasher.deinit();
 
     var dst: [source.len + 512]u8 = undefined;
-    const res = try encodeSubChunkRaw(1, testing.allocator, &hasher, &source, &dst, 0);
+    const res = try encodeSubChunkRaw(1, testing.allocator, &hasher, &source, &dst, 0, .{
+        .minimum_match_length = 4,
+        .dictionary_size = 0x40000000,
+    });
     if (res.bail) return; // Random data usually bails — acceptable.
 
     var decoded: [source.len + 64]u8 = @splat(0);
@@ -829,7 +850,10 @@ test "encodeSubChunkRaw roundtrip: 16 KB lorem-ipsum-ish" {
     defer hasher.deinit();
 
     var dst: [source.len + 512]u8 = undefined;
-    const res = try encodeSubChunkRaw(1, testing.allocator, &hasher, &source, &dst, 0);
+    const res = try encodeSubChunkRaw(1, testing.allocator, &hasher, &source, &dst, 0, .{
+        .minimum_match_length = 4,
+        .dictionary_size = 0x40000000,
+    });
     try testing.expect(!res.bail);
 
     var decoded: [source.len + 64]u8 = @splat(0);
