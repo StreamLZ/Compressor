@@ -1,6 +1,6 @@
 # StreamLZ Zig port — status snapshot
 
-**Snapshot date:** 2026-04-12 (session pre-compaction)
+**Snapshot date:** 2026-04-13
 **Zig:** 0.15.2, pinned in `build.zig.zon`
 **Host:** Intel Ultra 9 285K (Arrow Lake-S), Windows 11, `-Doptimize=ReleaseFast -Dcpu=native`
 
@@ -8,14 +8,16 @@
 
 The **decoder is complete** for all 11 StreamLZ compression levels
 single-threaded, byte-exact against the C# encoder on every fixture I
-have (tiny, text 4K-2MB, binary 4K-256K, silesia 212MB, enwik8 100MB,
-highly-repetitive). The **encoder has not started**. Fast codec
-decompress is at parity with C# serial (1.00-1.04×). High codec
-decompress is 0.73-0.83× of C# serial — a gap the C# version closes in
-practice via parallel dispatch (`DecompressCoreTwoPhase` for L9-L11,
-`DecompressCoreParallel` for SC L6-L8), which the Zig port doesn't have
-yet (phase 13). Repo lives under `src/StreamLZ_zig/`, decoder-only,
-zero coupling to the .NET solution.
+have. The **Fast encoder (L1-L5) is complete and byte-exact** with the
+C# reference across 100 fixtures (L1-L5 × 20 shapes/sizes), enwik8
+(100 MB), and silesia (212 MB) — every level, every file, zero delta.
+Fast codec decompress is at parity with C# serial (1.00-1.04×). High
+codec decompress is 0.73-0.83× of C# serial — a gap the C# version
+closes via parallel dispatch (`DecompressCoreTwoPhase` for L9-L11,
+`DecompressCoreParallel` for SC L6-L8), which the Zig port doesn't
+have yet (phase 13). **High encoder (L6-L11) is pending** — needs
+optimal parser, BT4 match finder, real Huffman/tANS encoders. Repo
+lives under `src/StreamLZ_zig/`, zero coupling to the .NET solution.
 
 ## Phase tracker
 
@@ -34,17 +36,17 @@ zero coupling to the .NET solution.
 | 5b | SC grouping | Per-group `dst_start` computation so group-first chunks get `base_offset == 0` initial Copy64; tail prefix restoration |
 | 7 | Vectorize CopyHelpers | `@Vector(16, u8)` × 4 for `copy64Bytes`, `@Vector(8, u8)` `+%` for `copy64Add`. `streamlz bench` subcommand for in-memory timing |
 | 7b | High decoder hot loop | `@prefetch` 128 tokens ahead in `executeTokensType1`; same-iteration prefetch in `processLzRunsType0`; 8-byte cascading literal copy |
-| 8 | Fixture corpus + roundtrip tests | `scripts/gen_fixtures.sh` builds 20 raws × 7 levels = 140 `.slz` under `src/StreamLZ_zig/fixtures/` (gitignored). `decode/fixture_tests.zig` walks `$STREAMLZ_FIXTURES_DIR/slz/*.slz`, decodes, and diffs against `raw/<stem>.raw`. Skips cleanly if env var unset. Debug + ReleaseFast both 48/48 green, 140/140 bit-exact |
-| 9 (raw) | Fast encoder L1/L2 (raw-literal mode) | `encode/{fast_constants,fast_match_hasher,fast_stream_writer,fast_token_writer,fast_lz_parser,fast_lz_encoder,streamlz_encoder}.zig`. Greedy parser with `FastMatchHasher(u32)`, `@prefetch`-friendly hot loop, `comptime level` folding. `streamlz compress [-l N] <in> <out>` CLI. Roundtrip corpus: 40/40 Zig encode → Zig decode + Zig encode → C# decode, byte-exact across all 4 shapes × 5 sizes |
-| 10a-c | Entropy infra scaffolding | `encode/byte_histogram.zig`, `io/bit_writer_64.zig` (forward + backward), `encode/tans_encoder.zig` (normalize + init_table + get_bit_count + encode_bytes + encode_table scaffolding). Compiles clean, 90/90 passing; 2 tANS roundtrip tests skipped (see caveats) |
+| 8 | Fixture corpus + roundtrip tests | `scripts/gen_fixtures.sh` builds 20 raws × 7 levels = 140 `.slz` under `src/StreamLZ_zig/fixtures/` (gitignored). `decode/fixture_tests.zig` walks `$STREAMLZ_FIXTURES_DIR/slz/*.slz`, decodes, and diffs against `raw/<stem>.raw`. Skips cleanly if env var unset. 140/140 bit-exact |
+| 9 | Fast encoder L1-L5, byte-exact with C# | `encode/{fast_constants,fast_match_hasher,fast_stream_writer,fast_token_writer,fast_lz_parser,fast_lz_encoder,streamlz_encoder,text_detector,cost_model,cost_coefficients,byte_histogram}.zig`. Greedy parser (engine -2/-1/1/2) + lazy chain parser (engine 4) + raw-mode and entropy-mode sub-chunk assemblers. Bit-exact with C# Fast across 100 fixtures, enwik8 (100 MB), silesia (212 MB) — every Fast level, every file, zero delta. `streamlz c [-l N] <in> <out>` CLI. See `commit log` below for the per-phase breakdown |
+| 10a-c | Entropy infra scaffolding | `encode/byte_histogram.zig` (with `getCostApproxCore`), `io/bit_writer_64.zig` (forward + backward), `encode/tans_encoder.zig` (normalize + init_table + get_bit_count + encode_bytes + encode_table scaffolding). Compiles clean; 2 tANS roundtrip tests skipped (see caveats) |
+| 10i-l | Fast encoder parity sweep | Phase-10 sub-phases that chased the remaining drift to zero: `Slz.MapLevel` alignment, whole-input hasher window, adaptive hash sizing with text detection, `WriteOffsetWithLiteral1`, delta-literal histogram-cost selection, Off16 entropy-split cost compare, EntropyOptions per-level masks, block-/sub-chunk-level `AreAllBytesEqual`, `CheckPlainHuffman` trial-encode arm, per-block cost-vs-memsetCost rewrite, backward-extend whole-input bound, and the final hasher-vs-parser `min_match_length` split. See the commit `437e6a6` body for the full list |
 
 ### Pending
 | # | phase | notes |
 |---|---|---|
-| 10d (debug) | tANS encoder roundtrip | `tansInitTable` + `tansEncodeBytes` + `tansEncodeTable` all compile but the round-trip through `decode/tans_decoder.zig` produces scrambled output. First two bytes of a 256-byte "abcabc…" test decode correctly, then diverge. Bug is likely in the state-table initialization (`base_offset` math for the weight-1 path or the 4-way distribution) or the stream-swap semantics. Debug is cheapest with a minimal 2-symbol test + side-by-side C# reference |
-| 9 (entropy) | Fast encoder L3–L5 (entropy mode) | Same parser, different assembly path: `EntropyEncoder.EncodeArrayU8` for literal/token streams, off16 split + entropy, chunk type selection. Blocked on Phase 10 |
-| 10 | Huffman + tANS encoders | `encode/multi_array_huffman_encoder.zig` (2 KLOC in C#), `encode/tans_encoder.zig`, `encode/offset_encoder.zig`, `encode/byte_histogram.zig` |
-| 11 | High encoder | `encode/high_lz_encoder.zig`, `encode/optimal_parser.zig` (DP), `encode/cost_model.zig` |
+| 10d (debug) | tANS encoder roundtrip | `tansInitTable` + `tansEncodeBytes` + `tansEncodeTable` all compile but the round-trip through `decode/tans_decoder.zig` produces scrambled output. First two bytes of a 256-byte "abcabc…" test decode correctly, then diverge. Bug is likely in the state-table initialization (`base_offset` math for the weight-1 path or the 4-way distribution) or the stream-swap semantics. Not on the critical path — Fast levels disable tANS anyway — but required for High (L6+) parity |
+| 10 | Huffman + tANS encoders | `encode/multi_array_huffman_encoder.zig` (2 KLOC in C#), `encode/offset_encoder.zig`, real `encode/tans_encoder.zig`. Fast L1-L5 works without these because `EntropyOptions` clears `AllowTANS` / `AllowMultiArray` for Fast — `EncodeArrayU8` falls through to memcpy and is already byte-parity with C# |
+| 11 | High encoder | `encode/high_lz_encoder.zig`, `encode/optimal_parser.zig` (DP), High-side cost model |
 | 12 | BT4 match finder | `encode/match_finder_bt4.zig` — needed for L11 only |
 | 13 | Parallel decompress | `DecompressCoreTwoPhase` (L9-L11) + `DecompressCoreParallel` (L6-L8 SC) — the multi-GB/s regime lives here |
 | 14 | Parallel compress | Thread pool for SC groups |
@@ -74,8 +76,23 @@ src/
     entropy_decoder.zig           Type dispatcher (0 memcopy, 1 tANS, 2/4 Huffman, 3 RLE, 5 Recursive)
     huffman_decoder.zig           canonical Huffman 11-bit LUT + 3-stream parallel decode
     tans_decoder.zig              tANS table decode + LUT init + 5-state interleaved decode
-  encode/                         ← all files exist as stubs with a planned-phase comment;
-                                    any edit here is new work
+  encode/
+    streamlz_encoder.zig          top-level framed compress + per-block/sub-chunk dispatch
+    fast_constants.zig            FastConstants + level mapping + min-match-length table builder
+    fast_match_hasher.zig         FastMatchHasher(u16/u32) — single-entry Fibonacci hash
+    fast_stream_writer.zig        6-parallel-stream output buffer (literal/delta/token/off16/off32/length)
+    fast_token_writer.zig         writeOffset / writeComplexOffset / writeOffsetWithLiteral1 / writeLengthValue / writeOffset32
+    fast_lz_parser.zig            Greedy + lazy chain parser (comptime level, comptime hash T)
+    fast_lz_encoder.zig           Sub-chunk encoders: raw (L1/L2), entropy (L3/L4), entropy chain (L5) + assembleEntropyOutput
+    text_detector.zig             Text-probability heuristic → triggers min-match-length bump
+    cost_model.zig                Platform cost combination + decoding-time estimates
+    cost_coefficients.zig         Memset-cost coefficients + speed-tradeoff scaling
+    byte_histogram.zig            ByteHistogram + getCostApproxCore (log2 lookup table)
+    match_hasher.zig              MatchHasher2 chain hasher (L5 lazy)
+    entropy_encoder.zig           EncodeArrayU8 / EncodeArrayU8Memcpy — memcpy-only for Fast
+    encode_fixture_tests.zig      Zig encode → C# reference diff (byte-exact roundtrip)
+    (high_lz_encoder, optimal_parser, match_finder_bt4, tans_encoder,
+     multi_array_huffman_encoder, offset_encoder) — stubs for phases 10-12
 ```
 
 ## Decoder benchmarks (Zig mean vs C# serial median, single-thread, pure decompress)
@@ -183,7 +200,12 @@ apples-to-apples against the single-threaded Zig port.
   works correctly and at ~950 MB/s but C# in practice uses
   `DecompressCoreParallel` (~10 GB/s multi-threaded on silesia L6).
 - **L9-L11 two-phase parallel decode** not yet implemented (phase 13).
-- **Encoder is entirely pending** (phases 9-14).
+- **High encoder (L6-L11) is pending** (phase 11+). Needs optimal
+  parser, BT4 match finder, real Huffman/tANS encoders. Not on the
+  critical path while Fast L1-L5 is validated.
+- **tANS encoder roundtrip is broken** (phase 10d). Unreachable from
+  Fast levels (they disable tANS), so doesn't block Fast parity.
+- **Parallel compress** for SC groups is phase 14.
 - **No file-checksum verification** (XXH32 after end mark). The
   decoder skips it; fine for local testing, nice-to-have for
   production.
@@ -193,44 +215,62 @@ apples-to-apples against the single-threaded Zig port.
 - **Async / pipelined I/O** (equivalent to C# frame compressor's
   double-buffered read-ahead) not relevant until encoder exists.
 
-## Commit log this session (latest first)
+## Commit log (latest first)
 
 ```
+437e6a6  Zig encoder: byte-exact parity with C# Fast L1-L5
+5c9c934  Zig CLI: benchc subcommand for in-memory compress+decompress benchmarks
+28df736  Zig encoder: restore +0% parity with C# Fast (Phase 10j fix)
+5657cf3  Zig encoder: Phase 10l edge-case tests
+60e136e  Zig encoder: whole-input hasher window (Phase 10j)
+4853791  Zig encoder: align with Slz.MapLevel + disable tANS for Fast (Phase 10i fix)
+13e00d0  Zig encoder: text detection + adaptive hash sizing + options plumbing
+831af9d  Zig encoder: L4 chain-hasher lazy parser + MatchHasher2 (Phase 10g)
+4c31291  Zig encoder: L3 lazy parser + MatchHasher2x (Phase 10f)
+ba9651e  Zig encoder: entropy assembly path + L5 wiring (Phase 10e)
+98023bf  tANS encoder: allocator-based scratch + enwik8/silesia roundtrips
+6519c42  Phase 10d: Fix tANS encoder stream layout (forward/backward overlap)
+490ae25  Phase 10 WIP: byte histogram, 64-bit bit writers, tANS encoder scaffold
+23a790a  Phase 9 (raw): Fast encoder levels 1 and 2
+2e391dd  Phase 8: fixture corpus + exhaustive roundtrip tests
+20fc1de  Add STATUS.md snapshot for session compaction
 cd43bab  Phase 7b: prefetch + 8-byte cascade in High decoder hot loop
 f20f8b3  Phase 5b: serial L6-L8 self-contained decoder
-c8c2336  Bench doc: honest Zig mean vs C# serial median single-thread numbers
 8c255e3  Phase 7: vectorize CopyHelpers + add bench mode + honest L1/L5 parity
-9363321  Add decompress benchmark baseline before Phase 7 vectorization
 bbfadc1  Fix tANS src_start / src_end — C# sets them pre-state-init
 54dffa3  Phase 4b: RLE + Recursive entropy types, wildCopy16 overlap fix
 19107c8  Finish Phase 5 + 6: High LZ decoder works end-to-end for L9-L11
-c648d06  High LZ decoder scaffold (ReadLzTable + ProcessLzRuns Type0/Type1 + UnpackOffsets)
-5642337  Fast LZ decoder end-to-end: Huffman + entropy dispatcher + Fast codec
-6b66758  Zig port: foundation, wire format, bit I/O, decompress scaffold + Huffman decoder
 ```
 
-Base (pre-session): `4a0451a` (`Add concurrent access test verifying Slz thread safety`).
+Base (pre-decoder work): `4a0451a` (`Add concurrent access test verifying Slz thread safety`).
 
 ## Recommended next session entry points (in order)
 
-1. **Phase 10 — Entropy encoders.** Port `multi_array_huffman_encoder.zig`
-   (~2 KLOC in C#), `tans_encoder.zig`, `offset_encoder.zig`, and
-   `byte_histogram.zig`. Once landed, L3–L5 light up by flipping
-   `useLiteralEntropyCoding` on the Fast encoder's assembly path and
-   threading `EntropyEncoder.EncodeArrayU8` through it.
-
-2. **Phase 13 — Parallel decompress.** This is what closes the 0.7-0.8×
+1. **Phase 13 — Parallel decompress.** This is what closes the 0.7-0.8×
    gap on L6-L11. Uses `std.Thread.Pool` and a pre-scan over chunks.
-   Gemini's review (rejected above as hallucinated on specifics) is
-   actually correct in general shape: pre-allocate per-worker scratch,
-   spawn via thread pool, wait-group join. Worth revisiting.
+   Pre-allocate per-worker scratch, spawn via thread pool, wait-group
+   join.
+
+2. **Phase 10d — Fix tANS encoder roundtrip.** Unblocks the real
+   `EncodeArrayU8` path. Minimal 2-symbol test + side-by-side C#
+   reference is the cheapest way to bisect the state-table
+   initialization bug. Only matters for High encoder parity.
+
+3. **Phase 11 — High encoder.** DP optimal parser + `high_lz_encoder.zig`
+   + High-side cost model. Needs phase 10 done first.
+
+4. **Phase 12 — BT4 match finder.** L11 only, after phase 11.
+
+5. **Phase 14 — Parallel compress.** Thread pool for SC groups, mostly
+   bookkeeping once Fast + High are done.
 
 ## Unit test count
 
-79 Zig unit tests passing, wired via `main.zig` test aggregator:
+137 Zig unit tests passing, wired via `main.zig` test aggregator:
 
 ```
 $ STREAMLZ_FIXTURES_DIR=./fixtures zig build test --summary all
+Build Summary: 3/3 steps succeeded; 137/137 tests passed
   [fixture_tests] all 140 fixtures passed
   [encode_fixture_tests] all 100 encode roundtrips passed
 ```

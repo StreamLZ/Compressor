@@ -48,24 +48,27 @@ src/StreamLZ_zig/
     │   ├── tans_decoder.zig             [phase 6] 5-state interleaved tANS decoder
     │   └── fixture_tests.zig            [phase 8] exhaustive corpus roundtrip test
     │
-    └── encode/                          # Everything write-side
-        ├── streamlz_encoder.zig         [phase 9] Top-level framed compress dispatcher
-        ├── fast_constants.zig           [phase 9] FastConstants + level-mapping helpers
-        ├── fast_match_hasher.zig        [phase 9] FastMatchHasher(T) single-entry Fibonacci hash
+    └── encode/                          # Everything write-side — Fast L1-L5 byte-exact with C#
+        ├── streamlz_encoder.zig         [phase 9] Top-level framed compress + per-block/sub-chunk driver
+        ├── fast_constants.zig           [phase 9] FastConstants + Slz.MapLevel compose + getHashBits + mmlt builder
+        ├── fast_match_hasher.zig        [phase 9] FastMatchHasher(u16/u32) single-entry Fibonacci hash
         ├── fast_stream_writer.zig       [phase 9] 6-parallel-stream output buffer (raw + entropy)
-        ├── fast_token_writer.zig        [phase 9] writeOffset / writeComplexOffset / writeLengthValue / writeOffset32
-        ├── fast_lz_parser.zig           [phase 9] Greedy match-finding hot loop (comptime level)
-        ├── fast_lz_encoder.zig          [phase 9] encodeSubChunkRaw — raw-mode (L1/L2) assembly
-        ├── encode_fixture_tests.zig     [phase 9] corpus-driven encode→decode roundtrip tests
-        ├── high_lz_encoder.zig          [phase 11] High codec: token emitter
-        ├── optimal_parser.zig           [phase 11] DP optimal parser
-        ├── match_hasher.zig             [phase 9] (superseded — see fast_match_hasher.zig)
-        ├── match_finder_bt4.zig         [phase 12] Binary-tree match finder for L11
-        ├── multi_array_huffman_encoder.zig [phase 10] Multi-stream Huffman encoder (big one)
-        ├── tans_encoder.zig             [phase 10] tANS encoder (freq-norm heap + state machine)
-        ├── offset_encoder.zig           [phase 10] Offset variable-length coder (low+high range)
-        ├── cost_model.zig               [phase 11] Per-token entropy cost model
-        └── byte_histogram.zig           [phase 10] Frequency counting + compressed histogram
+        ├── fast_token_writer.zig        [phase 9] writeOffset / writeComplexOffset / writeOffsetWithLiteral1 / writeLengthValue / writeOffset32
+        ├── fast_lz_parser.zig           [phase 9] Greedy + lazy-chain parsers (comptime level + comptime hash T)
+        ├── fast_lz_encoder.zig          [phase 9/10] encodeSubChunkRaw / encodeSubChunkEntropy / encodeSubChunkEntropyChain + assembleEntropyOutput
+        ├── text_detector.zig            [phase 10i] Text-probability heuristic → min-match-length bump
+        ├── cost_model.zig               [phase 10i] Platform cost combination + decoding-time estimates
+        ├── cost_coefficients.zig        [phase 10i] Memset-cost coefficients + speed-tradeoff scaling
+        ├── byte_histogram.zig           [phase 10] ByteHistogram + getCostApproxCore (log2 LUT)
+        ├── match_hasher.zig             [phase 9] MatchHasher2 chain hasher (L5 lazy)
+        ├── entropy_encoder.zig          [phase 10] EncodeArrayU8 / EncodeArrayU8Memcpy (memcpy-only for Fast)
+        ├── encode_fixture_tests.zig     [phase 9] corpus-driven encode → C# reference diff
+        ├── high_lz_encoder.zig          [phase 11 STUB] High codec: token emitter
+        ├── optimal_parser.zig           [phase 11 STUB] DP optimal parser
+        ├── match_finder_bt4.zig         [phase 12 STUB] Binary-tree match finder for L11
+        ├── multi_array_huffman_encoder.zig [phase 10 STUB] Multi-stream Huffman encoder
+        ├── tans_encoder.zig             [phase 10d STUB] tANS encoder — roundtrip broken
+        └── offset_encoder.zig           [phase 10 STUB] Offset variable-length coder
 ```
 
 ## Phases → files
@@ -82,9 +85,9 @@ src/StreamLZ_zig/
 | 6 | tANS decoder | `decode/tans_decoder.zig` |
 | 7 | Vectorize copies | `io/copy_helpers.zig` (@Vector pass) |
 | 8 | Fixture corpus + exhaustive roundtrip | tests only |
-| 9 | Fast encoder | `encode/streamlz_encoder.zig`, `encode/fast_lz_encoder.zig`, `encode/match_hasher.zig` |
-| 10 | Huffman + tANS + offset encoders | `encode/multi_array_huffman_encoder.zig`, `encode/tans_encoder.zig`, `encode/offset_encoder.zig`, `encode/byte_histogram.zig` |
-| 11 | High encoder + optimal parser | `encode/high_lz_encoder.zig`, `encode/optimal_parser.zig`, `encode/cost_model.zig` |
+| 9 | Fast encoder (L1-L5) byte-exact | `encode/{streamlz_encoder,fast_constants,fast_match_hasher,fast_stream_writer,fast_token_writer,fast_lz_parser,fast_lz_encoder,text_detector,cost_model,cost_coefficients,byte_histogram,match_hasher,entropy_encoder}.zig` |
+| 10 | Huffman + tANS + offset encoders | `encode/multi_array_huffman_encoder.zig`, `encode/tans_encoder.zig`, `encode/offset_encoder.zig` (stubs — not needed for Fast parity, required for High) |
+| 11 | High encoder + optimal parser | `encode/high_lz_encoder.zig`, `encode/optimal_parser.zig` |
 | 12 | BT4 match finder | `encode/match_finder_bt4.zig` |
 | 13 | Parallel decompress | parallelism added to `decode/streamlz_decoder.zig` |
 | 14 | Parallel compress | parallelism added to `encode/streamlz_encoder.zig` |
