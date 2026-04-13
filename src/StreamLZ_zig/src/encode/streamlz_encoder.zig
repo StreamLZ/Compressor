@@ -489,3 +489,98 @@ test "compressFramed L1 roundtrip: pseudo-random 4 KB (likely uncompressible)" {
     try roundtrip(&src, 1);
 }
 
+// ────────────────────────────────────────────────────────────
+//  Edge cases (Phase 10l)
+// ────────────────────────────────────────────────────────────
+
+/// Roundtrip helper that runs one `source` through every supported level
+/// (1..5) and verifies byte-exact decompression.
+fn roundtripAllLevels(source: []const u8) !void {
+    var lvl: u8 = 1;
+    while (lvl <= 5) : (lvl += 1) {
+        try roundtrip(source, lvl);
+    }
+}
+
+test "edge: single byte" {
+    const src = [_]u8{'Z'};
+    try roundtripAllLevels(&src);
+}
+
+test "edge: empty input" {
+    const src: []const u8 = &[_]u8{};
+    try roundtripAllLevels(src);
+}
+
+test "edge: all zeros, 128 KB (single sub-chunk exact)" {
+    const src: [128 * 1024]u8 = @splat(0);
+    try roundtripAllLevels(&src);
+}
+
+test "edge: all same byte (0xFF), 2 MB" {
+    const src: [2 * 1024 * 1024]u8 = @splat(0xFF);
+    try roundtripAllLevels(&src);
+}
+
+test "edge: input exactly 128 KB (one sub-chunk, no block2)" {
+    var src: [128 * 1024]u8 = undefined;
+    var state: u32 = 0xBEEF;
+    for (&src) |*b| {
+        state = state *% 1664525 +% 1013904223;
+        b.* = @intCast((state >> 24) & 0xFF);
+    }
+    try roundtripAllLevels(&src);
+}
+
+test "edge: input exactly 128 KB + 1 (straddles sub-chunk boundary by 1 byte)" {
+    var src: [128 * 1024 + 1]u8 = undefined;
+    for (&src, 0..) |*b, i| b.* = @intCast('a' + (i % 7));
+    try roundtripAllLevels(&src);
+}
+
+test "edge: input exactly 256 KB (one outer chunk, two full sub-chunks)" {
+    var src: [256 * 1024]u8 = undefined;
+    const p = "The quick brown fox jumps over a lazy dog. ";
+    var i: usize = 0;
+    while (i < src.len) : (i += 1) src[i] = p[i % p.len];
+    try roundtripAllLevels(&src);
+}
+
+test "edge: input exactly 256 KB + 1 (straddles outer chunk boundary)" {
+    var src: [256 * 1024 + 1]u8 = undefined;
+    const p = "abcdefghij";
+    var i: usize = 0;
+    while (i < src.len) : (i += 1) src[i] = p[i % p.len];
+    try roundtripAllLevels(&src);
+}
+
+test "edge: random incompressible 64 KB (bail path)" {
+    var src: [64 * 1024]u8 = undefined;
+    var state: u32 = 0xCAFEBABE;
+    for (&src) |*b| {
+        state = state *% 2654435761 +% 0x9E3779B1;
+        b.* = @intCast((state >> 16) & 0xFF);
+    }
+    try roundtripAllLevels(&src);
+}
+
+test "edge: 1 MB alternating 64-byte runs of A and B" {
+    var src: [1024 * 1024]u8 = undefined;
+    for (&src, 0..) |*b, i| b.* = if ((i / 64) & 1 == 0) @as(u8, 'A') else @as(u8, 'B');
+    try roundtripAllLevels(&src);
+}
+
+test "edge: 300 KB (chunk boundary at 256 KB + tail < sub-chunk)" {
+    var src: [300 * 1024]u8 = undefined;
+    for (&src, 0..) |*b, i| b.* = @intCast((i * 131 + 7) & 0xFF);
+    try roundtripAllLevels(&src);
+}
+
+test "edge: 520 KB (three outer chunks: 256 KB + 256 KB + 8 KB tail)" {
+    var src: [520 * 1024]u8 = undefined;
+    const p = "The persistence test pattern repeats. 1234567890 abcdefg ";
+    var i: usize = 0;
+    while (i < src.len) : (i += 1) src[i] = p[i % p.len];
+    try roundtripAllLevels(&src);
+}
+
