@@ -13,6 +13,7 @@ const Command = enum {
     decompress,
     compress,
     bench,
+    benchc,
 
     fn parse(s: []const u8) ?Command {
         const map = .{
@@ -29,6 +30,8 @@ const Command = enum {
             .{ "c", .compress },
             .{ "bench", .bench },
             .{ "b", .bench },
+            .{ "benchc", .benchc },
+            .{ "bc", .benchc },
         };
         inline for (map) |entry| {
             if (std.mem.eql(u8, s, entry[0])) return entry[1];
@@ -69,8 +72,140 @@ pub fn main() !void {
         .info => try runInfo(allocator, stdout, args[2..]),
         .decompress => try runDecompress(allocator, stdout, args[2..]),
         .bench => try runBench(allocator, stdout, args[2..]),
+        .benchc => try runBenchCompress(allocator, stdout, args[2..]),
         .compress => try runCompress(allocator, stdout, args[2..]),
     }
+}
+
+/// In-memory compress + decompress benchmark mirroring the C# `slz -b`
+/// output: per-run timings, median (not mean), and a final round-trip
+/// pass/fail check.
+fn runBenchCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const []const u8) !void {
+    if (args.len < 2 or args.len > 3) {
+        try w.writeAll("usage: streamlz benchc <raw-file> <level> [runs]\n");
+        try w.flush();
+        std.process.exit(2);
+    }
+    const path = args[0];
+    const level: u8 = std.fmt.parseInt(u8, args[1], 10) catch {
+        try w.writeAll("error: level must be 1..5\n");
+        try w.flush();
+        std.process.exit(2);
+    };
+    if (level < 1 or level > 5) {
+        try w.writeAll("error: level must be 1..5\n");
+        try w.flush();
+        std.process.exit(2);
+    }
+    const runs: u32 = if (args.len == 3)
+        std.fmt.parseInt(u32, args[2], 10) catch 3
+    else
+        3;
+    if (runs == 0) {
+        try w.writeAll("error: runs must be >= 1\n");
+        try w.flush();
+        std.process.exit(2);
+    }
+
+    const in_file = std.fs.cwd().openFile(path, .{}) catch |err| {
+        try w.print("error: cannot open '{s}': {s}\n", .{ path, @errorName(err) });
+        try w.flush();
+        std.process.exit(1);
+    };
+    defer in_file.close();
+
+    const max_bytes: usize = 1 << 31;
+    const src = in_file.readToEndAlloc(allocator, max_bytes) catch |err| {
+        try w.print("error: cannot read '{s}': {s}\n", .{ path, @errorName(err) });
+        try w.flush();
+        std.process.exit(1);
+    };
+    defer allocator.free(src);
+
+    const bound = encoder.compressBound(src.len);
+    const compressed = try allocator.alloc(u8, bound);
+    defer allocator.free(compressed);
+    const decompressed = try allocator.alloc(u8, src.len + decoder.safe_space);
+    defer allocator.free(decompressed);
+
+    const mb: f64 = @as(f64, @floatFromInt(src.len)) / (1024.0 * 1024.0);
+    try w.print("Input: {s} ({d} bytes, {d:.2} MB)\n", .{ path, src.len, mb });
+
+    // Warm-up compress (untimed) — first run would otherwise include one-time
+    // page-fault cost on the output buffers.
+    var comp_size: usize = try encoder.compressFramed(allocator, src, compressed, .{ .level = level });
+
+    // ── Compress benchmark ────────────────────────────────────────────
+    const comp_times = try allocator.alloc(u64, runs);
+    defer allocator.free(comp_times);
+    var r: u32 = 0;
+    while (r < runs) : (r += 1) {
+        var timer = try std.time.Timer.start();
+        const n = try encoder.compressFramed(allocator, src, compressed, .{ .level = level });
+        comp_times[r] = timer.read();
+        comp_size = n;
+        const run_ms = @as(f64, @floatFromInt(comp_times[r])) / 1_000_000.0;
+        const run_mbps = mb * 1000.0 / run_ms;
+        try w.print("  Compress run {d}: {d:.0}ms ({d:.1} MB/s)\n", .{ r + 1, run_ms, run_mbps });
+    }
+    try w.print("Level {d}: {d} -> {d} bytes ({d:.1}%)\n\n", .{
+        level,
+        src.len,
+        comp_size,
+        @as(f64, @floatFromInt(comp_size)) / @as(f64, @floatFromInt(src.len)) * 100.0,
+    });
+
+    const comp_median_ns = median(comp_times);
+    const comp_median_ms = @as(f64, @floatFromInt(comp_median_ns)) / 1_000_000.0;
+    const comp_median_mbps = mb * 1000.0 / comp_median_ms;
+    try w.print("  Compress median: {d:.0}ms ({d:.1} MB/s)\n\n", .{ comp_median_ms, comp_median_mbps });
+
+    // Warm-up decompress.
+    _ = try decoder.decompressFramed(compressed[0..comp_size], decompressed);
+
+    // ── Decompress benchmark ──────────────────────────────────────────
+    const dec_times = try allocator.alloc(u64, runs);
+    defer allocator.free(dec_times);
+    r = 0;
+    while (r < runs) : (r += 1) {
+        var timer = try std.time.Timer.start();
+        _ = try decoder.decompressFramed(compressed[0..comp_size], decompressed);
+        dec_times[r] = timer.read();
+        const run_ms = @as(f64, @floatFromInt(dec_times[r])) / 1_000_000.0;
+        const run_mbps = mb * 1000.0 / run_ms;
+        try w.print("  Decompress run {d}: {d:.0}ms ({d:.1} MB/s)\n", .{ r + 1, run_ms, run_mbps });
+    }
+    const dec_median_ns = median(dec_times);
+    const dec_median_ms = @as(f64, @floatFromInt(dec_median_ns)) / 1_000_000.0;
+    const dec_median_mbps = mb * 1000.0 / dec_median_ms;
+    try w.print("  Decompress median: {d:.0}ms ({d:.1} MB/s)\n\n", .{ dec_median_ms, dec_median_mbps });
+
+    // Round-trip check on the freshly decompressed buffer.
+    if (std.mem.eql(u8, src, decompressed[0..src.len])) {
+        try w.writeAll("Round-trip: PASS\n");
+    } else {
+        try w.writeAll("Round-trip: FAIL\n");
+        try w.flush();
+        std.process.exit(1);
+    }
+}
+
+/// Median of a slice of nanosecond durations. Mutates a copy of the input
+/// so the caller's array is left untouched.
+fn median(times: []const u64) u64 {
+    var buf: [64]u64 = undefined;
+    const n = times.len;
+    if (n == 0) return 0;
+    if (n > buf.len) {
+        // Fall back to mean for very large run counts.
+        var sum: u128 = 0;
+        for (times) |t| sum += t;
+        return @intCast(sum / n);
+    }
+    @memcpy(buf[0..n], times);
+    std.mem.sort(u64, buf[0..n], {}, std.sort.asc(u64));
+    if (n % 2 == 1) return buf[n / 2];
+    return (buf[n / 2 - 1] + buf[n / 2]) / 2;
 }
 
 fn runBench(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const []const u8) !void {
