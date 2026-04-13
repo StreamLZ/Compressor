@@ -30,7 +30,8 @@ pub const DecompressError = error{
     BlockDataTruncated,
     OutputTooSmall,
     HighNotImplemented,
-} || fast.DecodeError || high.DecodeError;
+    ChecksumMismatch,
+} || fast.DecodeError || high.DecodeError || std.mem.Allocator.Error;
 
 /// Streams `src` (an SLZ1-framed buffer) into `dst`, returning the number
 /// of bytes written to `dst`. `dst.len` must be at least `content_size + safe_space`
@@ -85,6 +86,172 @@ pub fn decompressFramed(src: []const u8, dst: []u8) DecompressError!usize {
         if (dst_off != cs) return error.SizeMismatch;
     }
     return dst_off;
+}
+
+/// Whole-chunk match copy: reads `length` bytes from `dst - offset` into
+/// `dst[0..length]`. Used for "whole-match" chunk variants where the entire
+/// chunk is a single back-reference to earlier output.
+///
+/// Port of C# `StreamLZDecoder.CopyWholeMatch` at
+/// `StreamLzDecoder.cs:142-157`. Uses 8-byte chunks when `offset >= 8` so
+/// the load and store regions don't overlap. Falls through to byte-at-a-time
+/// for the tail.
+///
+/// Unreachable via the current encoder (no compressor populates
+/// `chunk_header.whole_match_distance`) but kept for structural parity and
+/// to match the wire format reservation.
+fn copyWholeMatch(dst: [*]u8, offset: u32, length: usize) void {
+    std.debug.assert(offset > 0);
+    const src_addr: usize = @intFromPtr(dst) - offset;
+    const src: [*]const u8 = @ptrFromInt(src_addr);
+    var i: usize = 0;
+    if (offset >= 8) {
+        while (i + 8 <= length) : (i += 8) {
+            const word = std.mem.readInt(u64, src[i..][0..8], .little);
+            std.mem.writeInt(u64, dst[i..][0..8], word, .little);
+        }
+    }
+    while (i < length) : (i += 1) dst[i] = src[i];
+}
+
+/// Streaming decompression options.
+pub const StreamDecompressOptions = struct {
+    /// Sliding window size in bytes. LZ back-references can reach this far
+    /// into previously-decoded output. Clamped to `[block_size, max_window_size]`
+    /// where `block_size` comes from the frame header. Default 4 MB.
+    window_size: u32 = 4 * 1024 * 1024,
+    /// Maximum allowed total decompressed output bytes. 0 = no limit.
+    /// Port of the `maxDecompressedSize` parameter in C#
+    /// `StreamLzFrameDecompressor.Decompress` — protects against decompression
+    /// bombs where a small malicious frame claims a huge output.
+    max_decompressed_size: u64 = 0,
+    /// If the frame has `content_checksum` set, verify the XXH32 at the end
+    /// and return `error.ChecksumMismatch` on failure. Default true.
+    verify_checksum: bool = true,
+};
+
+/// Streams an SLZ1 frame from `src` to `writer`, maintaining a sliding
+/// window for cross-block LZ back-references and optionally verifying the
+/// XXH32 content checksum. Returns the total number of decompressed bytes
+/// written.
+///
+/// Port of C# `StreamLzFrameDecompressor.Decompress` at
+/// `StreamLzFrameDecompressor.cs:28-196`. Unlike C#, `src` here is a single
+/// byte slice (the caller is responsible for reading the file / memory-
+/// mapping); output goes to any `std.Io.Writer`. For file-to-file streaming,
+/// the caller can wrap a file writer.
+pub fn decompressStream(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+    writer: *std.Io.Writer,
+    opts: StreamDecompressOptions,
+) DecompressError!u64 {
+    if (src.len == 0) return 0;
+
+    const hdr = frame.parseHeader(src) catch return error.BadFrame;
+    const block_size: usize = @intCast(hdr.block_size);
+
+    // Window size clamp: must hold at least one full block plus safe_space
+    // slack; capped at the maximum window.
+    var window_size: usize = @intCast(opts.window_size);
+    if (window_size < block_size) window_size = block_size;
+    if (window_size > frame.max_window_size) window_size = frame.max_window_size;
+
+    // Window buffer layout: [dict ... current block output ... safe_space].
+    // The dict portion holds the sliding window for cross-block back-refs;
+    // the current block's output is written past dict_bytes. Mirrors C#
+    // `StreamLzFrameDecompressor.cs:66-67`.
+    const window_buf_size: usize = window_size + block_size + safe_space * 2;
+    const window_buf = try allocator.alloc(u8, window_buf_size);
+    defer allocator.free(window_buf);
+
+    var hasher: ?std.hash.XxHash32 = if (hdr.flags.content_checksum and opts.verify_checksum)
+        std.hash.XxHash32.init(0)
+    else
+        null;
+
+    var pos: usize = hdr.header_size;
+    var total_written: u64 = 0;
+    var dict_bytes: usize = 0;
+
+    while (pos + 4 <= src.len) {
+        // Check for end mark.
+        const first_word = std.mem.readInt(u32, src[pos..][0..4], .little);
+        if (first_word == frame.end_mark) {
+            pos += 4;
+            break;
+        }
+
+        if (pos + 8 > src.len) return error.Truncated;
+        const bh = frame.parseBlockHeader(src[pos..]) catch return error.InvalidBlockHeader;
+        if (bh.isEndMark()) {
+            pos += 4;
+            break;
+        }
+        pos += 8;
+
+        // Sanity caps matching C# `StreamLzFrameDecompressor.cs:96-99`.
+        if (bh.decompressed_size > frame.max_decompressed_block_size) return error.BadFrame;
+        if (bh.compressed_size > frame.max_decompressed_block_size) return error.BadFrame;
+
+        // Grow the output budget check before decoding.
+        if (dict_bytes + bh.decompressed_size + safe_space > window_buf.len) return error.OutputTooSmall;
+
+        if (bh.uncompressed) {
+            if (pos + bh.decompressed_size > src.len) return error.BlockDataTruncated;
+            @memcpy(
+                window_buf[dict_bytes..][0..bh.decompressed_size],
+                src[pos..][0..bh.decompressed_size],
+            );
+            pos += bh.compressed_size;
+        } else {
+            if (pos + bh.compressed_size > src.len) return error.BlockDataTruncated;
+            const n = try decompressBlockWithDict(
+                src[pos .. pos + bh.compressed_size],
+                window_buf,
+                dict_bytes,
+                bh.decompressed_size,
+            );
+            if (n != bh.decompressed_size) return error.SizeMismatch;
+            pos += bh.compressed_size;
+        }
+
+        const decoded = window_buf[dict_bytes..][0..bh.decompressed_size];
+
+        // Hash before writing so a later flush failure doesn't corrupt state.
+        if (hasher) |*h| h.update(decoded);
+
+        writer.writeAll(decoded) catch return error.OutputTooSmall;
+        total_written += bh.decompressed_size;
+
+        if (opts.max_decompressed_size != 0 and total_written > opts.max_decompressed_size) {
+            return error.OutputTooSmall;
+        }
+
+        // Slide the window: keep the last `window_size` bytes so the next
+        // block's LZ back-references can still reach them. Port of C#
+        // `StreamLzFrameDecompressor.cs:155-166`.
+        const total_used: usize = dict_bytes + bh.decompressed_size;
+        if (total_used > window_size) {
+            const keep: usize = window_size;
+            const discard: usize = total_used - keep;
+            std.mem.copyForwards(u8, window_buf[0..keep], window_buf[discard .. discard + keep]);
+            dict_bytes = keep;
+        } else {
+            dict_bytes = total_used;
+        }
+    }
+
+    // Optional XXH32 content checksum verification. C# reads the 4 checksum
+    // bytes after the 4-byte end mark (`StreamLzFrameDecompressor.cs:172-187`).
+    if (hasher) |*h| {
+        if (pos + 4 > src.len) return error.ChecksumMismatch;
+        const stored = std.mem.readInt(u32, src[pos..][0..4], .little);
+        const computed = h.final();
+        if (stored != computed) return error.ChecksumMismatch;
+    }
+
+    return total_written;
 }
 
 /// Decompresses a raw StreamLZ block (no SLZ1 frame wrapper) into `dst[0..decompressed_size]`.
@@ -203,8 +370,23 @@ fn decompressCompressedBlock(
         src_pos += ch.bytes_consumed;
 
         if (ch.is_memset) {
-            if (dst_off + dst_this_chunk > dst.len) return error.OutputTooSmall;
-            @memset(dst[dst_off..][0..dst_this_chunk], ch.memset_fill);
+            // C# DecodeStep line 253-269: when compressed_size == 0, prefer
+            // whole-match over memset if whole_match_distance is set.
+            // `ParseChunkHeader` on both sides never populates this field,
+            // so the branch is unreachable in practice — keeping it for
+            // structural parity with the C# reference.
+            if (ch.whole_match_distance != 0) {
+                if (ch.whole_match_distance > dst_off) return error.BadChunkHeader;
+                if (dst_off + dst_this_chunk > dst.len) return error.OutputTooSmall;
+                copyWholeMatch(
+                    dst[dst_off..].ptr,
+                    ch.whole_match_distance,
+                    dst_this_chunk,
+                );
+            } else {
+                if (dst_off + dst_this_chunk > dst.len) return error.OutputTooSmall;
+                @memset(dst[dst_off..][0..dst_this_chunk], ch.memset_fill);
+            }
             dst_off_inout.* += dst_this_chunk;
             dst_remaining -= dst_this_chunk;
             continue;
@@ -442,4 +624,112 @@ test "decompressBlock rejects undersized output buffer" {
     const dummy_src = [_]u8{ 0x05, 0x01, 0x00, 0x00, 0x00, 0x00 };
     var out: [16]u8 = undefined;
     try testing.expectError(error.OutputTooSmall, decompressBlock(&dummy_src, &out, 1024));
+}
+
+test "decompressStream roundtrips a compressed frame into a Writer" {
+    var payload: [1024]u8 = undefined;
+    for (&payload, 0..) |*b, i| b.* = @intCast((i * 23 + 11) & 0xFF);
+    @memcpy(payload[200..264], payload[0..64]);
+    @memcpy(payload[500..564], payload[0..64]);
+    @memcpy(payload[800..864], payload[0..64]);
+
+    const allocator = testing.allocator;
+    const encoder = @import("../encode/streamlz_encoder.zig");
+
+    var framed: [2048]u8 = undefined;
+    const framed_len = try encoder.compressFramed(allocator, &payload, &framed, .{ .level = 1 });
+
+    var out_buf: [2048]u8 = @splat(0);
+    var out_writer: std.Io.Writer = .fixed(&out_buf);
+    const written = try decompressStream(
+        allocator,
+        framed[0..framed_len],
+        &out_writer,
+        .{},
+    );
+    try testing.expectEqual(@as(u64, payload.len), written);
+    try testing.expectEqualSlices(u8, &payload, out_buf[0..payload.len]);
+}
+
+test "decompressStream enforces max_decompressed_size cap" {
+    var payload: [512]u8 = undefined;
+    for (&payload, 0..) |*b, i| b.* = @truncate(i);
+
+    const allocator = testing.allocator;
+    const encoder = @import("../encode/streamlz_encoder.zig");
+
+    var framed: [1024]u8 = undefined;
+    const framed_len = try encoder.compressFramed(allocator, &payload, &framed, .{ .level = 1 });
+
+    var out_buf: [1024]u8 = @splat(0);
+    var out_writer: std.Io.Writer = .fixed(&out_buf);
+    const err = decompressStream(
+        allocator,
+        framed[0..framed_len],
+        &out_writer,
+        .{ .max_decompressed_size = 100 },
+    );
+    try testing.expectError(error.OutputTooSmall, err);
+}
+
+test "encoder sets RestartDecoder flag on first internal block header" {
+    // Port parity check for A9: the encoder writes `keyframe` = true for
+    // the first 256 KB block inside a frame, which sets bit 6 of the
+    // 2-byte internal block header (`restart_decoder` on the decoder side).
+    // C# consumers don't act on it but the flag IS written; confirm Zig
+    // is consistent.
+    var payload: [384]u8 = undefined;
+    for (&payload, 0..) |*b, i| b.* = @truncate(i);
+    @memcpy(payload[64..128], payload[0..64]);
+
+    const allocator = testing.allocator;
+    const encoder = @import("../encode/streamlz_encoder.zig");
+
+    var framed: [1024]u8 = undefined;
+    const framed_len = try encoder.compressFramed(allocator, &payload, &framed, .{ .level = 1 });
+
+    const hdr = try frame.parseHeader(framed[0..framed_len]);
+    const bh = try frame.parseBlockHeader(framed[hdr.header_size..]);
+    if (bh.uncompressed) return;
+    const inner_start = hdr.header_size + 8;
+    const internal = try block_header.parseBlockHeader(framed[inner_start..]);
+    try testing.expect(internal.restart_decoder);
+}
+
+test "copyWholeMatch with large offset uses 8-byte chunks" {
+    // Seed the buffer with a pattern, then call copyWholeMatch to copy
+    // from earlier in the buffer to a new position.
+    var buf: [64]u8 = undefined;
+    for (buf[0..16], 0..) |*b, i| b.* = @intCast(i + 1); // [1..16]
+    // Copy buf[0..16] to buf[32..48] via copyWholeMatch(dst=buf+32, offset=32, length=16).
+    copyWholeMatch(buf[32..].ptr, 32, 16);
+    for (buf[32..48], 0..) |b, i| {
+        try testing.expectEqual(@as(u8, @intCast(i + 1)), b);
+    }
+}
+
+test "copyWholeMatch with small offset uses scalar path" {
+    // offset < 8 exercises the byte-at-a-time tail loop (no 8-byte chunking
+    // because a wide load would read unwritten bytes past the write cursor).
+    var buf: [32]u8 = @splat(0);
+    buf[0] = 0xAA;
+    // Copy buf[0..1] → buf[1..5] with offset=1 → repeats the byte.
+    copyWholeMatch(buf[1..].ptr, 1, 4);
+    try testing.expectEqual(@as(u8, 0xAA), buf[1]);
+    try testing.expectEqual(@as(u8, 0xAA), buf[2]);
+    try testing.expectEqual(@as(u8, 0xAA), buf[3]);
+    try testing.expectEqual(@as(u8, 0xAA), buf[4]);
+}
+
+test "decompressStream handles empty source" {
+    const allocator = testing.allocator;
+    var out_buf: [16]u8 = undefined;
+    var out_writer: std.Io.Writer = .fixed(&out_buf);
+    const written = try decompressStream(
+        allocator,
+        &[_]u8{},
+        &out_writer,
+        .{},
+    );
+    try testing.expectEqual(@as(u64, 0), written);
 }

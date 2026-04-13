@@ -44,7 +44,8 @@ pub const CompressError = error{
 } || std.mem.Allocator.Error || fast_enc.EncodeError;
 
 pub const Options = struct {
-    /// User level 1–5 supported by the Fast encoder.
+    /// User level 1–5 supported by the Fast encoder. (L6–L11 High codec
+    /// lands in a later phase.)
     level: u8 = 1,
     /// Include the content-size field in the frame header (strongly recommended).
     include_content_size: bool = true,
@@ -52,14 +53,58 @@ pub const Options = struct {
     /// `frame.min_block_size` and `frame.max_block_size`. We always emit
     /// 256 KB blocks internally but the frame header can advertise larger.
     block_size: u32 = lz_constants.chunk_size,
+
+    // ── CompressOptions parity fields ────────────────────────────────────
+    // Ported from `src/StreamLZ/Compression/CompressOptions.cs`. Most of
+    // these are plumbed here for API symmetry; the behavioral wiring lands
+    // with subsequent parity steps (see the punch list in memory).
+
     /// Override the hash-table bit count (0 = adaptive). Matches
     /// `CompressOptions.HashBits` in C#.
     hash_bits: u32 = 0,
-    /// Minimum match length override (0 = auto-derive from level + text detection).
-    /// Values below 4 are ignored.
+    /// Minimum match length override (0 = auto-derive from level + text
+    /// detection). Values below 4 are ignored. Matches
+    /// `CompressOptions.MinMatchLength`.
     min_match_length: u32 = 0,
     /// Maximum backward reference distance. 0 = `default_dictionary_size`.
+    /// Matches `CompressOptions.DictionarySize`.
     dictionary_size: u32 = 0,
+    /// Maximum local dictionary size for self-contained mode. 0 = default
+    /// (4 MB). Matches `CompressOptions.MaxLocalDictionarySize`.
+    max_local_dictionary_size: u32 = 0,
+    /// Seek chunk length for seekable compression (0 = off). Matches
+    /// `CompressOptions.SeekChunkLen`.
+    seek_chunk_len: u32 = 0,
+    /// Number of bytes between seek-point resets (0 = off). Matches
+    /// `CompressOptions.SeekChunkReset`.
+    seek_chunk_reset: u32 = 0,
+    /// Space-speed tradeoff parameter in bytes. 0 = default (256). Matches
+    /// `CompressOptions.SpaceSpeedTradeoffBytes`.
+    space_speed_tradeoff_bytes: u32 = 0,
+    /// Whether to generate 3-byte CRC24 chunk-header checksums. Matches
+    /// `CompressOptions.GenerateChunkHeaderChecksum`. CRC24 algorithm is
+    /// not yet implemented on either side — flag parsed, not acted on.
+    generate_chunk_header_checksum: bool = false,
+    /// Whether each frame block is self-contained (enables parallel
+    /// decompression). Matches `CompressOptions.SelfContained`. When set,
+    /// the encoder also appends a per-chunk first-8-byte prefix table.
+    self_contained: bool = false,
+    /// Whether to use two-phase compression (self-contained + cross-chunk
+    /// patches). Matches `CompressOptions.TwoPhase`. When set, also forces
+    /// `self_contained = true`.
+    two_phase: bool = false,
+
+    // ── Decode-cost penalty knobs ────────────────────────────────────────
+    // These bias the optimal parser toward cheaper-to-decode matches.
+    // Only exercised by the High codec (L6+); Fast L1-L5 ignores them.
+
+    /// Per-token fixed decode overhead penalty (32nds of a bit).
+    decode_cost_per_token: u32 = 0,
+    /// Penalty for matches with offset < 16 (byte-at-a-time copy). Applied
+    /// per match byte. In 32nds of a bit.
+    decode_cost_small_offset: u32 = 0,
+    /// Penalty for very short matches (length 2-3). In 32nds of a bit.
+    decode_cost_short_match: u32 = 0,
 };
 
 /// Resolved per-input parameters derived from `Options` + heuristics.
@@ -187,10 +232,14 @@ pub fn compressBound(src_len: usize) usize {
     // bytes of headroom past the literal stream for the token/off16/off32
     // headers). The worst-case incompressible path stores source verbatim
     // so the output is strictly ≤ src_len + small fixed overhead.
+    //
+    // Includes the SC prefix table upper bound (8 bytes per chunk after
+    // the first) so the bound is valid regardless of `opts.self_contained`.
     const chunk_count: usize = (src_len + lz_constants.chunk_size - 1) / lz_constants.chunk_size;
     const sub_chunks: usize = (src_len + fast_constants.sub_chunk_size - 1) / fast_constants.sub_chunk_size;
     const per_sub_chunk_overhead: usize = 3 + 8 + 3 + 256; // sub hdr + initial 8 + lit hdr + assembly slack
-    return frame.max_header_size + 4 + chunk_count * (8 + 2 + 4) + sub_chunks * per_sub_chunk_overhead + src_len + 64;
+    const sc_prefix_upper_bound: usize = chunk_count * 8; // (n-1)*8 ≤ n*8
+    return frame.max_header_size + 4 + chunk_count * (8 + 2 + 4) + sub_chunks * per_sub_chunk_overhead + src_len + 64 + sc_prefix_upper_bound;
 }
 
 /// Compress `src` into `dst` as a full SLZ1 frame. Returns the number of
@@ -327,6 +376,14 @@ pub fn compressFramed(
 
     const can_compress = src.len > fast_constants.min_source_length;
 
+    // Self-contained mode: each 256 KB block is independently decodable.
+    // Port of C# `StreamLzCompressor.CompressOneBlock` and
+    // `AppendSelfContainedPrefixTable`. `two_phase` implies `self_contained`
+    // per C# `StreamLZCompressor.Compress` lines 90-95.
+    const self_contained: bool = opts.self_contained or opts.two_phase;
+    const sc_flag_bit: u8 = if (self_contained) 0x10 else 0;
+    const two_phase_flag_bit: u8 = if (opts.two_phase) 0x20 else 0;
+
     // Direct port of C# CompressBlocksSerial → CompressOneBlock → CompressChunk.
     // Structure:
     //   per 256 KB block:
@@ -339,19 +396,35 @@ pub fn compressFramed(
     //            if totalCost > blockMemsetCost → rewind, emit uncompressed block
     //            else backfill chunk hdr
     const check_plain_huffman: bool = resolved.use_entropy and resolved.engine_level >= 4;
-    const window_base_ptr: [*]const u8 = src.ptr;
 
     var src_off: usize = 0;
     while (can_compress and src_off < src.len) {
         const block_src_len: usize = @min(src.len - src_off, lz_constants.chunk_size);
         const block_src: []const u8 = src[src_off..][0..block_src_len];
 
+        // SC mode: the backward-extend bound + hasher visibility must be
+        // block-local so no LZ back-reference reaches across 256 KB chunks.
+        // Reset the hasher at every block boundary, set window_base to the
+        // current block's start. Non-SC keeps the whole-input window (phase 10j).
+        if (self_contained) {
+            if (greedy_hasher_u16) |*h| h.reset();
+            if (greedy_hasher_u32) |*h| h.reset();
+            if (chain_hasher) |*h| {
+                h.reset();
+                h.setSrcBase(block_src.ptr);
+                h.setBaseWithoutPreload(0);
+            }
+        }
+        const window_base_ptr: [*]const u8 = if (self_contained) block_src.ptr else src.ptr;
+
         const block_start: usize = pos;
-        const keyframe = src_off == 0;
+        // For SC mode, EVERY block is a keyframe (independently decodable).
+        // Matches C# `CompressOneBlock` line 707: `bool keyframe = sc || (blockSrc == dictBase)`.
+        const keyframe = self_contained or src_off == 0;
 
         // ── Write 2-byte block header (compressed) ──────────────────────
         if (pos + 2 > dst.len) return error.DestinationTooSmall;
-        var flags0: u8 = 0x05;
+        var flags0: u8 = 0x05 | sc_flag_bit | two_phase_flag_bit;
         if (keyframe) flags0 |= 0x40;
         dst[pos] = flags0;
         dst[pos + 1] = @intFromEnum(block_header.CodecType.fast);
@@ -518,7 +591,7 @@ pub fn compressFramed(
         if (should_bail) {
             pos = block_start;
             if (pos + 2 + block_src_len > dst.len) return error.DestinationTooSmall;
-            var unc_flags0: u8 = 0x05 | 0x80;
+            var unc_flags0: u8 = 0x05 | 0x80 | sc_flag_bit | two_phase_flag_bit;
             if (keyframe) unc_flags0 |= 0x40;
             dst[pos] = unc_flags0;
             dst[pos + 1] = @intFromEnum(block_header.CodecType.fast);
@@ -531,6 +604,28 @@ pub fn compressFramed(
         }
 
         src_off += block_src_len;
+    }
+
+    // SC mode: append a prefix table of (num_chunks - 1) * 8 bytes at the
+    // end of the frame block payload. Each entry holds the first 8 bytes of
+    // chunks 1..N-1 (the 0-fill + memcpy trick matches C#
+    // `StreamLzCompressor.AppendSelfContainedPrefixTable` lines 407-426).
+    // The parallel decompressor uses these to restore the corrupted first
+    // 8 bytes of each per-worker-decoded chunk.
+    if (self_contained and can_compress) {
+        const num_chunks: usize = (src.len + lz_constants.chunk_size - 1) / lz_constants.chunk_size;
+        var i: usize = 1;
+        while (i < num_chunks) : (i += 1) {
+            const chunk_start = i * lz_constants.chunk_size;
+            if (chunk_start >= src.len) break;
+            const copy_size: usize = @min(@as(usize, 8), src.len - chunk_start);
+            if (pos + 8 > dst.len) return error.DestinationTooSmall;
+            // Zero-fill the 8-byte slot before copying, so the trailing
+            // bytes past `copy_size` are deterministic.
+            @memset(dst[pos..][0..8], 0);
+            @memcpy(dst[pos..][0..copy_size], src[chunk_start..][0..copy_size]);
+            pos += 8;
+        }
     }
 
     // Frame block fallback: if compressed total didn't beat uncompressed
@@ -720,6 +815,133 @@ test "edge: all zeros, 128 KB (single sub-chunk exact)" {
 test "edge: all same byte (0xFF), 2 MB" {
     const src: [2 * 1024 * 1024]u8 = @splat(0xFF);
     try roundtripAllLevels(&src);
+}
+
+// ────────────────────────────────────────────────────────────
+//  Self-contained mode roundtrips (step 10, gap D1)
+// ────────────────────────────────────────────────────────────
+
+/// SC-mode roundtrip helper that compresses with `self_contained = true`
+/// and decompresses via the standard framed decoder (which already handles
+/// the tail prefix restoration for SC streams).
+fn roundtripSC(source: []const u8, level: u8) !void {
+    const allocator = testing.allocator;
+    const bound = compressBound(source.len);
+    const dst = try allocator.alloc(u8, bound);
+    defer allocator.free(dst);
+
+    const n = try compressFramed(allocator, source, dst, .{ .level = level, .self_contained = true });
+    try testing.expect(n > 0);
+    try testing.expect(n <= bound);
+
+    const decoded = try allocator.alloc(u8, source.len + decoder.safe_space);
+    defer allocator.free(decoded);
+    const written = try decoder.decompressFramed(dst[0..n], decoded);
+    try testing.expectEqual(source.len, written);
+    try testing.expectEqualSlices(u8, source, decoded[0..written]);
+}
+
+test "SC: 64 KB repeating roundtrips via decompressFramed" {
+    var src: [65536]u8 = undefined;
+    const p = "The quick brown fox jumps over a lazy dog. ";
+    var i: usize = 0;
+    while (i < src.len) : (i += 1) src[i] = p[i % p.len];
+    try roundtripSC(&src, 1);
+}
+
+test "SC: 256 KB single-chunk still roundtrips with SC flag set" {
+    var src: [256 * 1024]u8 = undefined;
+    const p = "ABCDEFGH";
+    var i: usize = 0;
+    while (i < src.len) : (i += 1) src[i] = p[i % p.len];
+    try roundtripSC(&src, 1);
+}
+
+test "SC: 1 MB (4 chunks) roundtrips with prefix table" {
+    // 4 × 256 KB — exercises the multi-chunk SC path with a full prefix
+    // table of (4 - 1) * 8 = 24 bytes at the end of the frame block.
+    var src: [1024 * 1024]u8 = undefined;
+    const p = "ABCDEFGH";
+    var i: usize = 0;
+    while (i < src.len) : (i += 1) src[i] = p[i % p.len];
+    try roundtripSC(&src, 1);
+}
+
+test "SC: 768 KB (3 chunks) pseudo-varied text roundtrips" {
+    var src: [768 * 1024]u8 = undefined;
+    var state: u32 = 0xBEEF1234;
+    var i: usize = 0;
+    while (i < src.len) : (i += 1) {
+        state = state *% 1103515245 +% 12345;
+        // Bias toward printable ASCII to give the parser something to compress.
+        src[i] = @intCast(0x20 + (state >> 16) % 95);
+    }
+    try roundtripSC(&src, 1);
+}
+
+test "SC: block header has bit 4 set in first internal header" {
+    var src: [1024 * 1024]u8 = undefined;
+    const p = "DEADBEEF";
+    var i: usize = 0;
+    while (i < src.len) : (i += 1) src[i] = p[i % p.len];
+
+    const allocator = testing.allocator;
+    const bound = compressBound(src.len);
+    const out = try allocator.alloc(u8, bound);
+    defer allocator.free(out);
+    const n = try compressFramed(allocator, &src, out, .{ .level = 1, .self_contained = true });
+    _ = n;
+
+    // Peek the first internal block header just past the frame header + 8 outer block bytes.
+    const hdr = try frame.parseHeader(out);
+    const block_hdr_pos = hdr.header_size + 8;
+    const byte0 = out[block_hdr_pos];
+    // magic nibble 0x5, self_contained bit 4 set, keyframe bit 6 also set.
+    try testing.expectEqual(@as(u8, 0x05), byte0 & 0x0F); // magic
+    try testing.expect((byte0 & 0x10) != 0); // self_contained
+    try testing.expect((byte0 & 0x40) != 0); // keyframe
+}
+
+test "TwoPhase: implies self_contained and sets block header bits 4 + 5" {
+    var src: [768 * 1024]u8 = undefined;
+    const p = "DEADBEEFCAFEBABE";
+    var i: usize = 0;
+    while (i < src.len) : (i += 1) src[i] = p[i % p.len];
+
+    const allocator = testing.allocator;
+    const bound = compressBound(src.len);
+    const out = try allocator.alloc(u8, bound);
+    defer allocator.free(out);
+    const n = try compressFramed(allocator, &src, out, .{ .level = 1, .two_phase = true });
+
+    const hdr = try frame.parseHeader(out);
+    const block_hdr_pos = hdr.header_size + 8;
+    const byte0 = out[block_hdr_pos];
+    try testing.expectEqual(@as(u8, 0x05), byte0 & 0x0F); // magic
+    try testing.expect((byte0 & 0x10) != 0); // self_contained
+    try testing.expect((byte0 & 0x20) != 0); // two_phase
+    try testing.expect((byte0 & 0x40) != 0); // keyframe
+
+    // Roundtrip via the standard decoder.
+    const decoded = try allocator.alloc(u8, src.len + decoder.safe_space);
+    defer allocator.free(decoded);
+    const written = try decoder.decompressFramed(out[0..n], decoded);
+    try testing.expectEqual(src.len, written);
+    try testing.expectEqualSlices(u8, &src, decoded[0..written]);
+}
+
+test "SC: all levels roundtrip 1 MB" {
+    var src: [1024 * 1024]u8 = undefined;
+    var state: u32 = 0xC0FFEE42;
+    var i: usize = 0;
+    while (i < src.len) : (i += 1) {
+        state = state *% 1664525 +% 1013904223;
+        src[i] = @intCast(0x20 + (state >> 16) % 95);
+    }
+    var lvl: u8 = 1;
+    while (lvl <= 5) : (lvl += 1) {
+        try roundtripSC(&src, lvl);
+    }
 }
 
 test "edge: input exactly 128 KB (one sub-chunk, no block2)" {
