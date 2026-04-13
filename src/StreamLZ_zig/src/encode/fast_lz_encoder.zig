@@ -27,7 +27,6 @@ const token_writer = @import("fast_token_writer.zig");
 const entropy_enc = @import("entropy_encoder.zig");
 const byte_hist = @import("byte_histogram.zig");
 
-const MatchHasher2x = match_hasher.MatchHasher2x;
 const MatchHasher2 = match_hasher.MatchHasher2;
 
 const FastStreamWriter = writer_mod.FastStreamWriter;
@@ -60,17 +59,25 @@ pub const ParserConfig = struct {
 
 /// Encode a single Fast sub-chunk in raw-literal mode (no entropy).
 ///
-/// `source`:    source bytes for this sub-chunk (≤ 128 KB).
-/// `dst`:       destination slice. The caller already wrote the 3-byte
-///              sub-chunk header at `dst[-3..0]`; we write the payload.
-/// `start_position`: offset of `source` within the outer 256 KB block (used
-///              to decide whether to copy the initial 8 bytes).
-/// `hasher`:    caller-supplied hash table (reset between sub-chunks).
+/// `source`:      the sub-chunk's own bytes (≤ 128 KB).
+/// `window_base`: pointer to the base of the match-finder window that
+///                encompasses this sub-chunk. Equals `source.ptr` for the
+///                first sub-chunk of an outer 256 KB chunk, and
+///                `src.ptr + chunk_start` for subsequent sub-chunks so the
+///                hash table's prior state carries over.
+/// `dst`:         destination slice.
+/// `start_position`: offset of `source` within the decompressed output. Only
+///                the first sub-chunk of the first chunk (`== 0`) gets the
+///                initial 8-byte literal copy; later sub-chunks skip it.
+///
+/// `recent_offset` resets to -8 per sub-chunk (matches C# `CompressGreedy`)
+/// — only the hash table state persists across sub-chunks in the window.
 pub fn encodeSubChunkRaw(
     comptime level: i32,
     allocator: std.mem.Allocator,
     hasher: *FastMatchHasher(u32),
     source: []const u8,
+    window_base: [*]const u8,
     dst: []u8,
     start_position: usize,
     config: ParserConfig,
@@ -84,8 +91,6 @@ pub fn encodeSubChunkRaw(
     const initial_bytes: usize = if (start_position == 0) fast_constants.initial_copy_bytes else 0;
     const min_dst = initial_bytes + 3 + source.len + 256;
     if (dst.len < min_dst) return error.DestinationTooSmall;
-
-    hasher.reset();
 
     // Initial 8 bytes of the very first sub-chunk are copied verbatim.
     var dst_cursor: [*]u8 = dst.ptr;
@@ -132,7 +137,7 @@ pub fn encodeSubChunkRaw(
                 &recent,
                 dict_size,
                 &mmlt,
-                source.ptr,
+                window_base,
             );
         } else {
             token_writer.copyTrailingLiterals(&w, block1_cursor, block1_end, recent);
@@ -165,7 +170,7 @@ pub fn encodeSubChunkRaw(
                 &recent,
                 dict_size,
                 &mmlt,
-                source.ptr,
+                window_base,
             );
         } else {
             token_writer.copyTrailingLiterals(&w, block2_cursor, block2_end, recent);
@@ -276,6 +281,7 @@ pub fn encodeSubChunkEntropy(
     allocator: std.mem.Allocator,
     hasher: *FastMatchHasher(u32),
     source: []const u8,
+    window_base: [*]const u8,
     dst: []u8,
     start_position: usize,
     options: EntropyOptions,
@@ -290,8 +296,6 @@ pub fn encodeSubChunkEntropy(
     const initial_bytes: usize = if (start_position == 0) fast_constants.initial_copy_bytes else 0;
     const min_dst = initial_bytes + 32 + source.len + 256;
     if (dst.len < min_dst) return error.DestinationTooSmall;
-
-    hasher.reset();
 
     var dst_cursor: [*]u8 = dst.ptr;
     if (initial_bytes != 0) {
@@ -336,7 +340,7 @@ pub fn encodeSubChunkEntropy(
                 &recent,
                 dict_size,
                 &mmlt,
-                source.ptr,
+                window_base,
             );
         } else {
             token_writer.copyTrailingLiterals(&w, block1_cursor, block1_end, recent);
@@ -369,7 +373,7 @@ pub fn encodeSubChunkEntropy(
                 &recent,
                 dict_size,
                 &mmlt,
-                source.ptr,
+                window_base,
             );
         } else {
             token_writer.copyTrailingLiterals(&w, block2_cursor, block2_end, recent);
@@ -539,125 +543,14 @@ fn assembleEntropyOutput(
     return .{ .bytes_written = total, .chunk_type = chunk_type, .bail = false };
 }
 
-/// Encode a sub-chunk in entropy mode using the L3 lazy parser with a
-/// `MatchHasher2x` (2-entry bucket). Mirrors `encodeSubChunkEntropy` but
-/// runs `runLazyParser` instead of the greedy path.
-pub fn encodeSubChunkEntropyLazy(
-    comptime engine_level: i32,
-    allocator: std.mem.Allocator,
-    hasher: *MatchHasher2x,
-    source: []const u8,
-    dst: []u8,
-    start_position: usize,
-    options: EntropyOptions,
-    config: ParserConfig,
-) EncodeError!EncodeResult {
-    if (source.len <= fast_constants.min_source_length) return .{
-        .bytes_written = 0,
-        .chunk_type = .raw,
-        .bail = true,
-    };
-
-    const initial_bytes: usize = if (start_position == 0) fast_constants.initial_copy_bytes else 0;
-    const min_dst = initial_bytes + 32 + source.len + 256;
-    if (dst.len < min_dst) return error.DestinationTooSmall;
-
-    hasher.reset();
-    hasher.setSrcBase(source.ptr);
-    hasher.setBaseWithoutPreload(0);
-
-    var dst_cursor: [*]u8 = dst.ptr;
-    if (initial_bytes != 0) {
-        @memcpy(dst_cursor[0..8], source[0..8]);
-        dst_cursor += 8;
-    }
-
-    var w = try FastStreamWriter.init(allocator, source.ptr, source.len, null, true);
-    defer w.deinit(allocator);
-
-    var mmlt: [32]u32 = undefined;
-    fast_constants.buildMinimumMatchLengthTable(&mmlt, config.minimum_match_length, 10);
-
-    const dict_size: u32 = config.dictionary_size;
-
-    var recent: isize = -8;
-    const source_end_ptr: [*]const u8 = source.ptr + source.len;
-    const safe_end: [*]const u8 = if (source.len >= 16) source_end_ptr - 16 else source.ptr;
-
-    // ── Block 1 ─────────────────────────────────────────────────────────
-    {
-        const block1_cursor: [*]const u8 = source.ptr + initial_bytes;
-        const block1_end: [*]const u8 = source.ptr + w.block1_size;
-        const safe_for_block1: [*]const u8 = if (@intFromPtr(block1_end) < @intFromPtr(safe_end))
-            block1_end
-        else
-            safe_end;
-        w.block2_start_offset = 0;
-        w.off32_count = 0;
-        if (@intFromPtr(block1_cursor) < @intFromPtr(safe_for_block1)) {
-            parser.runLazyParser(
-                engine_level,
-                2,
-                &w,
-                hasher,
-                block1_cursor,
-                safe_for_block1,
-                block1_end,
-                &recent,
-                dict_size,
-                &mmlt,
-                config.minimum_match_length,
-            );
-        } else {
-            token_writer.copyTrailingLiterals(&w, block1_cursor, block1_end, recent);
-        }
-        w.off32_count_block1 = w.off32_count;
-    }
-
-    // ── Block 2 ─────────────────────────────────────────────────────────
-    if (w.block2_size > 0) {
-        w.token_stream2_offset = @intCast(w.tokenCount());
-        w.block2_start_offset = @intCast(w.block1_size);
-        w.off32_count = 0;
-
-        const block2_cursor: [*]const u8 = source.ptr + w.block1_size;
-        const block2_end: [*]const u8 = block2_cursor + w.block2_size;
-        const safe_for_block2: [*]const u8 = if (@intFromPtr(block2_end) < @intFromPtr(safe_end))
-            block2_end
-        else
-            safe_end;
-
-        if (@intFromPtr(block2_cursor) < @intFromPtr(safe_for_block2)) {
-            parser.runLazyParser(
-                engine_level,
-                2,
-                &w,
-                hasher,
-                block2_cursor,
-                safe_for_block2,
-                block2_end,
-                &recent,
-                dict_size,
-                &mmlt,
-                config.minimum_match_length,
-            );
-        } else {
-            token_writer.copyTrailingLiterals(&w, block2_cursor, block2_end, recent);
-        }
-        w.off32_count_block2 = w.off32_count;
-    }
-
-    return assembleEntropyOutput(allocator, &w, dst, dst_cursor, source.len, options);
-}
-
-/// Encode a sub-chunk in entropy mode using the L4 lazy parser with the
-/// `MatchHasher2` chain-walking hasher. Mirrors `encodeSubChunkEntropyLazy`
-/// but drives `runLazyParserChain`.
+/// Encode a sub-chunk in entropy mode using the L5 lazy parser with the
+/// `MatchHasher2` chain-walking hasher. Port of `FastParser.CompressLazyChainHasher`.
 pub fn encodeSubChunkEntropyChain(
     comptime engine_level: i32,
     allocator: std.mem.Allocator,
     hasher: *MatchHasher2,
     source: []const u8,
+    window_base: [*]const u8,
     dst: []u8,
     start_position: usize,
     options: EntropyOptions,
@@ -672,10 +565,6 @@ pub fn encodeSubChunkEntropyChain(
     const initial_bytes: usize = if (start_position == 0) fast_constants.initial_copy_bytes else 0;
     const min_dst = initial_bytes + 32 + source.len + 256;
     if (dst.len < min_dst) return error.DestinationTooSmall;
-
-    hasher.reset();
-    hasher.setSrcBase(source.ptr);
-    hasher.setBaseWithoutPreload(0);
 
     var dst_cursor: [*]u8 = dst.ptr;
     if (initial_bytes != 0) {
@@ -694,6 +583,7 @@ pub fn encodeSubChunkEntropyChain(
     var recent: isize = -8;
     const source_end_ptr: [*]const u8 = source.ptr + source.len;
     const safe_end: [*]const u8 = if (source.len >= 16) source_end_ptr - 16 else source.ptr;
+    _ = window_base; // hasher.src_base is set by the outer driver per window
 
     // ── Block 1 ─────────────────────────────────────────────────────────
     {
@@ -805,7 +695,8 @@ test "encodeSubChunkRaw roundtrip: repeating 2 KB pattern" {
     defer hasher.deinit();
 
     var dst: [4096]u8 = undefined;
-    const res = try encodeSubChunkRaw(1, testing.allocator, &hasher, &source, &dst, 0, .{
+    hasher.reset();
+    const res = try encodeSubChunkRaw(1, testing.allocator, &hasher, &source, source[0..].ptr, &dst, 0, .{
         .minimum_match_length = 4,
         .dictionary_size = 0x40000000,
     });
@@ -829,7 +720,8 @@ test "encodeSubChunkRaw roundtrip: 4 KB binary-ish input" {
     defer hasher.deinit();
 
     var dst: [source.len + 512]u8 = undefined;
-    const res = try encodeSubChunkRaw(1, testing.allocator, &hasher, &source, &dst, 0, .{
+    hasher.reset();
+    const res = try encodeSubChunkRaw(1, testing.allocator, &hasher, &source, source[0..].ptr, &dst, 0, .{
         .minimum_match_length = 4,
         .dictionary_size = 0x40000000,
     });
@@ -850,7 +742,8 @@ test "encodeSubChunkRaw roundtrip: 16 KB lorem-ipsum-ish" {
     defer hasher.deinit();
 
     var dst: [source.len + 512]u8 = undefined;
-    const res = try encodeSubChunkRaw(1, testing.allocator, &hasher, &source, &dst, 0, .{
+    hasher.reset();
+    const res = try encodeSubChunkRaw(1, testing.allocator, &hasher, &source, source[0..].ptr, &dst, 0, .{
         .minimum_match_length = 4,
         .dictionary_size = 0x40000000,
     });
