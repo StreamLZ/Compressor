@@ -537,6 +537,304 @@ pub fn runLazyParser(
 }
 
 // ────────────────────────────────────────────────────────────
+//  Chain-hasher lazy parser (MatchHasher2, user level 4)
+// ────────────────────────────────────────────────────────────
+
+/// Hash-based match finder that walks the firstHash chain, optionally
+/// dereferences the longHash secondary table, and falls back to offset 8.
+/// Port of `Matcher.FindMatchWithChainHasher`.
+pub fn findMatchWithChainHasher(
+    source_cursor: [*]const u8,
+    safe_source_end: [*]const u8,
+    literal_start: [*]const u8,
+    recent_offset: isize,
+    hasher: *match_hasher.MatchHasher2,
+    next_cursor_ptr: [*]const u8,
+    dictionary_size: u32,
+    minimum_match_length_in: u32,
+    min_match_length_table: *const [32]u32,
+) LengthAndOffset {
+    const hp = hasher.getHashPos(source_cursor);
+    const bytes_at_source: u32 = std.mem.readInt(u32, source_cursor[0..4], .little);
+    hasher.setHashPosPrefetch(next_cursor_ptr);
+
+    // ── Recent-offset match path ───────────────────────────────────────
+    const recent_src_addr: usize = @intFromPtr(source_cursor) +% @as(usize, @bitCast(recent_offset));
+    const recent_src_ptr: [*]const u8 = @ptrFromInt(recent_src_addr);
+    const recent_word: u32 = std.mem.readInt(u32, recent_src_ptr[0..4], .little);
+    const xor_value: u32 = recent_word ^ bytes_at_source;
+    if (xor_value == 0) {
+        const ext_end = token_writer.extendMatchForward(source_cursor + 4, safe_source_end, recent_offset);
+        const match_len: usize = 4 + (@intFromPtr(ext_end) - @intFromPtr(source_cursor + 4));
+        hasher.insert(hp);
+        return .{ .length = @intCast(match_len), .offset = 0 };
+    }
+    var recent_match_length: i32 = @intCast(@as(u32, @ctz(xor_value)) >> 3);
+
+    var minimum_match_length: i32 = @intCast(minimum_match_length_in);
+    if (@intFromPtr(source_cursor) - @intFromPtr(literal_start) >= 64) {
+        if (recent_match_length < 3) recent_match_length = 0;
+        minimum_match_length += 1;
+    }
+
+    var best_offset: i32 = 0;
+    var best_match_length: i32 = 0;
+
+    const first_hash = hasher.first_hash;
+    const next_hash = hasher.next_hash;
+    const long_hash = hasher.long_hash;
+
+    const cur_from_base: usize = @intFromPtr(source_cursor) - @intFromPtr(hasher.src_base);
+
+    // ── First-hash chain walk ──────────────────────────────────────────
+    var hash_value: u32 = first_hash[hp.hash_a];
+    var candidate_offset: u32 = hp.pos -% hash_value;
+    if (candidate_offset <= 0xffff) {
+        if (candidate_offset != 0) {
+            var chain_steps: u32 = 8;
+            while (candidate_offset < dictionary_size) {
+                if (candidate_offset > 8) {
+                    if (@as(usize, candidate_offset) <= cur_from_base) {
+                        const cand_base: [*]const u8 = @ptrFromInt(@intFromPtr(source_cursor) -% @as(usize, candidate_offset));
+                        const cand_word: u32 = std.mem.readInt(u32, cand_base[0..4], .little);
+                        if (cand_word == bytes_at_source) {
+                            // Three-stage filter: also require the byte at
+                            // `best_match_length` to agree before the full
+                            // extension (cheaper rejection on long candidates).
+                            var quick_ok = true;
+                            if (best_match_length >= 4) {
+                                const tail_addr: usize = @intFromPtr(source_cursor) + @as(usize, @intCast(best_match_length));
+                                if (tail_addr >= @intFromPtr(safe_source_end)) {
+                                    quick_ok = false;
+                                } else {
+                                    const s_byte: u8 = @as([*]const u8, @ptrFromInt(tail_addr))[0];
+                                    const m_byte: u8 = @as([*]const u8, @ptrFromInt(tail_addr - candidate_offset))[0];
+                                    if (s_byte != m_byte) quick_ok = false;
+                                }
+                            }
+                            if (quick_ok) {
+                                const ext_end = token_writer.extendMatchForward(
+                                    source_cursor + 4,
+                                    safe_source_end,
+                                    -@as(isize, @intCast(candidate_offset)),
+                                );
+                                const cand_len_u: usize = 4 + (@intFromPtr(ext_end) - @intFromPtr(source_cursor + 4));
+                                const cand_len: i32 = @intCast(cand_len_u);
+                                if (cand_len > best_match_length and cand_len >= minimum_match_length) {
+                                    best_match_length = cand_len;
+                                    best_offset = @intCast(candidate_offset);
+                                }
+                            }
+                        }
+                    }
+                    chain_steps -= 1;
+                    if (chain_steps == 0) break;
+                }
+                const previous_offset: u32 = candidate_offset;
+                hash_value = next_hash[hash_value & 0xFFFF];
+                // Chain positions are stored modulo 64K — subtract as u16.
+                candidate_offset = @as(u16, @truncate(@as(u32, @intCast(hp.pos)) -% hash_value));
+                if (candidate_offset <= previous_offset) break;
+            }
+        }
+    } else if (candidate_offset < dictionary_size and
+        @as(usize, candidate_offset) <= cur_from_base)
+    {
+        const cand_base: [*]const u8 = @ptrFromInt(@intFromPtr(source_cursor) -% @as(usize, candidate_offset));
+        const cand_word: u32 = std.mem.readInt(u32, cand_base[0..4], .little);
+        if (cand_word == bytes_at_source) {
+            const ext_end = token_writer.extendMatchForward(
+                source_cursor + 4,
+                safe_source_end,
+                -@as(isize, @intCast(candidate_offset)),
+            );
+            const cand_len_u: usize = 4 + (@intFromPtr(ext_end) - @intFromPtr(source_cursor + 4));
+            const cand_len: i32 = @intCast(cand_len_u);
+            const mmlt_idx: u5 = @intCast(@clz(candidate_offset));
+            const min_len_here: i32 = @intCast(min_match_length_table[mmlt_idx]);
+            if (cand_len > minimum_match_length and cand_len >= min_len_here) {
+                best_match_length = cand_len;
+                best_offset = @intCast(candidate_offset);
+            }
+        }
+    }
+
+    // ── Long-hash secondary table ──────────────────────────────────────
+    {
+        const lh_value: u32 = long_hash[hp.hash_b];
+        if (((hp.hash_b_tag ^ lh_value) & 0x3F) == 0) {
+            const cand_off: u32 = hp.pos -% (lh_value >> 6);
+            if (cand_off >= 8 and cand_off < dictionary_size and
+                @as(usize, cand_off) <= cur_from_base)
+            {
+                const cand_base: [*]const u8 = @ptrFromInt(@intFromPtr(source_cursor) -% @as(usize, cand_off));
+                const cand_word: u32 = std.mem.readInt(u32, cand_base[0..4], .little);
+                if (cand_word == bytes_at_source) {
+                    const ext_end = token_writer.extendMatchForward(
+                        source_cursor + 4,
+                        safe_source_end,
+                        -@as(isize, @intCast(cand_off)),
+                    );
+                    const cand_len_u: usize = 4 + (@intFromPtr(ext_end) - @intFromPtr(source_cursor + 4));
+                    const cand_len: i32 = @intCast(cand_len_u);
+                    const mmlt_idx: u5 = @intCast(@clz(cand_off));
+                    const min_len_here: i32 = @intCast(min_match_length_table[mmlt_idx]);
+                    if (cand_len >= min_len_here and
+                        isMatchBetter(cand_len, @intCast(cand_off), best_match_length, best_offset))
+                    {
+                        best_match_length = cand_len;
+                        best_offset = @intCast(cand_off);
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Fixed-offset-8 fallback ────────────────────────────────────────
+    {
+        const off8_ptr: [*]const u8 = @ptrFromInt(@intFromPtr(source_cursor) -% 8);
+        const off8_word: u32 = std.mem.readInt(u32, off8_ptr[0..4], .little);
+        if (off8_word == bytes_at_source) {
+            const ext_end = token_writer.extendMatchForward(source_cursor + 4, safe_source_end, -8);
+            const cand_len_u: usize = 4 + (@intFromPtr(ext_end) - @intFromPtr(source_cursor + 4));
+            const cand_len: i32 = @intCast(cand_len_u);
+            if (cand_len >= best_match_length and cand_len >= minimum_match_length) {
+                best_match_length = cand_len;
+                best_offset = 8;
+            }
+        }
+    }
+
+    hasher.insert(hp);
+
+    if (!isBetterThanRecentMatch(recent_match_length, best_match_length, best_offset)) {
+        best_match_length = recent_match_length;
+        best_offset = 0;
+    }
+    return .{ .length = best_match_length, .offset = best_offset };
+}
+
+/// Lazy parser driving a `MatchHasher2` chain hasher — port of
+/// `FastParser.RunLazyParserChainHasher`. Handles both lazy-1 and lazy-2
+/// evaluation based on `engine_level` (>3 enables lazy-2).
+pub fn runLazyParserChain(
+    comptime engine_level: i32,
+    w: *FastStreamWriter,
+    hasher: *match_hasher.MatchHasher2,
+    source_cursor_in: [*]const u8,
+    safe_source_end: [*]const u8,
+    source_end: [*]const u8,
+    recent_offset_inout: *isize,
+    dictionary_size: u32,
+    min_match_length_table: *const [32]u32,
+    minimum_match_length: u32,
+) void {
+    var recent_offset: isize = recent_offset_inout.*;
+    var source_cursor: [*]const u8 = source_cursor_in;
+    var literal_start: [*]const u8 = source_cursor_in;
+
+    const guard_addr = @intFromPtr(safe_source_end) -| 5;
+    if (@intFromPtr(source_cursor) < guard_addr) {
+        hasher.setHashPos(source_cursor);
+
+        while (@intFromPtr(source_cursor) + 1 < guard_addr) {
+            var match = findMatchWithChainHasher(
+                source_cursor,
+                safe_source_end,
+                literal_start,
+                recent_offset,
+                hasher,
+                source_cursor + 1,
+                dictionary_size,
+                minimum_match_length,
+                min_match_length_table,
+            );
+            if (match.length < 2) {
+                source_cursor += 1;
+                continue;
+            }
+
+            while (@intFromPtr(source_cursor) + 1 < guard_addr) {
+                const lazy1 = findMatchWithChainHasher(
+                    source_cursor + 1,
+                    safe_source_end,
+                    literal_start,
+                    recent_offset,
+                    hasher,
+                    source_cursor + 2,
+                    dictionary_size,
+                    minimum_match_length,
+                    min_match_length_table,
+                );
+                if (lazy1.length >= 2 and isLazyMatchBetter(lazy1, match, 0)) {
+                    source_cursor += 1;
+                    match = lazy1;
+                } else {
+                    if (comptime engine_level <= 3) break;
+                    if (@intFromPtr(source_cursor) + 2 > guard_addr or match.length == 2) break;
+                    const lazy2 = findMatchWithChainHasher(
+                        source_cursor + 2,
+                        safe_source_end,
+                        literal_start,
+                        recent_offset,
+                        hasher,
+                        source_cursor + 3,
+                        dictionary_size,
+                        minimum_match_length,
+                        min_match_length_table,
+                    );
+                    if (lazy2.length >= 2 and isLazyMatchBetter(lazy2, match, 1)) {
+                        source_cursor += 2;
+                        match = lazy2;
+                    } else break;
+                }
+            }
+
+            const actual_offset: isize = if (match.offset == 0)
+                -recent_offset
+            else
+                @intCast(match.offset);
+
+            // Backward extension.
+            while (@intFromPtr(source_cursor) > @intFromPtr(literal_start)) {
+                const cursor_prev_addr: usize = @intFromPtr(source_cursor) - 1;
+                if (cursor_prev_addr < @intFromPtr(hasher.src_base) + @as(usize, @bitCast(@as(i64, actual_offset)))) break;
+                const back_addr: usize = cursor_prev_addr - @as(usize, @bitCast(@as(i64, actual_offset)));
+                const cur_b: u8 = @as([*]const u8, @ptrFromInt(cursor_prev_addr))[0];
+                const back_b: u8 = @as([*]const u8, @ptrFromInt(back_addr))[0];
+                if (cur_b != back_b) break;
+                source_cursor -= 1;
+                match.length += 1;
+            }
+
+            const match_length_u: u32 = @intCast(match.length);
+            const lit_run_u: u32 = @intCast(@intFromPtr(source_cursor) - @intFromPtr(literal_start));
+            const offset_or_recent: u32 = @intCast(match.offset);
+
+            token_writer.writeOffset(
+                w,
+                match_length_u,
+                lit_run_u,
+                offset_or_recent,
+                recent_offset,
+                literal_start,
+            );
+
+            recent_offset = -actual_offset;
+            source_cursor += match_length_u;
+            literal_start = source_cursor;
+
+            if (@intFromPtr(source_cursor) >= guard_addr) break;
+            const match_start: [*]const u8 = @ptrFromInt(@intFromPtr(source_cursor) - match_length_u);
+            hasher.insertRange(match_start, match_length_u);
+        }
+    }
+
+    token_writer.copyTrailingLiterals(w, literal_start, source_end, recent_offset);
+    recent_offset_inout.* = recent_offset;
+}
+
+// ────────────────────────────────────────────────────────────
 //  Tests
 // ────────────────────────────────────────────────────────────
 

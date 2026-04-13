@@ -28,6 +28,7 @@ const entropy_enc = @import("entropy_encoder.zig");
 const byte_hist = @import("byte_histogram.zig");
 
 const MatchHasher2x = match_hasher.MatchHasher2x;
+const MatchHasher2 = match_hasher.MatchHasher2;
 
 const FastStreamWriter = writer_mod.FastStreamWriter;
 const EntropyOptions = entropy_enc.EntropyOptions;
@@ -616,6 +617,114 @@ pub fn encodeSubChunkEntropyLazy(
             parser.runLazyParser(
                 engine_level,
                 2,
+                &w,
+                hasher,
+                block2_cursor,
+                safe_for_block2,
+                block2_end,
+                &recent,
+                dict_size,
+                &mmlt,
+                4,
+            );
+        } else {
+            token_writer.copyTrailingLiterals(&w, block2_cursor, block2_end, recent);
+        }
+        w.off32_count_block2 = w.off32_count;
+    }
+
+    return assembleEntropyOutput(allocator, &w, dst, dst_cursor, source.len, options);
+}
+
+/// Encode a sub-chunk in entropy mode using the L4 lazy parser with the
+/// `MatchHasher2` chain-walking hasher. Mirrors `encodeSubChunkEntropyLazy`
+/// but drives `runLazyParserChain`.
+pub fn encodeSubChunkEntropyChain(
+    comptime engine_level: i32,
+    allocator: std.mem.Allocator,
+    hasher: *MatchHasher2,
+    source: []const u8,
+    dst: []u8,
+    start_position: usize,
+    options: EntropyOptions,
+) EncodeError!EncodeResult {
+    if (source.len <= fast_constants.min_source_length) return .{
+        .bytes_written = 0,
+        .chunk_type = .raw,
+        .bail = true,
+    };
+
+    const initial_bytes: usize = if (start_position == 0) fast_constants.initial_copy_bytes else 0;
+    const min_dst = initial_bytes + 32 + source.len + 256;
+    if (dst.len < min_dst) return error.DestinationTooSmall;
+
+    hasher.reset();
+    hasher.setSrcBase(source.ptr);
+    hasher.setBaseWithoutPreload(0);
+
+    var dst_cursor: [*]u8 = dst.ptr;
+    if (initial_bytes != 0) {
+        @memcpy(dst_cursor[0..8], source[0..8]);
+        dst_cursor += 8;
+    }
+
+    var w = try FastStreamWriter.init(allocator, source.ptr, source.len, null, true);
+    defer w.deinit(allocator);
+
+    var mmlt: [32]u32 = undefined;
+    fast_constants.buildMinimumMatchLengthTable(&mmlt, 4, 10);
+
+    const dict_size: u32 = @intCast(fast_constants.block1_max_size * 2);
+
+    var recent: isize = -8;
+    const source_end_ptr: [*]const u8 = source.ptr + source.len;
+    const safe_end: [*]const u8 = if (source.len >= 16) source_end_ptr - 16 else source.ptr;
+
+    // ── Block 1 ─────────────────────────────────────────────────────────
+    {
+        const block1_cursor: [*]const u8 = source.ptr + initial_bytes;
+        const block1_end: [*]const u8 = source.ptr + w.block1_size;
+        const safe_for_block1: [*]const u8 = if (@intFromPtr(block1_end) < @intFromPtr(safe_end))
+            block1_end
+        else
+            safe_end;
+        w.block2_start_offset = 0;
+        w.off32_count = 0;
+        if (@intFromPtr(block1_cursor) < @intFromPtr(safe_for_block1)) {
+            parser.runLazyParserChain(
+                engine_level,
+                &w,
+                hasher,
+                block1_cursor,
+                safe_for_block1,
+                block1_end,
+                &recent,
+                dict_size,
+                &mmlt,
+                4,
+            );
+        } else {
+            token_writer.copyTrailingLiterals(&w, block1_cursor, block1_end, recent);
+        }
+        w.off32_count_block1 = w.off32_count;
+    }
+
+    // ── Block 2 ─────────────────────────────────────────────────────────
+    if (w.block2_size > 0) {
+        w.token_stream2_offset = @intCast(w.tokenCount());
+        w.block2_start_offset = @intCast(w.block1_size);
+        w.off32_count = 0;
+
+        const block2_cursor: [*]const u8 = source.ptr + w.block1_size;
+        const block2_end: [*]const u8 = block2_cursor + w.block2_size;
+        const safe_for_block2: [*]const u8 = if (@intFromPtr(block2_end) < @intFromPtr(safe_end))
+            block2_end
+        else
+            safe_end;
+
+        if (@intFromPtr(block2_cursor) < @intFromPtr(safe_for_block2)) {
+            parser.runLazyParserChain(
+                engine_level,
                 &w,
                 hasher,
                 block2_cursor,

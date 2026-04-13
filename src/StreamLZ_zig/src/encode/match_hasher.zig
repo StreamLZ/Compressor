@@ -199,6 +199,183 @@ pub const MatchHasher1 = MatchHasher(1);
 pub const MatchHasher2x = MatchHasher(2);
 
 // ────────────────────────────────────────────────────────────
+//  MatchHasher2 — 3-table chain hasher for the L4 lazy parser
+// ────────────────────────────────────────────────────────────
+
+/// Hash position returned by `MatchHasher2.getHashPos`.
+pub const MatchHasher2HashPos = struct {
+    pos: u32,
+    hash_a: u32,
+    hash_b: u32,
+    hash_b_tag: u32,
+    next_offset: i64,
+};
+
+/// Chain-walking match hasher with a first-hash head table, a modulo-64K
+/// next-hash ring for the chain, and a direct-mapped long-hash table with a
+/// 6-bit tag. Port of `MatchHasher2` in
+/// src/StreamLZ/Compression/MatchFinding/MatchHasher.cs.
+pub const MatchHasher2 = struct {
+    /// Hash-A multiplier — distinct from Fibonacci to decorrelate the two hashes.
+    const mult_a: u64 = 0xB7A5646300000000;
+    const mult_b: u64 = @import("../format/streamlz_constants.zig").fibonacci_hash_multiplier;
+
+    first_hash: []u32,
+    long_hash: []u32,
+    next_hash: []u16,
+
+    first_hash_mask: u32,
+    long_hash_mask: u32,
+    next_hash_mask: u32,
+
+    first_hash_bits: u6,
+    long_hash_bits: u6,
+
+    src_base: [*]const u8 = undefined,
+    src_base_offset: i64 = 0,
+    src_cur_offset: i64 = 0,
+
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator, bits: u6) !MatchHasher2 {
+        const a_bits: u6 = @min(bits, 19);
+        const b_bits: u6 = @min(bits, 19);
+        const c_bits: u6 = 16;
+
+        const first = try allocator.alloc(u32, @as(usize, 1) << a_bits);
+        errdefer allocator.free(first);
+        const long = try allocator.alloc(u32, @as(usize, 1) << b_bits);
+        errdefer allocator.free(long);
+        const next = try allocator.alloc(u16, @as(usize, 1) << c_bits);
+        @memset(first, 0);
+        @memset(long, 0);
+        @memset(next, 0);
+
+        return .{
+            .first_hash = first,
+            .long_hash = long,
+            .next_hash = next,
+            .first_hash_mask = @intCast((@as(usize, 1) << a_bits) - 1),
+            .long_hash_mask = @intCast((@as(usize, 1) << b_bits) - 1),
+            .next_hash_mask = @intCast((@as(usize, 1) << c_bits) - 1),
+            .first_hash_bits = a_bits,
+            .long_hash_bits = b_bits,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *MatchHasher2) void {
+        self.allocator.free(self.first_hash);
+        self.allocator.free(self.long_hash);
+        self.allocator.free(self.next_hash);
+        self.* = undefined;
+    }
+
+    pub fn reset(self: *MatchHasher2) void {
+        @memset(self.first_hash, 0);
+        @memset(self.long_hash, 0);
+        @memset(self.next_hash, 0);
+        self.src_base_offset = 0;
+        self.src_cur_offset = 0;
+    }
+
+    pub inline fn setSrcBase(self: *MatchHasher2, base: [*]const u8) void {
+        self.src_base = base;
+    }
+
+    pub inline fn setBaseWithoutPreload(self: *MatchHasher2, base_offset: i64) void {
+        self.src_base_offset = base_offset;
+    }
+
+    /// Compute the two raw hash values for the 8 bytes at `p`.
+    pub inline fn getHashPos(self: *const MatchHasher2, p: [*]const u8) MatchHasher2HashPos {
+        const offset: i64 = @intCast(@intFromPtr(p) - @intFromPtr(self.src_base));
+        const at_src: u64 = std.mem.readInt(u64, p[0..8], .little);
+        const product_a: u64 = mult_a *% at_src;
+        const hash_a_full: u32 = @intCast(product_a >> 32);
+        const product_b: u64 = mult_b *% at_src;
+        const hash_b_full: u32 = @intCast(product_b >> 32);
+        const shift_a: u5 = @intCast(32 - @as(u32, self.first_hash_bits));
+        const shift_b: u5 = @intCast(32 - @as(u32, self.long_hash_bits));
+        return .{
+            .pos = @intCast(offset - self.src_base_offset),
+            .hash_a = hash_a_full >> shift_a,
+            .hash_b = hash_b_full >> shift_b,
+            .hash_b_tag = hash_b_full,
+            .next_offset = offset + 1,
+        };
+    }
+
+    /// `getHashPos` + prefetch firstHash + longHash entries for `p`.
+    pub inline fn setHashPosPrefetch(self: *MatchHasher2, p: [*]const u8) void {
+        const hp = self.getHashPos(p);
+        @prefetch(&self.first_hash[hp.hash_a], .{
+            .rw = .read,
+            .locality = 3,
+            .cache = .data,
+        });
+        @prefetch(&self.long_hash[hp.hash_b], .{
+            .rw = .read,
+            .locality = 3,
+            .cache = .data,
+        });
+    }
+
+    /// In this hasher family `setHashPos` only updates the cursor — no hashing.
+    pub inline fn setHashPos(self: *MatchHasher2, p: [*]const u8) void {
+        self.src_cur_offset = @intCast(@intFromPtr(p) - @intFromPtr(self.src_base));
+    }
+
+    /// Insert the hash position into the chain head + next-hash ring.
+    /// The longHash table is updated separately by `insertRange` to amortize
+    /// the cost — the hot path only touches firstHash / nextHash.
+    pub inline fn insert(self: *MatchHasher2, hp: MatchHasher2HashPos) void {
+        const prev_head: u32 = self.first_hash[hp.hash_a];
+        self.next_hash[hp.pos & self.next_hash_mask] = @intCast(prev_head & 0xFFFF);
+        self.first_hash[hp.hash_a] = hp.pos;
+        self.src_cur_offset = hp.next_offset;
+    }
+
+    /// Insert entries covering a match of length `len` starting at
+    /// `match_start`. longHash at exponentially spaced positions; firstHash
+    /// at every position from the cached cursor up to `offset + len`.
+    pub fn insertRange(self: *MatchHasher2, match_start: [*]const u8, len: usize) void {
+        const offset: i64 = @intCast(@intFromPtr(match_start) - @intFromPtr(self.src_base));
+        const shift_b: u5 = @intCast(32 - @as(u32, self.long_hash_bits));
+
+        // longHash at i = 0, 1, 3, 7, 15, ... (geometric steps).
+        var i: usize = 0;
+        while (i < len) {
+            const p: [*]const u8 = @ptrFromInt(@intFromPtr(match_start) + i);
+            const at_src: u64 = std.mem.readInt(u64, p[0..8], .little);
+            const product_b: u64 = mult_b *% at_src;
+            const hash_b_full: u32 = @intCast(product_b >> 32);
+            const idx: u32 = hash_b_full >> shift_b;
+            const pos_here: u32 = @intCast(offset + @as(i64, @intCast(i)) - self.src_base_offset);
+            self.long_hash[idx] = (hash_b_full & 0x3F) | (pos_here << 6);
+            i = 2 * i + 1;
+        }
+
+        // firstHash chain-insert at every byte from cursor to offset + len.
+        const p_end: i64 = offset + @as(i64, @intCast(len));
+        const shift_a: u5 = @intCast(32 - @as(u32, self.first_hash_bits));
+        while (self.src_cur_offset < p_end) {
+            const cur_ptr: [*]const u8 = @ptrFromInt(@intFromPtr(self.src_base) + @as(usize, @intCast(self.src_cur_offset)));
+            const at_src: u64 = std.mem.readInt(u64, cur_ptr[0..8], .little);
+            const product_a: u64 = mult_a *% at_src;
+            const hash_a_full: u32 = @intCast(product_a >> 32);
+            const hash_a: u32 = hash_a_full >> shift_a;
+            const pos_here: u32 = @intCast(self.src_cur_offset - self.src_base_offset);
+
+            const prev_head: u32 = self.first_hash[hash_a];
+            self.next_hash[pos_here & self.next_hash_mask] = @intCast(prev_head & 0xFFFF);
+            self.first_hash[hash_a] = pos_here;
+            self.src_cur_offset += 1;
+        }
+    }
+};
+
+// ────────────────────────────────────────────────────────────
 //  Tests
 // ────────────────────────────────────────────────────────────
 
@@ -253,6 +430,43 @@ test "MatchHasher2x insert writes tag+pos into bucket" {
     try testing.expectEqual(@as(u32, 0), stored & lz_constants.hash_position_mask);
     // Tag portion must match.
     try testing.expectEqual(hp.tag & lz_constants.hash_tag_mask, stored & lz_constants.hash_tag_mask);
+}
+
+test "MatchHasher2 init sizes three tables and computes masks" {
+    var h = try MatchHasher2.init(testing.allocator, 17);
+    defer h.deinit();
+    try testing.expectEqual(@as(usize, 1 << 17), h.first_hash.len);
+    try testing.expectEqual(@as(usize, 1 << 17), h.long_hash.len);
+    try testing.expectEqual(@as(usize, 1 << 16), h.next_hash.len);
+    try testing.expectEqual(@as(u6, 17), h.first_hash_bits);
+    try testing.expectEqual(@as(u6, 17), h.long_hash_bits);
+}
+
+test "MatchHasher2 insert / getHashPos round-trip" {
+    var buf: [64]u8 = undefined;
+    for (&buf, 0..) |*b, i| b.* = @intCast('a' + (i % 8));
+    var h = try MatchHasher2.init(testing.allocator, 14);
+    defer h.deinit();
+    h.setSrcBase(&buf);
+
+    const p0: [*]const u8 = buf[0..].ptr;
+    const hp = h.getHashPos(p0);
+    h.insert(hp);
+    try testing.expectEqual(@as(u32, 0), hp.pos);
+    try testing.expectEqual(hp.pos, h.first_hash[hp.hash_a]);
+}
+
+test "MatchHasher2 insertRange bumps cursor to end" {
+    var buf: [256]u8 = undefined;
+    for (&buf, 0..) |*b, i| b.* = @intCast('a' + (i % 5));
+    var h = try MatchHasher2.init(testing.allocator, 14);
+    defer h.deinit();
+    h.setSrcBase(&buf);
+
+    h.src_cur_offset = 10;
+    const p10: [*]const u8 = buf[10..].ptr;
+    h.insertRange(p10, 50);
+    try testing.expectEqual(@as(i64, 60), h.src_cur_offset);
 }
 
 test "MatchHasher2x insertRange populates exponentially spaced positions" {

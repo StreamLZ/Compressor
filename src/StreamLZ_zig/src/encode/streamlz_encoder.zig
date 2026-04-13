@@ -28,6 +28,7 @@ const entropy_enc = @import("entropy_encoder.zig");
 const EntropyOptions = entropy_enc.EntropyOptions;
 
 const MatchHasher2x = match_hasher.MatchHasher2x;
+const MatchHasher2 = match_hasher.MatchHasher2;
 
 pub const CompressError = error{
     BadLevel,
@@ -119,13 +120,21 @@ pub fn compressFramed(
     defer if (greedy_hasher) |*h| h.deinit();
     var lazy_hasher: ?MatchHasher2x = null;
     defer if (lazy_hasher) |*h| h.deinit();
+    var chain_hasher: ?MatchHasher2 = null;
+    defer if (chain_hasher) |*h| h.deinit();
 
-    if (opts.level == 3) {
-        // Matches SetupEncoder: L3 (engine level 1) defaults hashBits to 17,
-        // capped at 20.
-        lazy_hasher = try MatchHasher2x.init(allocator, 17, 4);
-    } else {
-        greedy_hasher = try FastMatchHasher(u32).init(allocator, params);
+    switch (opts.level) {
+        3 => {
+            // L3 (engine level 1): MatchHasher2x 2-entry bucket, hash_bits 17.
+            lazy_hasher = try MatchHasher2x.init(allocator, 17, 4);
+        },
+        4 => {
+            // L4 (engine level 3): MatchHasher2 chain hasher, hash_bits 17.
+            chain_hasher = try MatchHasher2.init(allocator, 17);
+        },
+        else => {
+            greedy_hasher = try FastMatchHasher(u32).init(allocator, params);
+        },
     }
 
     // ── Loop over 256 KB outer blocks ──────────────────────────────────
@@ -183,9 +192,8 @@ pub fn compressFramed(
                     2 => fast_enc.encodeSubChunkRaw(2, allocator, &greedy_hasher.?, sub_src, dst[sub_payload_start..], start_position_for_sub),
                     // L3 (engine level 1): lazy parser, MatchHasher2x.
                     3 => fast_enc.encodeSubChunkEntropyLazy(1, allocator, &lazy_hasher.?, sub_src, dst[sub_payload_start..], start_position_for_sub, entropy_options),
-                    // L4 (engine level 3): chain hasher lazy — not ported yet; temporarily
-                    // uses greedy-with-rehash until Phase 10g.
-                    4 => fast_enc.encodeSubChunkEntropy(2, allocator, &greedy_hasher.?, sub_src, dst[sub_payload_start..], start_position_for_sub, entropy_options),
+                    // L4 (engine level 3): chain hasher lazy (MatchHasher2).
+                    4 => fast_enc.encodeSubChunkEntropyChain(3, allocator, &chain_hasher.?, sub_src, dst[sub_payload_start..], start_position_for_sub, entropy_options),
                     // L5 (engine level 2): greedy with match rehashing.
                     5 => fast_enc.encodeSubChunkEntropy(2, allocator, &greedy_hasher.?, sub_src, dst[sub_payload_start..], start_position_for_sub, entropy_options),
                     else => unreachable,
