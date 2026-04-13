@@ -23,6 +23,8 @@ const lz_constants = @import("../format/streamlz_constants.zig");
 const fast_constants = @import("fast_constants.zig");
 const FastMatchHasher = @import("fast_match_hasher.zig").FastMatchHasher;
 const fast_enc = @import("fast_lz_encoder.zig");
+const entropy_enc = @import("entropy_encoder.zig");
+const EntropyOptions = entropy_enc.EntropyOptions;
 
 pub const CompressError = error{
     BadLevel,
@@ -32,7 +34,7 @@ pub const CompressError = error{
 } || std.mem.Allocator.Error || fast_enc.EncodeError;
 
 pub const Options = struct {
-    /// User level 1 or 2 supported in Phase 9.
+    /// User level 1–5 supported by the Fast encoder.
     level: u8 = 1,
     /// Include the content-size field in the frame header (strongly recommended).
     include_content_size: bool = true,
@@ -41,6 +43,31 @@ pub const Options = struct {
     /// 256 KB blocks internally but the frame header can advertise larger.
     block_size: u32 = lz_constants.chunk_size,
 };
+
+/// Returns the entropy option mask for a given user-level.
+fn entropyOptionsForLevel(user_level: u8) EntropyOptions {
+    const engine_level = fast_constants.mapLevel(user_level).engine_level;
+    // L5 (engine 2) allows tANS; L3/L4 (engine 1/3) clear it. See
+    // Fast.Compressor.SetupEncoder.
+    if (engine_level >= 2) {
+        return .{
+            .allow_tans = true,
+            .allow_rle_entropy = true,
+            .allow_double_huffman = true,
+            .allow_rle = true,
+            .allow_multi_array = true,
+            .supports_new_huffman = true,
+            .supports_short_memset = true,
+        };
+    }
+    return .{
+        .allow_rle_entropy = true,
+        .allow_double_huffman = true,
+        .allow_rle = true,
+        .supports_new_huffman = true,
+        .supports_short_memset = true,
+    };
+}
 
 /// Worst-case bound on the compressed size given `src_len`.
 pub fn compressBound(src_len: usize) usize {
@@ -63,7 +90,7 @@ pub fn compressFramed(
     dst: []u8,
     opts: Options,
 ) CompressError!usize {
-    if (opts.level < 1 or opts.level > 2) return error.BadLevel;
+    if (opts.level < 1 or opts.level > 5) return error.BadLevel;
     const min_dst = compressBound(src.len);
     if (dst.len < min_dst) return error.DestinationTooSmall;
 
@@ -134,9 +161,15 @@ pub fn compressFramed(
                 // later sub-chunk's decoder side has `base_offset != 0` and
                 // skips that path.
                 const start_position_for_sub: usize = src_off + sub_off;
+                const entropy_options = entropyOptionsForLevel(opts.level);
                 const result = try switch (opts.level) {
                     1 => fast_enc.encodeSubChunkRaw(1, allocator, &hasher, sub_src, dst[sub_payload_start..], start_position_for_sub),
                     2 => fast_enc.encodeSubChunkRaw(2, allocator, &hasher, sub_src, dst[sub_payload_start..], start_position_for_sub),
+                    // L3/L4 use lazy parsers (not yet wired — fall through to greedy
+                    // via engine level mapping until Phase 10f/g land).
+                    3 => fast_enc.encodeSubChunkEntropy(1, allocator, &hasher, sub_src, dst[sub_payload_start..], start_position_for_sub, entropy_options),
+                    4 => fast_enc.encodeSubChunkEntropy(2, allocator, &hasher, sub_src, dst[sub_payload_start..], start_position_for_sub, entropy_options),
+                    5 => fast_enc.encodeSubChunkEntropy(2, allocator, &hasher, sub_src, dst[sub_payload_start..], start_position_for_sub, entropy_options),
                     else => unreachable,
                 };
                 _ = sub_payload_cap;

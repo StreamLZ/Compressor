@@ -213,8 +213,8 @@ fn runCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const []
         std.process.exit(2);
     }
 
-    if (level < 1 or level > 2) {
-        try w.print("error: only levels 1 and 2 are supported in Phase 9 (got {d})\n", .{level});
+    if (level < 1 or level > 5) {
+        try w.print("error: only levels 1-5 are currently supported (got {d})\n", .{level});
         try w.flush();
         std.process.exit(2);
     }
@@ -427,6 +427,8 @@ test {
     _ = @import("encode/byte_histogram.zig");
     _ = @import("encode/fast_constants.zig");
     _ = @import("encode/tans_encoder.zig");
+    _ = @import("encode/offset_encoder.zig");
+    _ = @import("encode/entropy_encoder.zig");
     _ = @import("encode/fast_match_hasher.zig");
     _ = @import("encode/fast_stream_writer.zig");
     _ = @import("encode/fast_token_writer.zig");

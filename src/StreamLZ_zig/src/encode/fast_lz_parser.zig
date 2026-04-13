@@ -63,7 +63,7 @@ pub fn runGreedyParser(
 
     // Loop guard: keep 5 bytes of lookahead + guard.
     if (@intFromPtr(source_cursor) + 5 >= @intFromPtr(safe_source_end)) {
-        token_writer.copyTrailingLiterals(w, literal_start, source_end);
+        token_writer.copyTrailingLiterals(w, literal_start, source_end, recent_offset);
         recent_offset_inout.* = recent_offset;
         return;
     }
@@ -221,7 +221,7 @@ pub fn runGreedyParser(
         }
     }
 
-    token_writer.copyTrailingLiterals(w, literal_start, source_end);
+    token_writer.copyTrailingLiterals(w, literal_start, source_end, recent_offset);
     recent_offset_inout.* = recent_offset;
 }
 
@@ -239,7 +239,7 @@ test "runGreedyParser runs over a short source without crashing" {
     var hasher = try FastMatchHasher(u32).init(testing.allocator, .{ .hash_bits = 12, .min_match_length = 4 });
     defer hasher.deinit();
 
-    var w = try FastStreamWriter.init(testing.allocator, &src, src.len, null);
+    var w = try FastStreamWriter.init(testing.allocator, &src, src.len, null, false);
     defer w.deinit(testing.allocator);
 
     var mmlt: [32]u32 = undefined;

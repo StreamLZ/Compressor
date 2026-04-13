@@ -17,6 +17,7 @@ const std = @import("std");
 const constants = @import("fast_constants.zig");
 const writer_mod = @import("fast_stream_writer.zig");
 const copy = @import("../io/copy_helpers.zig");
+const offset_encoder = @import("offset_encoder.zig");
 
 const FastStreamWriter = writer_mod.FastStreamWriter;
 
@@ -129,9 +130,13 @@ pub fn writeComplexOffset(
     if (literal_run_length > 0) {
         copyBytesUnsafe(old_literal, literal_start, literal_run_length);
     }
+    if (w.delta_literal_cursor) |delta_cur| {
+        w.delta_literal_cursor = delta_cur + literal_run_length;
+        if (literal_run_length > 0) {
+            offset_encoder.subtractBytesUnsafe(delta_cur, literal_start, literal_run_length, recent_offset);
+        }
+    }
 
-    // recent_offset is unused in raw mode (no delta literal stream). The
-    // parameter stays for signature parity with the future entropy path.
     if (literal_run_length < 64) {
         // Split long-ish literal runs into 0x87 continuation tokens
         // (= "7 literal bytes, new 0 match"). Each emits 7 literals.
@@ -246,6 +251,17 @@ pub inline fn writeOffset(
         // Fast path — single copy64, single token store, conditional u16 store.
         copy.copy64(w.literal_cursor, literal_start);
         w.literal_cursor += literal_run_length;
+        if (w.delta_literal_cursor) |delta_cur| {
+            // SIMD byte subtract: delta[i] = literal[i] - byte_at_recent_offset[i]
+            const V8 = @Vector(8, u8);
+            const a: V8 = literal_start[0..8].*;
+            const back_addr: usize = @intFromPtr(literal_start) +% @as(usize, @bitCast(recent_offset));
+            const back_ptr: [*]const u8 = @ptrFromInt(back_addr);
+            const b: V8 = back_ptr[0..8].*;
+            const out: V8 = a -% b;
+            delta_cur[0..8].* = out;
+            w.delta_literal_cursor = delta_cur + literal_run_length;
+        }
 
         const use_distance_bit: u8 = if (offset == 0) 0x80 else 0;
         const token: u8 = @intCast(literal_run_length + 8 * match_length);
@@ -267,6 +283,7 @@ pub fn copyTrailingLiterals(
     w: *FastStreamWriter,
     literal_start: [*]const u8,
     source_end: [*]const u8,
+    recent_offset: isize,
 ) void {
     const count_addr_diff: isize = @as(isize, @bitCast(@intFromPtr(source_end) -% @intFromPtr(literal_start)));
     if (count_addr_diff <= 0) return;
@@ -274,6 +291,10 @@ pub fn copyTrailingLiterals(
     const old = w.literal_cursor;
     w.literal_cursor = old + count;
     @memcpy(old[0..count], literal_start[0..count]);
+    if (w.delta_literal_cursor) |delta_cur| {
+        w.delta_literal_cursor = delta_cur + count;
+        offset_encoder.subtractBytes(delta_cur, literal_start, count, recent_offset);
+    }
 }
 
 // ────────────────────────────────────────────────────────────
@@ -284,7 +305,7 @@ const testing = std.testing;
 
 test "writeLengthValue single-byte path" {
     const buf: [16]u8 = @splat(0);
-    var w = try FastStreamWriter.init(testing.allocator, &buf, 16, null);
+    var w = try FastStreamWriter.init(testing.allocator, &buf, 16, null, false);
     defer w.deinit(testing.allocator);
 
     writeLengthValue(&w, 0);
@@ -299,7 +320,7 @@ test "writeLengthValue single-byte path" {
 
 test "writeLengthValue extended 3-byte path" {
     const buf: [16]u8 = @splat(0);
-    var w = try FastStreamWriter.init(testing.allocator, &buf, 16, null);
+    var w = try FastStreamWriter.init(testing.allocator, &buf, 16, null, false);
     defer w.deinit(testing.allocator);
 
     // value = 252: low2 = 0, tag = -4 = 0xFC; remainder = (252 - 252) >> 2 = 0
@@ -319,7 +340,7 @@ test "writeOffset fast path emits one token byte and one u16" {
     buf[0] = 'A';
     buf[1] = 'B';
     buf[2] = 'C';
-    var w = try FastStreamWriter.init(testing.allocator, &buf, 32, null);
+    var w = try FastStreamWriter.init(testing.allocator, &buf, 32, null, false);
     defer w.deinit(testing.allocator);
 
     // lit=3, match=5, offset=0x1234
@@ -334,7 +355,7 @@ test "writeOffset fast path emits one token byte and one u16" {
 
 test "writeOffset fast path offset==0 sets high bit and no off16 store" {
     const buf: [32]u8 = @splat('x');
-    var w = try FastStreamWriter.init(testing.allocator, &buf, 32, null);
+    var w = try FastStreamWriter.init(testing.allocator, &buf, 32, null, false);
     defer w.deinit(testing.allocator);
 
     writeOffset(&w, 10, 2, 0, -8, &buf);
@@ -344,7 +365,7 @@ test "writeOffset fast path offset==0 sets high bit and no off16 store" {
 
 test "writeOffset32 small-offset path writes 3 bytes" {
     const buf: [8]u8 = @splat(0);
-    var w = try FastStreamWriter.init(testing.allocator, &buf, 8, null);
+    var w = try FastStreamWriter.init(testing.allocator, &buf, 8, null, false);
     defer w.deinit(testing.allocator);
 
     writeOffset32(&w, 0x123456);

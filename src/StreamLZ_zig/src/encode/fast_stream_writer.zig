@@ -34,6 +34,12 @@ pub const FastStreamWriter = struct {
     // ── Stream cursors (adjacent — one cache line — hot) ────────────────
     literal_start: [*]u8,
     literal_cursor: [*]u8,
+    /// Non-null in entropy mode: alongside each literal write, the token
+    /// writer also subtracts the byte at `recent_offset` from the literal
+    /// value and stores the delta into this stream. The assembly step
+    /// picks the cheaper of the delta and raw literal streams.
+    delta_literal_start: ?[*]u8 = null,
+    delta_literal_cursor: ?[*]u8 = null,
     token_start: [*]u8,
     token_cursor: [*]u8,
     off16_start: [*]u16,
@@ -73,11 +79,15 @@ pub const FastStreamWriter = struct {
     /// `raw_literals_dst` is used in raw mode: the parser writes literals
     /// directly to that pointer, bypassing the scratch literal stream.
     /// For entropy mode, pass `null` and the literal stream lives in scratch.
+    /// `use_delta_literals` enables a parallel delta-literal stream (the
+    /// parser writes `literal[i] - byte_at_recent_offset[i]` alongside the
+    /// raw literals). Entropy mode picks the cheaper stream at assembly.
     pub fn init(
         allocator: std.mem.Allocator,
         source_ptr: [*]const u8,
         source_length: usize,
         raw_literals_dst: ?[*]u8,
+        use_delta_literals: bool,
     ) !FastStreamWriter {
         // Match C# FastStreamWriter.Initialize sizing (with generous rounding).
         const literal_size: usize = source_length + 8;
@@ -86,12 +96,11 @@ pub const FastStreamWriter = struct {
         const off32_size: usize = source_length / 8 + 8; // number of 4-byte slots
         const length_size: usize = source_length / 29 + 16;
 
-        // Layout: [token_stream][off16_stream (aligned 2)][off32_stream][length_stream][literal_stream?]
-        // We place the literal stream last in scratch so we can omit it when
-        // raw mode writes directly to dst.
+        // Layout: [token_stream][off16_stream (aligned 2)][off32_stream][length_stream][delta?][literal?]
         const literal_in_scratch = raw_literals_dst == null;
         const total_size: usize = token_size + (off16_size * 2) + (off32_size * 4) + length_size +
-            (if (literal_in_scratch) literal_size else 0) + 64;
+            (if (literal_in_scratch) literal_size else 0) +
+            (if (use_delta_literals) literal_size else 0) + 64;
 
         const scratch = try allocator.alloc(u8, total_size);
         var p: usize = 0;
@@ -107,6 +116,12 @@ pub const FastStreamWriter = struct {
         const length_ptr: [*]u8 = scratch.ptr + p;
         p += length_size;
 
+        var delta_literal_ptr: ?[*]u8 = null;
+        if (use_delta_literals) {
+            delta_literal_ptr = scratch.ptr + p;
+            p += literal_size;
+        }
+
         const literal_ptr: [*]u8 = if (raw_literals_dst) |d| d else blk: {
             const lp = scratch.ptr + p;
             p += literal_size;
@@ -121,6 +136,8 @@ pub const FastStreamWriter = struct {
         return .{
             .literal_start = literal_ptr,
             .literal_cursor = literal_ptr,
+            .delta_literal_start = delta_literal_ptr,
+            .delta_literal_cursor = delta_literal_ptr,
             .token_start = token_ptr,
             .token_cursor = token_ptr,
             .off16_start = off16_ptr,
@@ -153,6 +170,12 @@ pub const FastStreamWriter = struct {
     pub inline fn literalCount(self: *const FastStreamWriter) usize {
         return @intFromPtr(self.literal_cursor) - @intFromPtr(self.literal_start);
     }
+    pub inline fn deltaLiteralCount(self: *const FastStreamWriter) usize {
+        if (self.delta_literal_cursor) |cur| {
+            return @intFromPtr(cur) - @intFromPtr(self.delta_literal_start.?);
+        }
+        return 0;
+    }
     pub inline fn tokenCount(self: *const FastStreamWriter) usize {
         return @intFromPtr(self.token_cursor) - @intFromPtr(self.token_start);
     }
@@ -175,7 +198,7 @@ const testing = std.testing;
 
 test "FastStreamWriter.init allocates and sets cursors at start" {
     const src: [100]u8 = @splat('A');
-    var w = try FastStreamWriter.init(testing.allocator, &src, src.len, null);
+    var w = try FastStreamWriter.init(testing.allocator, &src, src.len, null, false);
     defer w.deinit(testing.allocator);
 
     try testing.expectEqual(@as(usize, 0), w.literalCount());
@@ -188,7 +211,7 @@ test "FastStreamWriter.init allocates and sets cursors at start" {
 
 test "FastStreamWriter block1/block2 split at 64 KB" {
     const src: [150 * 1024]u8 = @splat('A');
-    var w = try FastStreamWriter.init(testing.allocator, &src, src.len, null);
+    var w = try FastStreamWriter.init(testing.allocator, &src, src.len, null, false);
     defer w.deinit(testing.allocator);
     try testing.expectEqual(@as(u32, 65536), w.block1_size);
     try testing.expectEqual(@as(u32, 150 * 1024 - 65536), w.block2_size);
@@ -197,7 +220,7 @@ test "FastStreamWriter block1/block2 split at 64 KB" {
 test "FastStreamWriter raw mode accepts external literal dst" {
     const src: [100]u8 = @splat('A');
     var dst: [200]u8 = undefined;
-    var w = try FastStreamWriter.init(testing.allocator, &src, src.len, dst[0..].ptr);
+    var w = try FastStreamWriter.init(testing.allocator, &src, src.len, dst[0..].ptr, false);
     defer w.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 0), w.literalCount());
     try testing.expectEqual(@intFromPtr(&dst[0]), @intFromPtr(w.literal_start));

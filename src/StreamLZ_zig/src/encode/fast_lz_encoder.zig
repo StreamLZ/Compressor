@@ -23,12 +23,15 @@ const FastMatchHasher = @import("fast_match_hasher.zig").FastMatchHasher;
 const writer_mod = @import("fast_stream_writer.zig");
 const parser = @import("fast_lz_parser.zig");
 const token_writer = @import("fast_token_writer.zig");
+const entropy_enc = @import("entropy_encoder.zig");
+const byte_hist = @import("byte_histogram.zig");
 
 const FastStreamWriter = writer_mod.FastStreamWriter;
+const EntropyOptions = entropy_enc.EntropyOptions;
 
 pub const EncodeError = error{
     DestinationTooSmall,
-} || std.mem.Allocator.Error;
+} || std.mem.Allocator.Error || entropy_enc.EncodeError;
 
 pub const EncodeResult = struct {
     /// Total bytes written to `dst` (before the outer 3-byte sub-chunk header).
@@ -79,7 +82,7 @@ pub fn encodeSubChunkRaw(
     const literal_count_header: [*]u8 = dst_cursor;
     const literal_data_ptr: [*]u8 = dst_cursor + 3;
 
-    var w = try FastStreamWriter.init(allocator, source.ptr, source.len, literal_data_ptr);
+    var w = try FastStreamWriter.init(allocator, source.ptr, source.len, literal_data_ptr, false);
     defer w.deinit(allocator);
 
     var mmlt: [32]u32 = undefined;
@@ -116,7 +119,7 @@ pub fn encodeSubChunkRaw(
                 source.ptr,
             );
         } else {
-            token_writer.copyTrailingLiterals(&w, block1_cursor, block1_end);
+            token_writer.copyTrailingLiterals(&w, block1_cursor, block1_end, recent);
         }
         w.off32_count_block1 = w.off32_count;
     }
@@ -149,7 +152,7 @@ pub fn encodeSubChunkRaw(
                 source.ptr,
             );
         } else {
-            token_writer.copyTrailingLiterals(&w, block2_cursor, block2_end);
+            token_writer.copyTrailingLiterals(&w, block2_cursor, block2_end, recent);
         }
         w.off32_count_block2 = w.off32_count;
     }
@@ -239,6 +242,275 @@ pub fn encodeSubChunkRaw(
     if (total >= source.len) return bail_result;
 
     return .{ .bytes_written = total, .chunk_type = .raw, .bail = false };
+}
+
+// ────────────────────────────────────────────────────────────
+//  Entropy-mode sub-chunk encoder (user levels 3, 4, 5)
+// ────────────────────────────────────────────────────────────
+
+/// Encode a single Fast sub-chunk in entropy mode (delta-literal + token
+/// entropy coding via tANS/memcpy, optional off16 entropy split). Port
+/// of the entropy-mode branches in C# `Encoder.AssembleCompressedOutput`.
+///
+/// The caller runs the parser with `use_delta_literals = true` so BOTH
+/// literal streams are available; this function picks the cheaper one
+/// by encoded size.
+pub fn encodeSubChunkEntropy(
+    comptime level: i32,
+    allocator: std.mem.Allocator,
+    hasher: *FastMatchHasher(u32),
+    source: []const u8,
+    dst: []u8,
+    start_position: usize,
+    options: EntropyOptions,
+) EncodeError!EncodeResult {
+    if (source.len <= fast_constants.min_source_length) return .{
+        .bytes_written = 0,
+        .chunk_type = .raw,
+        .bail = true,
+    };
+
+    const initial_bytes: usize = if (start_position == 0) fast_constants.initial_copy_bytes else 0;
+    const min_dst = initial_bytes + 32 + source.len + 256;
+    if (dst.len < min_dst) return error.DestinationTooSmall;
+
+    hasher.reset();
+
+    var dst_cursor: [*]u8 = dst.ptr;
+    if (initial_bytes != 0) {
+        @memcpy(dst_cursor[0..8], source[0..8]);
+        dst_cursor += 8;
+    }
+
+    // Entropy mode: both literal streams live in scratch, so the caller
+    // doesn't touch the literal data until assembly.
+    var w = try FastStreamWriter.init(allocator, source.ptr, source.len, null, true);
+    defer w.deinit(allocator);
+
+    var mmlt: [32]u32 = undefined;
+    // `long_offset_threshold = 10` for entropy mode (vs 14 for raw).
+    fast_constants.buildMinimumMatchLengthTable(&mmlt, 4, 10);
+
+    const dict_size: u32 = @intCast(fast_constants.block1_max_size * 2);
+
+    var recent: isize = -8;
+    const source_end_ptr: [*]const u8 = source.ptr + source.len;
+    const safe_end: [*]const u8 = if (source.len >= 16) source_end_ptr - 16 else source.ptr;
+
+    // ── Block 1 ─────────────────────────────────────────────────────────
+    {
+        const block1_cursor: [*]const u8 = source.ptr + initial_bytes;
+        const block1_end: [*]const u8 = source.ptr + w.block1_size;
+        const safe_for_block1: [*]const u8 = if (@intFromPtr(block1_end) < @intFromPtr(safe_end))
+            block1_end
+        else
+            safe_end;
+        w.block2_start_offset = 0;
+        w.off32_count = 0;
+        if (@intFromPtr(block1_cursor) < @intFromPtr(safe_for_block1)) {
+            parser.runGreedyParser(
+                level,
+                u32,
+                &w,
+                hasher,
+                block1_cursor,
+                safe_for_block1,
+                block1_end,
+                &recent,
+                dict_size,
+                &mmlt,
+                source.ptr,
+            );
+        } else {
+            token_writer.copyTrailingLiterals(&w, block1_cursor, block1_end, recent);
+        }
+        w.off32_count_block1 = w.off32_count;
+    }
+
+    // ── Block 2 ─────────────────────────────────────────────────────────
+    if (w.block2_size > 0) {
+        w.token_stream2_offset = @intCast(w.tokenCount());
+        w.block2_start_offset = @intCast(w.block1_size);
+        w.off32_count = 0;
+
+        const block2_cursor: [*]const u8 = source.ptr + w.block1_size;
+        const block2_end: [*]const u8 = block2_cursor + w.block2_size;
+        const safe_for_block2: [*]const u8 = if (@intFromPtr(block2_end) < @intFromPtr(safe_end))
+            block2_end
+        else
+            safe_end;
+
+        if (@intFromPtr(block2_cursor) < @intFromPtr(safe_for_block2)) {
+            parser.runGreedyParser(
+                level,
+                u32,
+                &w,
+                hasher,
+                block2_cursor,
+                safe_for_block2,
+                block2_end,
+                &recent,
+                dict_size,
+                &mmlt,
+                source.ptr,
+            );
+        } else {
+            token_writer.copyTrailingLiterals(&w, block2_cursor, block2_end, recent);
+        }
+        w.off32_count_block2 = w.off32_count;
+    }
+
+    // ── Assemble entropy output ────────────────────────────────────────
+    const literal_count: usize = w.literalCount();
+    const token_count: usize = w.tokenCount();
+    const off16_count: usize = w.off16Count();
+
+    var out_cursor: [*]u8 = dst_cursor;
+    const dst_end: [*]u8 = dst.ptr + dst.len;
+    const bail_result: EncodeResult = .{ .bytes_written = 0, .chunk_type = .raw, .bail = true };
+
+    // Shared scratch for the best-of-both encoder picks.
+    const enc_scratch = try allocator.alloc(u8, @max(literal_count, token_count) + 512);
+    defer allocator.free(enc_scratch);
+
+    // ── Encode literal stream (try delta and raw, pick cheaper) ────────
+    var chunk_type: fast_constants.ChunkType = .raw;
+    if (literal_count >= 32) {
+        const raw_n = try entropy_enc.encodeArrayU8(
+            allocator,
+            enc_scratch,
+            w.literal_start[0..literal_count],
+            options,
+            null,
+        );
+        const delta_scratch = try allocator.alloc(u8, literal_count + 512);
+        defer allocator.free(delta_scratch);
+        const delta_n = try entropy_enc.encodeArrayU8(
+            allocator,
+            delta_scratch,
+            w.delta_literal_start.?[0..literal_count],
+            options,
+            null,
+        );
+        if (delta_n < raw_n) {
+            if (@intFromPtr(out_cursor) + delta_n > @intFromPtr(dst_end)) return bail_result;
+            @memcpy(out_cursor[0..delta_n], delta_scratch[0..delta_n]);
+            out_cursor += delta_n;
+            chunk_type = .delta;
+        } else {
+            if (@intFromPtr(out_cursor) + raw_n > @intFromPtr(dst_end)) return bail_result;
+            @memcpy(out_cursor[0..raw_n], enc_scratch[0..raw_n]);
+            out_cursor += raw_n;
+            chunk_type = .raw;
+        }
+    } else {
+        const raw_n = try entropy_enc.encodeArrayU8Memcpy(enc_scratch, w.literal_start[0..literal_count]);
+        if (@intFromPtr(out_cursor) + raw_n > @intFromPtr(dst_end)) return bail_result;
+        @memcpy(out_cursor[0..raw_n], enc_scratch[0..raw_n]);
+        out_cursor += raw_n;
+        chunk_type = .raw;
+    }
+
+    // ── Encode token stream (entropy) ──────────────────────────────────
+    {
+        const token_n = try entropy_enc.encodeArrayU8(
+            allocator,
+            enc_scratch,
+            w.token_start[0..token_count],
+            options,
+            null,
+        );
+        if (@intFromPtr(out_cursor) + token_n > @intFromPtr(dst_end)) return bail_result;
+        @memcpy(out_cursor[0..token_n], enc_scratch[0..token_n]);
+        out_cursor += token_n;
+    }
+
+    // ── Optional TokenStream2Offset ────────────────────────────────────
+    if (source.len > fast_constants.block1_max_size) {
+        if (@intFromPtr(out_cursor) + 2 > @intFromPtr(dst_end)) return bail_result;
+        std.mem.writeInt(u16, out_cursor[0..2], @intCast(w.token_stream2_offset), .little);
+        out_cursor += 2;
+    }
+
+    // ── Off16 stream: try entropy split, fall back to raw ─────────────
+    var used_entropy_off16 = false;
+    if (options.allow_tans and off16_count >= 32) {
+        // Split into hi/lo byte arrays.
+        const off16_bytes_total: usize = off16_count * 2;
+        const split_buf = try allocator.alloc(u8, off16_count * 2);
+        defer allocator.free(split_buf);
+        const lo_bytes = split_buf[0..off16_count];
+        const hi_bytes = split_buf[off16_count .. off16_count * 2];
+        for (0..off16_count) |i| {
+            const v: u16 = w.off16_start[i];
+            lo_bytes[i] = @intCast(v & 0xFF);
+            hi_bytes[i] = @intCast((v >> 8) & 0xFF);
+        }
+        const split_enc = try allocator.alloc(u8, off16_bytes_total + 512);
+        defer allocator.free(split_enc);
+        const hi_n = try entropy_enc.encodeArrayU8(allocator, split_enc, hi_bytes, options, null);
+        const lo_n = try entropy_enc.encodeArrayU8(allocator, split_enc[hi_n..], lo_bytes, options, null);
+        const split_total = hi_n + lo_n;
+        if (split_total + 2 < off16_bytes_total + 2) {
+            used_entropy_off16 = true;
+            // Write 0xFFFF marker + split bytes.
+            if (@intFromPtr(out_cursor) + 2 + split_total > @intFromPtr(dst_end)) return bail_result;
+            std.mem.writeInt(u16, out_cursor[0..2], fast_constants.entropy_coded_16_marker, .little);
+            out_cursor += 2;
+            @memcpy(out_cursor[0..split_total], split_enc[0..split_total]);
+            out_cursor += split_total;
+        }
+    }
+    if (!used_entropy_off16) {
+        const off16_bytes: usize = off16_count * 2;
+        if (@intFromPtr(out_cursor) + off16_bytes + 2 > @intFromPtr(dst_end)) return bail_result;
+        std.mem.writeInt(u16, out_cursor[0..2], @intCast(off16_count), .little);
+        out_cursor += 2;
+        if (off16_bytes != 0) {
+            const off16_src: [*]const u8 = @ptrCast(w.off16_start);
+            @memcpy(out_cursor[0..off16_bytes], off16_src[0..off16_bytes]);
+            out_cursor += off16_bytes;
+        }
+    }
+
+    // ── Off32 stream header + data ─────────────────────────────────────
+    const off32_bytes: usize = w.off32ByteCount();
+    if (@intFromPtr(out_cursor) + 3 > @intFromPtr(dst_end)) return bail_result;
+    const c1: u32 = @min(w.off32_count_block1, 4095);
+    const c2: u32 = @min(w.off32_count_block2, 4095);
+    const packed_counts: u32 = (c1 << 12) | c2;
+    out_cursor[0] = @intCast(packed_counts & 0xFF);
+    out_cursor[1] = @intCast((packed_counts >> 8) & 0xFF);
+    out_cursor[2] = @intCast((packed_counts >> 16) & 0xFF);
+    out_cursor += 3;
+    if (w.off32_count_block1 >= 4095) {
+        if (@intFromPtr(out_cursor) + 2 > @intFromPtr(dst_end)) return bail_result;
+        std.mem.writeInt(u16, out_cursor[0..2], @intCast(w.off32_count_block1), .little);
+        out_cursor += 2;
+    }
+    if (w.off32_count_block2 >= 4095) {
+        if (@intFromPtr(out_cursor) + 2 > @intFromPtr(dst_end)) return bail_result;
+        std.mem.writeInt(u16, out_cursor[0..2], @intCast(w.off32_count_block2), .little);
+        out_cursor += 2;
+    }
+    if (off32_bytes != 0) {
+        if (@intFromPtr(out_cursor) + off32_bytes > @intFromPtr(dst_end)) return bail_result;
+        @memcpy(out_cursor[0..off32_bytes], w.off32_start[0..off32_bytes]);
+        out_cursor += off32_bytes;
+    }
+
+    // ── Length stream (raw) ───────────────────────────────────────────
+    const length_bytes: usize = w.lengthCount();
+    if (length_bytes != 0) {
+        if (@intFromPtr(out_cursor) + length_bytes > @intFromPtr(dst_end)) return bail_result;
+        @memcpy(out_cursor[0..length_bytes], w.length_start[0..length_bytes]);
+        out_cursor += length_bytes;
+    }
+
+    const total: usize = @intFromPtr(out_cursor) - @intFromPtr(dst.ptr);
+    if (total >= source.len) return bail_result;
+
+    return .{ .bytes_written = total, .chunk_type = chunk_type, .bail = false };
 }
 
 // ────────────────────────────────────────────────────────────
