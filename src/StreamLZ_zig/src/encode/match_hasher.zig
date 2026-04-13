@@ -1,6 +1,6 @@
 //! MatchHasher — bucket-based Fibonacci-hash match finder used by the lazy
-//! parsers. Port of `MatchHasherBase` + `MatchHasher2x` in
-//! src/StreamLZ/Compression/MatchFinding/MatchHasher.cs.
+//! parsers. Port of `MatchHasherBase` + `MatchHasher{1,2x,4,4Dual,16Dual}`
+//! in src/StreamLZ/Compression/MatchFinding/MatchHasher.cs.
 //!
 //! Each table entry stores `(tag<<25) | (pos & 0x01FFFFFF)` — 7 high tag bits
 //! for collision rejection and 25 low position bits. Positions are tracked
@@ -9,12 +9,20 @@
 //!
 //! Bucket insert semantics are type-parameterized via comptime `num_hash`:
 //!
-//!   num_hash = 1  → overwrite (`MatchHasher1`)
-//!   num_hash = 2  → shift index+1 ← index, then index ← hval (`MatchHasher2x`)
+//!   num_hash = 1   → overwrite (`MatchHasher1`)
+//!   num_hash = 2   → shift index+1 ← index, then index ← hval (`MatchHasher2x`)
+//!   num_hash = 4   → 4-entry ring shift (`MatchHasher4`, `MatchHasher4Dual`)
+//!   num_hash = 16  → 16-entry ring shift (`MatchHasher16Dual`)
+//!
+//! The `dual_hash` comptime flag adds a secondary hash: the second index
+//! is derived from `FibonacciHashMultiplier * atSrc >> (64 - bits)` and is
+//! bucket-aligned via `~(num_hash - 1)`. Dual-hash hashers insert into
+//! both buckets on every call — higher probe cost, better coverage for
+//! High codec levels ≥ 3.
 //!
 //! The lazy parser in `fast_lz_parser.zig` uses the 2-entry bucket to keep
 //! one "alternate" candidate alive per hash slot without paying for a full
-//! chain walk.
+//! chain walk. The High codec uses the 4/16-entry dual-hash variants.
 
 const std = @import("std");
 const lz_constants = @import("../format/streamlz_constants.zig");
@@ -22,19 +30,29 @@ const lz_constants = @import("../format/streamlz_constants.zig");
 /// Snapshot of hash state returned by `getHashPos` and consumed by `insert`.
 pub const HasherHashPos = struct {
     ptr1_index: u32,
+    /// Secondary bucket index when the hasher uses dual hashing. Unused
+    /// when `dual_hash = false` (value is 0).
+    ptr2_index: u32 = 0,
     pos: u32,
     tag: u32,
 };
 
-/// Generic bucket hash. `num_hash` is the bucket width (power of 2, no dual).
-pub fn MatchHasher(comptime num_hash: u32) type {
+/// Generic bucket hash. `num_hash` is the bucket width (power of 2).
+/// `dual_hash` enables a second hash index derived from the raw
+/// Fibonacci multiplier, for better collision coverage.
+pub fn MatchHasher(comptime num_hash: u32, comptime dual_hash: bool) type {
     comptime {
-        if (num_hash != 1 and num_hash != 2) {
-            @compileError("MatchHasher: unsupported num_hash (only 1 or 2 for now)");
+        if (num_hash != 1 and num_hash != 2 and num_hash != 4 and num_hash != 16) {
+            @compileError("MatchHasher: unsupported num_hash (must be 1, 2, 4, or 16)");
+        }
+        if (dual_hash and num_hash == 1) {
+            @compileError("MatchHasher: dual_hash requires num_hash >= 2");
         }
     }
     return struct {
         const Self = @This();
+        const bucket_width: u32 = num_hash;
+        const uses_dual_hash: bool = dual_hash;
 
         /// Power-of-two-sized hash table. Entry width is 32 bits: tag|pos.
         hash_table: []u32,
@@ -61,6 +79,8 @@ pub fn MatchHasher(comptime num_hash: u32) type {
 
         // Cached state from the last `setHashPos`.
         hash_entry_ptr_index: u32 = 0,
+        /// Secondary bucket index when `dual_hash = true` (otherwise unused).
+        hash_entry2_ptr_index: u32 = 0,
         current_hash_tag: u32 = 0,
 
         allocator: std.mem.Allocator,
@@ -118,6 +138,7 @@ pub fn MatchHasher(comptime num_hash: u32) type {
         }
 
         /// Compute the hash for the 8 bytes at `p` and cache the index + tag.
+        /// When `dual_hash = true`, also computes a secondary bucket index.
         pub inline fn setHashPos(self: *Self, p: [*]const u8) void {
             const offset: i64 = @intCast(@intFromPtr(p) - @intFromPtr(self.src_base));
             self.src_cur_offset = offset;
@@ -127,6 +148,17 @@ pub fn MatchHasher(comptime num_hash: u32) type {
             const hash1: u32 = std.math.rotl(u32, hi32, self.hash_bits);
             self.current_hash_tag = hash1;
             self.hash_entry_ptr_index = hash1 & self.hash_mask;
+            if (dual_hash) {
+                // Second hash uses the raw Fibonacci multiplier and a
+                // different shift — matches C# MatchHasherBase.SetHashPos:
+                //     hash2 = (FibonacciMult * atSrc) >> (64 - bits)
+                //     HashEntry2Ptr = hash2 & ~(NumHash - 1)
+                const fib_mult: u64 = lz_constants.fibonacci_hash_multiplier;
+                const product2: u64 = fib_mult *% at_src;
+                const shift_amt: u6 = @intCast(64 - @as(u32, self.hash_bits));
+                const hash2: u32 = @intCast(product2 >> shift_amt);
+                self.hash_entry2_ptr_index = hash2 & ~(@as(u32, num_hash) - 1);
+            }
         }
 
         /// `setHashPos` + prefetch the cache line containing the target bucket.
@@ -144,24 +176,54 @@ pub fn MatchHasher(comptime num_hash: u32) type {
             const pos: u32 = @intCast(@as(i64, @intCast(@intFromPtr(p) - @intFromPtr(self.src_base))) - self.src_base_offset);
             return .{
                 .ptr1_index = self.hash_entry_ptr_index,
+                .ptr2_index = if (dual_hash) self.hash_entry2_ptr_index else 0,
                 .pos = pos,
                 .tag = self.current_hash_tag,
             };
         }
 
-        /// Insert the captured state into the bucket.
+        /// Insert the captured state into the bucket. Dual-hash variants
+        /// insert at both primary and secondary indices.
         pub inline fn insert(self: *Self, hp: HasherHashPos) void {
             const he = makeHashValue(hp.tag, hp.pos);
             self.insertAtIndex(hp.ptr1_index, he);
+            if (dual_hash) {
+                self.insertAtIndex(hp.ptr2_index, he);
+            }
         }
 
-        /// Bucket ring-buffer insert.
+        /// Bucket ring-buffer insert — shift entries `[0..num_hash-1]` to
+        /// `[1..num_hash]` then write `hval` at `index`.
         pub inline fn insertAtIndex(self: *Self, index: u32, hval: u32) void {
-            if (num_hash == 1) {
-                self.hash_table[index] = hval;
-            } else if (num_hash == 2) {
-                self.hash_table[index + 1] = self.hash_table[index];
-                self.hash_table[index] = hval;
+            switch (num_hash) {
+                1 => self.hash_table[index] = hval,
+                2 => {
+                    self.hash_table[index + 1] = self.hash_table[index];
+                    self.hash_table[index] = hval;
+                },
+                4 => {
+                    // C# MatchHasher4.InsertAtIndex: load 3 consecutive
+                    // entries into locals then store shifted.
+                    const a = self.hash_table[index + 2];
+                    const b = self.hash_table[index + 1];
+                    const c = self.hash_table[index];
+                    self.hash_table[index + 3] = a;
+                    self.hash_table[index + 2] = b;
+                    self.hash_table[index + 1] = c;
+                    self.hash_table[index] = hval;
+                },
+                16 => {
+                    // C# MatchHasher16Dual uses SSE2 overlapping 128-bit
+                    // stores. Scalar version for Zig: shift entries
+                    // [0..14] → [1..15] then write hval at index.
+                    var i: u32 = 14;
+                    while (true) : (i -= 1) {
+                        self.hash_table[index + i + 1] = self.hash_table[index + i];
+                        if (i == 0) break;
+                    }
+                    self.hash_table[index] = hval;
+                },
+                else => unreachable,
             }
         }
 
@@ -172,6 +234,7 @@ pub fn MatchHasher(comptime num_hash: u32) type {
             if (self.src_cur_offset < offset + @as(i64, @intCast(len))) {
                 const he = makeHashValue(self.current_hash_tag, @as(u32, @intCast(self.src_cur_offset - self.src_base_offset)));
                 self.insertAtIndex(self.hash_entry_ptr_index, he);
+                if (dual_hash) self.insertAtIndex(self.hash_entry2_ptr_index, he);
 
                 var i: i64 = self.src_cur_offset - offset + 1;
                 while (i < @as(i64, @intCast(len))) : (i *= 2) {
@@ -191,12 +254,97 @@ pub fn MatchHasher(comptime num_hash: u32) type {
                 self.setHashPos(after);
             }
         }
+
+        /// Set base offset without preloading. Matches C#
+        /// `MatchHasherBase.SetBaseWithoutPreload(long srcBaseOffset)`.
+        pub inline fn setBaseAndPreloadNone(self: *Self, base_offset: i64) void {
+            self.src_base_offset = base_offset;
+        }
+
+        /// Preload the hash table from a pre-existing dictionary window.
+        /// Port of C# `MatchHasherBase.SetBaseAndPreload`: positions
+        /// `[srcBaseOffset .. srcStartOffset]` are walked with an adaptive
+        /// step size and inserted into the hash table before compression
+        /// begins. `src_base_ptr` must be the base pointer such that
+        /// `src_base_ptr + srcBaseOffset` points at the first byte of the
+        /// preload region, and `src_base_ptr + srcStartOffset` points at
+        /// the first byte the compressor is about to scan.
+        pub fn setBaseAndPreload(
+            self: *Self,
+            src_base_ptr: [*]const u8,
+            src_base_offset: i64,
+            src_start_offset: i64,
+            max_preload_len: usize,
+        ) void {
+            self.src_base_offset = src_base_offset;
+            if (src_base_offset == src_start_offset) return;
+            // Point src_base so position arithmetic through the hasher's
+            // own setHashPos works consistently.
+            self.src_base = src_base_ptr;
+
+            const Inserter = struct {
+                hasher: *Self,
+                base_ptr: [*]const u8,
+
+                pub fn insert(ctx: @This(), offs: i64) void {
+                    const p: [*]const u8 = @ptrFromInt(@intFromPtr(ctx.base_ptr) + @as(usize, @intCast(offs)));
+                    ctx.hasher.setHashPos(p);
+                    const hp = ctx.hasher.getHashPos(p);
+                    ctx.hasher.insert(hp);
+                }
+            };
+            const inserter = Inserter{ .hasher = self, .base_ptr = src_base_ptr };
+            adaptivePreloadLoop(Inserter, inserter, src_base_offset, src_start_offset, max_preload_len);
+        }
     };
 }
 
+/// Adaptive-step preload loop. Port of C#
+/// `MatchHasherPreload.AdaptivePreloadLoop` (`MatchHasher.cs:45-83`).
+/// Starts with a large step near the dictionary base and halves the step
+/// as it approaches `src_start_offset`, giving denser coverage near the
+/// positions most likely to be matched.
+pub fn adaptivePreloadLoop(
+    comptime Inserter: type,
+    inserter: Inserter,
+    src_base_offset: i64,
+    src_start_offset: i64,
+    max_preload_len: usize,
+) void {
+    std.debug.assert(src_start_offset > src_base_offset);
+    var preload_len: i64 = src_start_offset - src_base_offset;
+    var cur_offset: i64 = src_base_offset;
+
+    if (preload_len > @as(i64, @intCast(max_preload_len))) {
+        preload_len = @intCast(max_preload_len);
+        cur_offset = src_start_offset - preload_len;
+    }
+
+    var step: i32 = @max(@as(i32, @intCast(preload_len >> 18)), 2);
+    var rounds_until_next_step: i32 = @intCast(@divTrunc(preload_len >> 1, step));
+
+    while (true) {
+        rounds_until_next_step -= 1;
+        if (rounds_until_next_step <= 0) {
+            if (cur_offset >= src_start_offset) break;
+            step >>= 1;
+            std.debug.assert(step >= 1);
+            rounds_until_next_step = @intCast(@divTrunc(src_start_offset - cur_offset, step));
+            if (step > 1) rounds_until_next_step >>= 1;
+        }
+        inserter.insert(cur_offset);
+        cur_offset += step;
+    }
+}
+
 /// Convenience aliases matching the C# class names.
-pub const MatchHasher1 = MatchHasher(1);
-pub const MatchHasher2x = MatchHasher(2);
+/// Non-dual bucket hashers.
+pub const MatchHasher1 = MatchHasher(1, false);
+pub const MatchHasher2x = MatchHasher(2, false);
+pub const MatchHasher4 = MatchHasher(4, false);
+/// Dual-hash variants: insert at primary AND secondary bucket on every call.
+pub const MatchHasher4Dual = MatchHasher(4, true);
+pub const MatchHasher16Dual = MatchHasher(16, true);
 
 // ────────────────────────────────────────────────────────────
 //  MatchHasher2 — 3-table chain hasher for the L4 lazy parser
@@ -485,4 +633,104 @@ test "MatchHasher2x insertRange populates exponentially spaced positions" {
 
     // After insertRange the cached state should point at offset 110.
     try testing.expectEqual(@as(i64, 110), h.src_cur_offset);
+}
+
+test "MatchHasher4 init: mask is bucket-aligned, num_hash=4" {
+    var h = try MatchHasher4.init(testing.allocator, 12, 4);
+    defer h.deinit();
+    // Mask is (1 << 12) - 4 = 0xFFC — low 2 bits are 0 so every bucket is 4-aligned.
+    try testing.expectEqual(@as(u32, (1 << 12) - 4), h.hash_mask);
+}
+
+test "MatchHasher4 insertAtIndex ring-shifts 4 entries" {
+    var h = try MatchHasher4.init(testing.allocator, 10, 4);
+    defer h.deinit();
+    h.hash_table[4] = 0x11;
+    h.hash_table[5] = 0x22;
+    h.hash_table[6] = 0x33;
+    h.hash_table[7] = 0x44;
+    h.insertAtIndex(4, 0xAA);
+    try testing.expectEqual(@as(u32, 0xAA), h.hash_table[4]);
+    try testing.expectEqual(@as(u32, 0x11), h.hash_table[5]);
+    try testing.expectEqual(@as(u32, 0x22), h.hash_table[6]);
+    try testing.expectEqual(@as(u32, 0x33), h.hash_table[7]);
+}
+
+test "MatchHasher4Dual sets a secondary bucket index on setHashPos" {
+    var buf: [64]u8 = undefined;
+    for (&buf, 0..) |*b, i| b.* = @intCast('A' + (i % 26));
+    var h = try MatchHasher4Dual.init(testing.allocator, 14, 4);
+    defer h.deinit();
+    h.setSrcBase(&buf);
+    h.setHashPos(&buf);
+
+    // Both indices are valid bucket-aligned positions in the table.
+    try testing.expect(h.hash_entry_ptr_index < h.hash_table.len);
+    try testing.expect(h.hash_entry2_ptr_index < h.hash_table.len);
+    try testing.expectEqual(@as(u32, 0), h.hash_entry_ptr_index & 3);
+    try testing.expectEqual(@as(u32, 0), h.hash_entry2_ptr_index & 3);
+}
+
+test "MatchHasher4Dual insert writes at both primary and secondary" {
+    var buf: [128]u8 = undefined;
+    for (&buf, 0..) |*b, i| b.* = @intCast('A' + (i % 26));
+    var h = try MatchHasher4Dual.init(testing.allocator, 12, 4);
+    defer h.deinit();
+    h.setSrcBase(&buf);
+    h.setHashPos(&buf);
+    const hp = h.getHashPos(&buf);
+    h.insert(hp);
+    // Tag bits must match in both primary and secondary buckets.
+    const tag_mask = lz_constants.hash_tag_mask;
+    const primary_tag = h.hash_table[hp.ptr1_index] & tag_mask;
+    const secondary_tag = h.hash_table[hp.ptr2_index] & tag_mask;
+    try testing.expectEqual(hp.tag & tag_mask, primary_tag);
+    try testing.expectEqual(hp.tag & tag_mask, secondary_tag);
+}
+
+test "MatchHasher16Dual init: 16-aligned mask" {
+    var h = try MatchHasher16Dual.init(testing.allocator, 14, 4);
+    defer h.deinit();
+    try testing.expectEqual(@as(u32, (1 << 14) - 16), h.hash_mask);
+}
+
+test "MatchHasher16Dual insertAtIndex ring-shifts 16 entries" {
+    var h = try MatchHasher16Dual.init(testing.allocator, 12, 4);
+    defer h.deinit();
+    // Seed 16 consecutive entries.
+    for (0..16) |i| h.hash_table[i] = @as(u32, @intCast(i)) + 1;
+    h.insertAtIndex(0, 0xFFFF);
+    try testing.expectEqual(@as(u32, 0xFFFF), h.hash_table[0]);
+    for (1..16) |i| try testing.expectEqual(@as(u32, @intCast(i)), h.hash_table[i]);
+}
+
+test "adaptivePreloadLoop visits cur_offset in step progression" {
+    // Preallocate a generous buffer and fill from the inserter; exceed
+    // the default ArrayList capacity by pre-sizing.
+    var buf: [8192]i64 = undefined;
+    var count: usize = 0;
+
+    const Inserter = struct {
+        buf_ptr: [*]i64,
+        count_ptr: *usize,
+
+        pub fn insert(ctx: @This(), offs: i64) void {
+            ctx.buf_ptr[ctx.count_ptr.*] = offs;
+            ctx.count_ptr.* += 1;
+        }
+    };
+
+    const inserter = Inserter{ .buf_ptr = &buf, .count_ptr = &count };
+
+    // Preload from offset 0 to 4096 with a large cap — the loop should
+    // visit a monotonically increasing sequence of offsets.
+    adaptivePreloadLoop(Inserter, inserter, 0, 4096, 1 << 20);
+
+    try testing.expect(count > 0);
+    var prev: i64 = -1;
+    for (buf[0..count]) |o| {
+        try testing.expect(o > prev);
+        try testing.expect(o < 4096);
+        prev = o;
+    }
 }
