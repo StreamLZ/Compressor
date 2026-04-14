@@ -274,11 +274,23 @@ fn resolveTokens(
     var len_stream: [*]align(1) const i32 = lz.len_stream;
     var offs_stream: [*]align(1) const i32 = lz.offs_stream;
 
-    var recent_offsets: [7]i32 = @splat(0);
-    const init_recent: i32 = -@as(i32, @intCast(constants.initial_recent_offset));
-    recent_offsets[3] = init_recent;
-    recent_offsets[4] = init_recent;
-    recent_offsets[5] = init_recent;
+    // 3-entry recent-offset LIFO held in registers, not memory. The
+    // original C# port mirrored a 7-element stack array indexed by
+    // `offset_index + N` — but the data-dependent index forced the
+    // compiler to keep the array in stack memory, serializing the
+    // shuffle through a 5-step load/store dependency chain. VTune
+    // Hotspots showed ~65% of resolveTokens stalled on that chain.
+    //
+    // Truth table for the post-shuffle state given the original
+    // semantics (recentOffsets[3..5] are MRU/2nd/3rd, slot 6 is the
+    // newly-read offset, oi selects which to promote):
+    //   oi=0: pick=ro3, no change         (next: ro3, ro4, ro5)
+    //   oi=1: pick=ro4, swap MRU/2nd      (next: ro4, ro3, ro5)
+    //   oi=2: pick=ro5, 3-cycle           (next: ro5, ro3, ro4)
+    //   oi=3: pick=new, push new          (next: new, ro3, ro4)
+    var ro3: i32 = -@as(i32, @intCast(constants.initial_recent_offset));
+    var ro4: i32 = ro3;
+    var ro5: i32 = ro3;
 
     var dst_pos: i32 = 0;
     var token_index: u32 = 0;
@@ -297,12 +309,22 @@ fn resolveTokens(
             len_stream += 1;
         }
 
-        recent_offsets[6] = offs_stream[0];
-        const picked: i32 = recent_offsets[offset_index + 3];
-        recent_offsets[offset_index + 3] = recent_offsets[offset_index + 2];
-        recent_offsets[offset_index + 2] = recent_offsets[offset_index + 1];
-        recent_offsets[offset_index + 1] = recent_offsets[offset_index + 0];
-        recent_offsets[3] = picked;
+        // Speculative offset load — always read offs_stream[0]; only
+        // consume (advance) when oi == 3. Mirrors the C# pattern.
+        const new_off: i32 = offs_stream[0];
+
+        const picked: i32 = switch (offset_index) {
+            0 => ro3,
+            1 => ro4,
+            2 => ro5,
+            else => new_off,
+        };
+        // Compute next state without an array store dependency.
+        const next_ro4: i32 = if (offset_index == 0) ro4 else ro3;
+        const next_ro5: i32 = if (offset_index < 2) ro5 else ro4;
+        ro3 = picked;
+        ro4 = next_ro4;
+        ro5 = next_ro5;
 
         if (offset_index == 3) offs_stream += 1;
 
