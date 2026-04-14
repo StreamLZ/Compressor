@@ -851,13 +851,20 @@ const HighMapping = struct {
 };
 
 fn mapHighLevel(user_level: u8) HighMapping {
+    // NOTE: L8 / L11 `use_bt4 = false` is a temporary workaround.
+    // The Zig BT4 port in `match_finder_bt4.zig` passes byte-exact
+    // roundtrip tests but produces much worse match selection than
+    // the hash-based finder — enwik8 at L11 with BT4 compresses to
+    // ~41% vs ~27% without. Tracked as a step 33 follow-up; see
+    // `match_finder_bt4.zig` for the tree-insertion state that
+    // needs bisecting against the C# reference.
     return switch (user_level) {
         6 => .{ .codec_level = 5, .self_contained = true, .use_bt4 = false },
         7 => .{ .codec_level = 7, .self_contained = true, .use_bt4 = false },
-        8 => .{ .codec_level = 9, .self_contained = true, .use_bt4 = true },
+        8 => .{ .codec_level = 9, .self_contained = true, .use_bt4 = false },
         9 => .{ .codec_level = 5, .self_contained = false, .use_bt4 = false },
         10 => .{ .codec_level = 7, .self_contained = false, .use_bt4 = false },
-        11 => .{ .codec_level = 9, .self_contained = false, .use_bt4 = true },
+        11 => .{ .codec_level = 9, .self_contained = false, .use_bt4 = false },
         else => unreachable,
     };
 }

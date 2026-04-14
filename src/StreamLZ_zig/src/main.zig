@@ -88,12 +88,12 @@ fn runBenchCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []con
     }
     const path = args[0];
     const level: u8 = std.fmt.parseInt(u8, args[1], 10) catch {
-        try w.writeAll("error: level must be 1..5\n");
+        try w.writeAll("error: level must be 1..11\n");
         try w.flush();
         std.process.exit(2);
     };
-    if (level < 1 or level > 5) {
-        try w.writeAll("error: level must be 1..5\n");
+    if (level < 1 or level > 11) {
+        try w.writeAll("error: level must be 1..11\n");
         try w.flush();
         std.process.exit(2);
     }
@@ -348,8 +348,8 @@ fn runCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const []
         std.process.exit(2);
     }
 
-    if (level < 1 or level > 5) {
-        try w.print("error: only levels 1-5 are currently supported (got {d})\n", .{level});
+    if (level < 1 or level > 11) {
+        try w.print("error: level must be 1..11 (got {d})\n", .{level});
         try w.flush();
         std.process.exit(2);
     }
