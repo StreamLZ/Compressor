@@ -127,7 +127,11 @@ pub fn findMatchesBT4(
             const skip_len: usize = @intCast(match_buf[0].length);
             const skip_offset: i32 = match_buf[0].offset;
             var skip_pos: usize = pos + 4;
-            const skip_depth: u32 = if (max_depth >= 4) max_depth / 4 else 1;
+            // Match C# `BT4InsertOnly(..., maxDepth / 4, ...)` — integer
+            // divide without the `max(1, ...)` guard. For max_depth < 4
+            // this passes 0, which correctly makes the inner search loop
+            // exit immediately (insert-only with no tree descent).
+            const skip_depth: u32 = max_depth / 4;
             while (skip_pos + 4 < pos + skip_len and skip_pos < src_size_safe) : (skip_pos += 4) {
                 _ = bt4SearchAndInsert(
                     src,
