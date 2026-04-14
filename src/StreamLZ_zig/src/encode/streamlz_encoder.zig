@@ -1060,7 +1060,16 @@ fn compressOneHighBlock(
 
 const PcShared = struct {
     src: []const u8,
-    ctx: *const high_encoder.HighEncoderContext,
+    /// Base context (shared, read-only). Each worker builds a local
+    /// copy with its own arena-backed allocator (step 14 LzTemp
+    /// equivalent) so per-block scratch allocations reuse bump-
+    /// pointer pages across blocks instead of round-tripping through
+    /// the backing allocator.
+    base_ctx: *const high_encoder.HighEncoderContext,
+    /// Per-worker backing allocator (shared by all workers but
+    /// thread-safe — e.g. page_allocator or an upstream thread-safe
+    /// allocator). Each worker wraps it in a private ArenaAllocator.
+    backing_allocator: std.mem.Allocator,
     mls: *const mls_mod.ManagedMatchLenStorage,
     self_contained: bool,
     sc_flag_bit: u8,
@@ -1076,10 +1085,23 @@ const PcShared = struct {
 };
 
 fn pcWorkerFn(shared: *PcShared) void {
-    // Each worker allocates its OWN `HighHasher` and re-uses it
-    // across blocks, matching the C# per-thread `LzCoder` clone.
-    // For L5+ this is `.none` (the optimal parser uses the shared
-    // MLS directly), so no per-thread state besides the tmp buffer.
+    // Per-worker `LzTemp` equivalent: an arena allocator rooted at
+    // `backing_allocator`. Reset between blocks with
+    // `.retain_capacity` so the second+ block's allocations are
+    // bump-pointer within the already-grown arena pages, matching
+    // C#'s `[ThreadStatic] LzTemp t_lztemp` reuse pattern. Step 14
+    // (D13).
+    var arena = std.heap.ArenaAllocator.init(shared.backing_allocator);
+    defer arena.deinit();
+
+    // Worker-local context copy with the arena allocator.
+    var worker_ctx = shared.base_ctx.*;
+    worker_ctx.allocator = arena.allocator();
+
+    // Each worker allocates its OWN `HighHasher` once and reuses it
+    // across blocks, matching the C# per-thread `LzCoder` clone. For
+    // L5+ this is `.none` (the optimal parser uses the shared MLS
+    // directly), so no per-thread state besides the arena.
     var hasher: high_compressor.HighHasher = .{ .none = {} };
     defer hasher.deinit();
 
@@ -1093,7 +1115,7 @@ fn pcWorkerFn(shared: *PcShared) void {
         const keyframe = shared.self_contained or src_off == 0;
 
         const n_or_err = compressOneHighBlock(
-            shared.ctx,
+            &worker_ctx,
             &hasher,
             shared.mls,
             shared.src,
@@ -1112,6 +1134,10 @@ fn pcWorkerFn(shared: *PcShared) void {
             _ = shared.error_flag.store(1, .monotonic);
             return;
         }
+
+        // Reset the arena for the next block. Keeps the pages
+        // allocated so subsequent blocks get bump-pointer speed.
+        _ = arena.reset(.retain_capacity);
     }
 }
 
@@ -1149,7 +1175,8 @@ fn compressBlocksParallel(
 
     var shared: PcShared = .{
         .src = src,
-        .ctx = ctx,
+        .base_ctx = ctx,
+        .backing_allocator = allocator,
         .mls = mls,
         .self_contained = self_contained,
         .sc_flag_bit = sc_flag_bit,
