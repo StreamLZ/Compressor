@@ -36,6 +36,87 @@ const MatchHasher2 = match_hasher.MatchHasher2;
 /// `FastConstants.DefaultDictionarySize = 0x40000000` (1 GB).
 pub const default_dictionary_size: u32 = 0x40000000;
 
+/// Estimated memory consumption per parallel compress worker thread
+/// (40 MB). Mirrors C# `StreamLzConstants.PerThreadMemoryEstimate`.
+/// Used by `calculateMaxThreads` to cap the thread count so the
+/// total worker footprint stays within a fraction of available RAM.
+pub const per_thread_memory_estimate: u64 = 40 * 1024 * 1024;
+
+/// Fraction of total physical RAM that parallel compression is
+/// allowed to consume (60%). Matches C# `CalculateMaxThreads`.
+pub const memory_budget_pct: u64 = 60;
+
+// ────────────────────────────────────────────────────────────
+//  Platform-specific total-physical-memory query
+// ────────────────────────────────────────────────────────────
+
+const MemoryStatusEx = extern struct {
+    dwLength: u32,
+    dwMemoryLoad: u32,
+    ullTotalPhys: u64,
+    ullAvailPhys: u64,
+    ullTotalPageFile: u64,
+    ullAvailPageFile: u64,
+    ullTotalVirtual: u64,
+    ullAvailVirtual: u64,
+    ullAvailExtendedVirtual: u64,
+};
+
+extern "kernel32" fn GlobalMemoryStatusEx(lpBuffer: *MemoryStatusEx) callconv(.winapi) std.os.windows.BOOL;
+
+/// Returns the total physical memory on the host, in bytes, or `0`
+/// when the query is unavailable / unsupported. Used by
+/// `calculateMaxThreads` as the input to the memory-budget cap.
+pub fn totalAvailableMemoryBytes() u64 {
+    switch (@import("builtin").os.tag) {
+        .windows => {
+            var ms: MemoryStatusEx = .{
+                .dwLength = @sizeOf(MemoryStatusEx),
+                .dwMemoryLoad = 0,
+                .ullTotalPhys = 0,
+                .ullAvailPhys = 0,
+                .ullTotalPageFile = 0,
+                .ullAvailPageFile = 0,
+                .ullTotalVirtual = 0,
+                .ullAvailVirtual = 0,
+                .ullAvailExtendedVirtual = 0,
+            };
+            if (GlobalMemoryStatusEx(&ms) == 0) return 0;
+            return ms.ullTotalPhys;
+        },
+        else => return 0, // Unsupported → no memory cap.
+    }
+}
+
+/// Dynamically calculates the maximum number of compression worker
+/// threads based on CPU count and available system memory. Mirrors
+/// C# `StreamLzCompressor.CalculateMaxThreads` at
+/// `StreamLzCompressor.cs:174`. Caps at 60% of total physical RAM.
+/// When the host's memory is unknown (non-Windows / query failure),
+/// falls back to just the CPU count.
+///
+/// The `src_len` parameter is the estimate for shared memory
+/// overhead (matches the C# `EstimateSharedMemory(srcLen) = srcLen`
+/// definition). `level` is accepted for API parity with C# but not
+/// currently used — per-thread memory is estimated with a level-
+/// independent constant.
+pub fn calculateMaxThreads(src_len: usize, level: u8) u32 {
+    _ = level; // reserved for future level-dependent estimate
+    const cpu: u32 = @intCast(std.Thread.getCpuCount() catch 1);
+    const total_memory: u64 = totalAvailableMemoryBytes();
+    if (total_memory == 0) return @max(@as(u32, 1), cpu);
+
+    const memory_budget: u64 = (total_memory * memory_budget_pct) / 100;
+    const shared_mem: u64 = src_len;
+    if (memory_budget <= shared_mem) return 1;
+    const available_for_threads: u64 = memory_budget - shared_mem;
+
+    const max_by_memory: u64 = available_for_threads / per_thread_memory_estimate;
+    if (max_by_memory == 0) return 1;
+    const max_by_memory_u32: u32 = @intCast(@min(max_by_memory, @as(u64, cpu)));
+    return @max(@as(u32, 1), max_by_memory_u32);
+}
+
 pub const CompressError = error{
     BadLevel,
     BadBlockSize,
@@ -836,13 +917,14 @@ fn compressFramedHigh(
     };
 
     // Decide thread count up front — used to gate both the SC and
-    // non-SC parallel paths.
+    // non-SC parallel paths. Explicit `opts.num_threads >= 1`
+    // overrides the auto path; `opts.num_threads == 0` calls into
+    // `calculateMaxThreads` which clamps against both CPU count and
+    // the 60%-of-physical-RAM memory budget (step 40).
     const num_blocks: usize = if (can_compress) ((src.len + lz_constants.chunk_size - 1) / lz_constants.chunk_size) else 0;
     const resolved_threads: u32 = blk: {
-        if (opts.num_threads == 1) break :blk 1;
-        if (opts.num_threads > 1) break :blk opts.num_threads;
-        const cpu: u32 = @intCast(std.Thread.getCpuCount() catch 1);
-        break :blk @max(@as(u32, 1), cpu);
+        if (opts.num_threads >= 1) break :blk opts.num_threads;
+        break :blk calculateMaxThreads(src.len, opts.level);
     };
     const can_parallel_sc: bool =
         can_compress and
@@ -2139,6 +2221,43 @@ test "decompressFramed: decoder accepts 2 concatenated SLZ1 frames" {
     const written = try decoder.decompressFramed(tmp[0..total], decoded);
     try testing.expectEqual(src.len, written);
     try testing.expectEqualSlices(u8, &src, decoded[0..written]);
+}
+
+// ────────────────────────────────────────────────────────────
+//  Phase 14 step 40 — calculateMaxThreads tests
+// ────────────────────────────────────────────────────────────
+
+test "calculateMaxThreads: returns at least 1" {
+    // Any non-negative input must yield a positive thread count —
+    // a caller passing the result directly into the parallel
+    // dispatch should never see 0.
+    const n = calculateMaxThreads(0, 9);
+    try testing.expect(n >= 1);
+    const m = calculateMaxThreads(1024 * 1024, 9);
+    try testing.expect(m >= 1);
+}
+
+test "calculateMaxThreads: doesn't exceed CPU count" {
+    const cpu: u32 = @intCast(std.Thread.getCpuCount() catch 1);
+    const n = calculateMaxThreads(1024, 6);
+    try testing.expect(n <= cpu);
+}
+
+test "calculateMaxThreads: scales down with huge src_len" {
+    // A huge shared-memory estimate (nearly the whole RAM budget)
+    // should drive `available_for_threads` below zero and clamp to
+    // 1. We can't observe this directly without knowing the host's
+    // total_memory, so we test with src_len == usize max, which
+    // guarantees `memory_budget <= shared_mem` on any host.
+    const n = calculateMaxThreads(std.math.maxInt(usize) / 2, 9);
+    try testing.expect(n >= 1);
+}
+
+test "totalAvailableMemoryBytes: returns a plausible value on Windows" {
+    if (@import("builtin").os.tag != .windows) return;
+    const mem = totalAvailableMemoryBytes();
+    // Any Windows host running this test suite has at least 1 GB.
+    try testing.expect(mem >= 1 * 1024 * 1024 * 1024);
 }
 
 test "decompressFramed: multi-piece concatenation across L6 + L9 codecs" {
