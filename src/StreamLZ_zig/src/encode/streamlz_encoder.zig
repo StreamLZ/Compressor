@@ -247,8 +247,17 @@ pub fn compressBound(src_len: usize) usize {
     return frame.max_header_size + 4 + chunk_count * (8 + 2 + 4) + sub_chunks * per_sub_chunk_overhead + src_len + 64 + sc_prefix_upper_bound;
 }
 
-/// Compress `src` into `dst` as a full SLZ1 frame. Returns the number of
-/// bytes written to `dst`. `dst` must be at least `compressBound(src.len)`.
+/// Compress `src` into `dst` as an SLZ1 byte stream. Returns the
+/// number of bytes written to `dst`. `dst` must be at least
+/// `compressBound(src.len)`.
+///
+/// On `error.OutOfMemory` from the single-shot path, automatically
+/// splits the input into smaller SELF-CONTAINED pieces and retries
+/// through a fallback size ladder (1 GB → 512 MB → 256 MB → 128 MB
+/// → 64 MB → 32 MB → 16 MB). Each piece is written as its own
+/// complete SLZ1 frame; the decompressor iterates pieces in its
+/// `DecompressCore` loop. Mirrors C# `StreamLzCompressor.Compress`
+/// at `StreamLzCompressor.cs:97-147`. Phase 14 step 39 (D5).
 pub fn compressFramed(
     allocator: std.mem.Allocator,
     src: []const u8,
@@ -259,6 +268,78 @@ pub fn compressFramed(
     const min_dst = compressBound(src.len);
     if (dst.len < min_dst) return error.DestinationTooSmall;
 
+    // Fast path: attempt the whole input in a single piece.
+    const whole = compressFramedOne(allocator, src, dst, opts);
+    if (whole) |n| return n else |err| switch (err) {
+        error.OutOfMemory => {
+            // Fall through to multi-piece retry below.
+        },
+        else => return err,
+    }
+
+    // Multi-piece retry ladder. Each size is a multiple of chunk_size
+    // (256 KB) so piece outputs concatenate into a valid byte stream.
+    const min_piece_size: usize = 16 * 1024 * 1024;
+    const fallback_ladder = [_]usize{
+        1 * 1024 * 1024 * 1024, // 1 GB
+        512 * 1024 * 1024,
+        256 * 1024 * 1024,
+        128 * 1024 * 1024,
+        64 * 1024 * 1024,
+        32 * 1024 * 1024,
+        min_piece_size,
+    };
+
+    var piece_size: usize = std.math.maxInt(usize);
+    while (true) {
+        // Pick the next smaller piece size.
+        var next: usize = 0;
+        for (fallback_ladder) |candidate| {
+            if (candidate < piece_size and candidate < src.len) {
+                next = candidate;
+                break;
+            }
+        }
+        if (next == 0) return error.OutOfMemory;
+        piece_size = next;
+
+        // Compress each piece as its own self-contained SLZ1 frame.
+        var piece_opts = opts;
+        piece_opts.self_contained = true;
+
+        var total: usize = 0;
+        var off: usize = 0;
+        var piece_ok = true;
+        while (off < src.len) {
+            const remaining = src.len - off;
+            const this_piece_len = @min(piece_size, remaining);
+            const piece_src = src[off..][0..this_piece_len];
+            const piece_dst = dst[total..];
+            const piece_bound = compressBound(this_piece_len);
+            if (piece_dst.len < piece_bound) return error.DestinationTooSmall;
+            const piece_n = compressFramedOne(allocator, piece_src, piece_dst, piece_opts) catch |err| switch (err) {
+                error.OutOfMemory => {
+                    piece_ok = false;
+                    break;
+                },
+                else => return err,
+            };
+            total += piece_n;
+            off += this_piece_len;
+        }
+        if (piece_ok) return total;
+        // Else: loop and try a smaller piece size.
+    }
+}
+
+/// Single-piece compress — the original `compressFramed` body. The
+/// public wrapper above handles the multi-piece OOM retry ladder.
+fn compressFramedOne(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+    dst: []u8,
+    opts: Options,
+) CompressError!usize {
     // Levels 6-11 use the High codec (optimal parser + hash-based /
     // BT4 match finder). Fork here so the Fast path below stays
     // byte-exact with C# for L1-L5.
@@ -2016,5 +2097,75 @@ test "compressInternalParallelSc: L6 384 KB (partial last group)" {
     var i: usize = 0;
     while (i < src.len) : (i += 1) src[i] = p[i % p.len];
     try roundtripParallel(&src, 6, 2);
+}
+
+// ────────────────────────────────────────────────────────────
+//  Phase 14 step 39 — multi-piece concatenated frame tests
+// ────────────────────────────────────────────────────────────
+
+test "decompressFramed: decoder accepts 2 concatenated SLZ1 frames" {
+    // Triggering the OOM retry path reliably requires an input
+    // bigger than the 1 GB top of the fallback ladder, which is
+    // impractical in unit tests. Instead we verify the structural
+    // piece: if you concatenate two fully-framed compressed outputs,
+    // the decoder's multi-piece loop decodes them into one
+    // contiguous destination byte-exact. This is the wire-format
+    // contract the retry path produces.
+    const allocator = testing.allocator;
+
+    var src: [64 * 1024]u8 = undefined;
+    const p = "The quick brown fox jumps over a lazy dog. ";
+    var i: usize = 0;
+    while (i < src.len) : (i += 1) src[i] = p[i % p.len];
+
+    const half = src.len / 2;
+    const piece0_bound = compressBound(half);
+    const piece1_bound = compressBound(src.len - half);
+    const tmp = try allocator.alloc(u8, piece0_bound + piece1_bound);
+    defer allocator.free(tmp);
+
+    const n0 = try compressFramedOne(allocator, src[0..half], tmp, .{
+        .level = 1,
+        .self_contained = true,
+    });
+    const n1 = try compressFramedOne(allocator, src[half..], tmp[n0..], .{
+        .level = 1,
+        .self_contained = true,
+    });
+    const total = n0 + n1;
+
+    const decoded = try allocator.alloc(u8, src.len + decoder.safe_space);
+    defer allocator.free(decoded);
+    const written = try decoder.decompressFramed(tmp[0..total], decoded);
+    try testing.expectEqual(src.len, written);
+    try testing.expectEqualSlices(u8, &src, decoded[0..written]);
+}
+
+test "decompressFramed: multi-piece concatenation across L6 + L9 codecs" {
+    // Mix an L6 (SC High) piece and an L9 (non-SC High) piece.
+    // Verifies the decoder can switch codecs mid-stream since each
+    // piece carries its own frame header.
+    const allocator = testing.allocator;
+
+    var src: [64 * 1024]u8 = undefined;
+    const p = "The persistent test pattern iterates reliably. ";
+    var i: usize = 0;
+    while (i < src.len) : (i += 1) src[i] = p[i % p.len];
+
+    const half = src.len / 2;
+    const piece0_bound = compressBound(half);
+    const piece1_bound = compressBound(src.len - half);
+    const tmp = try allocator.alloc(u8, piece0_bound + piece1_bound);
+    defer allocator.free(tmp);
+
+    const n0 = try compressFramedOne(allocator, src[0..half], tmp, .{ .level = 6 });
+    const n1 = try compressFramedOne(allocator, src[half..], tmp[n0..], .{ .level = 9 });
+    const total = n0 + n1;
+
+    const decoded = try allocator.alloc(u8, src.len + decoder.safe_space);
+    defer allocator.free(decoded);
+    const written = try decoder.decompressFramed(tmp[0..total], decoded);
+    try testing.expectEqual(src.len, written);
+    try testing.expectEqualSlices(u8, &src, decoded[0..written]);
 }
 

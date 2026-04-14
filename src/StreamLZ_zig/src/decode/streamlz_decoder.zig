@@ -60,6 +60,33 @@ fn decompressFramedInner(
 ) DecompressError!usize {
     if (src.len == 0) return 0;
 
+    // Multi-piece support: the encoder's `compressFramed` retry
+    // ladder (step 39) emits concatenated SLZ1 frames when the
+    // single-shot path OOMs. Loop over pieces, decoding each
+    // complete frame in order. Single-piece inputs exit after one
+    // iteration via the empty-trailer check.
+    var src_pos: usize = 0;
+    var dst_off: usize = 0;
+    while (src_pos < src.len) {
+        const piece_src = src[src_pos..];
+        const piece_dst = dst[dst_off..];
+        const pair = try decompressOneFrame(allocator_opt, piece_src, piece_dst);
+        src_pos += pair.src_consumed;
+        dst_off += pair.dst_written;
+        if (pair.src_consumed == 0) break;
+    }
+    return dst_off;
+}
+
+const FrameResult = struct { src_consumed: usize, dst_written: usize };
+
+fn decompressOneFrame(
+    allocator_opt: ?std.mem.Allocator,
+    src: []const u8,
+    dst: []u8,
+) DecompressError!FrameResult {
+    if (src.len == 0) return .{ .src_consumed = 0, .dst_written = 0 };
+
     const hdr = frame.parseHeader(src) catch return error.BadFrame;
 
     if (hdr.content_size) |cs| {
@@ -74,10 +101,16 @@ fn decompressFramedInner(
 
     while (pos + 4 <= src.len) {
         const first_word = std.mem.readInt(u32, src[pos..][0..4], .little);
-        if (first_word == frame.end_mark) break;
+        if (first_word == frame.end_mark) {
+            pos += 4;
+            break;
+        }
 
         const bh = frame.parseBlockHeader(src[pos..]) catch return error.InvalidBlockHeader;
-        if (bh.isEndMark()) break;
+        if (bh.isEndMark()) {
+            pos += 8;
+            break;
+        }
         pos += 8;
 
         if (bh.uncompressed) {
@@ -145,7 +178,7 @@ fn decompressFramedInner(
     if (hdr.content_size) |cs| {
         if (dst_off != cs) return error.SizeMismatch;
     }
-    return dst_off;
+    return .{ .src_consumed = pos, .dst_written = dst_off };
 }
 
 /// Whole-chunk match copy: reads `length` bytes from `dst - offset` into
