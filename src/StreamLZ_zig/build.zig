@@ -1,7 +1,20 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
+    // Default the x86_64 CPU model to `x86_64_v3` (AVX2 baseline,
+    // covering all Intel since Haswell 2013 and all AMD since
+    // Excavator 2015). Without this, Zig defaults to `-mcpu=native`
+    // which produces a binary that uses host-CPU-specific instructions
+    // (BMI2, ADX, AVX-VNNI, etc.) and crashes with STATUS_ILLEGAL_
+    // INSTRUCTION (0xc000001d) on older or different-vendor CPUs.
+    //
+    // Override with `-Dcpu=native` for maximum local perf, or
+    // `-Dcpu=baseline` for SSE2-only (most portable).
+    const default_query: std.Target.Query = if (builtin.target.cpu.arch == .x86_64) .{
+        .cpu_model = .{ .explicit = &std.Target.x86.cpu.x86_64_v3 },
+    } else .{};
+    const target = b.standardTargetOptions(.{ .default_target = default_query });
     const optimize = b.standardOptimizeOption(.{});
 
     // -Dstrip=false keeps debug info even in ReleaseFast so profilers
