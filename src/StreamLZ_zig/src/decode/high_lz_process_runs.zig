@@ -450,83 +450,99 @@ fn executeTokensType1(
     else
         dst_in;
 
+    // Split the loop into a prefetch-safe main body (i in 0..safe_end)
+    // and a no-prefetch tail (i in safe_end..token_count). Removes the
+    // `if (prefetch_index < token_count)` branch from every iteration of
+    // the hot path.
+    const safe_end: u32 = if (token_count > prefetch_ahead) token_count - prefetch_ahead else 0;
     var i: u32 = 0;
+    while (i < safe_end) : (i += 1) {
+        // Match-source prefetch for a token prefetch_ahead steps ahead —
+        // unconditional in this loop body.
+        const pt = tokens[i + prefetch_ahead];
+        const pre_base: usize = @intFromPtr(dst_base) + @as(usize, @intCast(pt.dst_pos)) + @as(usize, @intCast(pt.lit_len));
+        const pre_addr: usize = pre_base +% @as(usize, @bitCast(@as(isize, pt.offset)));
+        const p0: [*]const u8 = @ptrFromInt(pre_addr);
+        @prefetch(p0, .{ .rw = .read, .locality = 3, .cache = .data });
+        @prefetch(p0 + 64, .{ .rw = .read, .locality = 3, .cache = .data });
+
+        try processOneToken(tokens[i], dst_base, dst_safe_end, dst_end, dst_start, &lit_stream);
+    }
     while (i < token_count) : (i += 1) {
-        // Match-source prefetch for a token ~prefetch_ahead steps ahead.
-        const prefetch_index: u32 = i + prefetch_ahead;
-        if (prefetch_index < token_count) {
-            const pt = tokens[prefetch_index];
-            const pre_base: usize = @intFromPtr(dst_base) + @as(usize, @intCast(pt.dst_pos)) + @as(usize, @intCast(pt.lit_len));
-            const pre_addr: usize = pre_base +% @as(usize, @bitCast(@as(isize, pt.offset)));
-            const p0: [*]const u8 = @ptrFromInt(pre_addr);
-            @prefetch(p0, .{ .rw = .read, .locality = 3, .cache = .data });
-            @prefetch(p0 + 64, .{ .rw = .read, .locality = 3, .cache = .data });
-        }
+        try processOneToken(tokens[i], dst_base, dst_safe_end, dst_end, dst_start, &lit_stream);
+    }
+    lit_stream_inout.* = lit_stream;
+}
 
-        const t = tokens[i];
-        const lit_len: usize = @intCast(t.lit_len);
-        const match_len: usize = @intCast(t.match_len);
-        const offset: i32 = t.offset;
+/// One token's worth of literal + match copy. Shared by the two
+/// loop bodies (prefetch-safe main + no-prefetch tail) so the compiler
+/// emits a single body. `lit_stream_inout` is updated in place.
+inline fn processOneToken(
+    t: LzToken,
+    dst_base: [*]u8,
+    dst_safe_end: [*]u8,
+    dst_end: [*]u8,
+    dst_start: [*]const u8,
+    lit_stream_inout: *[*]const u8,
+) DecodeError!void {
+    var lit_stream = lit_stream_inout.*;
+    const lit_len: usize = @intCast(t.lit_len);
+    const match_len: usize = @intCast(t.match_len);
+    const offset: i32 = t.offset;
 
-        const dst_token_start: [*]u8 = dst_base + @as(usize, @intCast(t.dst_pos));
-        const dst_after_all: [*]u8 = dst_token_start + lit_len + match_len;
+    const dst_token_start: [*]u8 = dst_base + @as(usize, @intCast(t.dst_pos));
+    const dst_after_all: [*]u8 = dst_token_start + lit_len + match_len;
 
-        if (@intFromPtr(dst_after_all) > @intFromPtr(dst_safe_end)) {
-            // Slow exact path for trailing tokens.
-            if (@intFromPtr(dst_after_all) > @intFromPtr(dst_end)) return error.OutputTruncated;
-            var d = dst_token_start;
-            var lrem = lit_len;
-            while (lrem > 0) : (lrem -= 1) {
-                d[0] = lit_stream[0];
-                d += 1;
-                lit_stream += 1;
-            }
-            const match_addr: usize = @intFromPtr(d) +% @as(usize, @bitCast(@as(isize, offset)));
-            if (match_addr < @intFromPtr(dst_start)) return error.OutputTruncated;
-            var s: [*]const u8 = @ptrFromInt(match_addr);
-            var mrem = match_len;
-            while (mrem > 0) : (mrem -= 1) {
-                d[0] = s[0];
-                d += 1;
-                s += 1;
-            }
-            continue;
-        }
-
-        // Fast path: 16-byte SIMD literal copies. Halves the instruction
-        // count vs the original 8-byte cascade — the inner loop body
-        // shrinks enough to stay in the DSB (decoded uop cache) which
-        // delivers 6 uops/cycle vs the legacy decoder's 5 inst/cycle.
-        // Safe-space padding allows the 16-byte overshoot for short
-        // literals (we advance d/lit_stream by lit_len, not by 16).
+    if (@intFromPtr(dst_after_all) > @intFromPtr(dst_safe_end)) {
+        // Slow exact path for trailing tokens.
+        if (@intFromPtr(dst_after_all) > @intFromPtr(dst_end)) return error.OutputTruncated;
         var d = dst_token_start;
-        copy.copy16(d, lit_stream);
-        if (lit_len > 16) {
-            copy.copy16(d + 16, lit_stream + 16);
-            if (lit_len > 32) {
-                var remaining = lit_len;
-                var dd = d + 32;
-                var ss = lit_stream + 32;
-                while (remaining > 32) {
-                    copy.copy16(dd, ss);
-                    remaining -= 16;
-                    dd += 16;
-                    ss += 16;
-                }
-            }
+        var lrem = lit_len;
+        while (lrem > 0) : (lrem -= 1) {
+            d[0] = lit_stream[0];
+            d += 1;
+            lit_stream += 1;
         }
-        d += lit_len;
-        lit_stream += lit_len;
-
-        const match_addr: usize = @intFromPtr(d) +% @as(usize, @bitCast(@as(isize, offset)));
-        if (match_addr < @intFromPtr(dst_start)) return error.OutputTruncated;
-        const match_ptr: [*]const u8 = @ptrFromInt(match_addr);
-        copy.copy64(d, match_ptr);
-        copy.copy64(d + 8, match_ptr + 8);
-        if (match_len > 16) {
-            copy.wildCopy16(d + 16, match_ptr + 16, d + match_len);
+        const match_addr_slow: usize = @intFromPtr(d) +% @as(usize, @bitCast(@as(isize, offset)));
+        if (match_addr_slow < @intFromPtr(dst_start)) return error.OutputTruncated;
+        var s: [*]const u8 = @ptrFromInt(match_addr_slow);
+        var mrem = match_len;
+        while (mrem > 0) : (mrem -= 1) {
+            d[0] = s[0];
+            d += 1;
+            s += 1;
         }
+        lit_stream_inout.* = lit_stream;
+        return;
     }
 
+    // Fast path: 16-byte SIMD literal copies.
+    var d = dst_token_start;
+    copy.copy16(d, lit_stream);
+    if (lit_len > 16) {
+        copy.copy16(d + 16, lit_stream + 16);
+        if (lit_len > 32) {
+            var remaining = lit_len;
+            var dd = d + 32;
+            var ss = lit_stream + 32;
+            while (remaining > 32) {
+                copy.copy16(dd, ss);
+                remaining -= 16;
+                dd += 16;
+                ss += 16;
+            }
+        }
+    }
+    d += lit_len;
+    lit_stream += lit_len;
+
+    const match_addr: usize = @intFromPtr(d) +% @as(usize, @bitCast(@as(isize, offset)));
+    if (match_addr < @intFromPtr(dst_start)) return error.OutputTruncated;
+    const match_ptr: [*]const u8 = @ptrFromInt(match_addr);
+    copy.copy64(d, match_ptr);
+    copy.copy64(d + 8, match_ptr + 8);
+    if (match_len > 16) {
+        copy.wildCopy16(d + 16, match_ptr + 16, d + match_len);
+    }
     lit_stream_inout.* = lit_stream;
 }
