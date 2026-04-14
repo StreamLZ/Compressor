@@ -53,6 +53,37 @@ pub fn decompressFramedParallel(
     return decompressFramedInner(allocator, src, dst);
 }
 
+/// Lazy thread pool wrapper. The pool is expensive to init (24 thread
+/// spawns ≈ 5 ms on Arrow Lake) and many decompress calls don't need
+/// it — Fast L1-L5 files and single-chunk inputs go through the serial
+/// path. Init is deferred to the first parallel dispatch so those cases
+/// pay nothing.
+const LazyPool = struct {
+    allocator: ?std.mem.Allocator,
+    storage: std.Thread.Pool,
+    inited: bool,
+
+    fn init(allocator_opt: ?std.mem.Allocator) LazyPool {
+        return .{
+            .allocator = allocator_opt,
+            .storage = undefined,
+            .inited = false,
+        };
+    }
+
+    fn get(self: *LazyPool) ?*std.Thread.Pool {
+        if (self.inited) return &self.storage;
+        const alloc = self.allocator orelse return null;
+        self.storage.init(.{ .allocator = alloc }) catch return null;
+        self.inited = true;
+        return &self.storage;
+    }
+
+    fn deinit(self: *LazyPool) void {
+        if (self.inited) self.storage.deinit();
+    }
+};
+
 fn decompressFramedInner(
     allocator_opt: ?std.mem.Allocator,
     src: []const u8,
@@ -60,24 +91,10 @@ fn decompressFramedInner(
 ) DecompressError!usize {
     if (src.len == 0) return 0;
 
-    // Init a thread pool ONCE for the whole decompression call. Persists
-    // across multi-piece frames and across all batches inside one frame
-    // block. Without this, the two-phase L9-L11 path was paying a
-    // std.Thread.spawn syscall per batch (~17 batches for 100 MB L9),
-    // which dominated total decode time and blocked scaling.
-    var pool_storage: std.Thread.Pool = undefined;
-    var pool_inited: bool = false;
-    var pool_opt: ?*std.Thread.Pool = null;
-    if (allocator_opt) |alloc| {
-        if (pool_storage.init(.{ .allocator = alloc })) |_| {
-            pool_inited = true;
-            pool_opt = &pool_storage;
-        } else |_| {
-            // Init failure → fall back to one-shot spawn path inside
-            // the parallel cores.
-        }
-    }
-    defer if (pool_inited) pool_storage.deinit();
+    // Lazy thread pool — only init on first parallel dispatch. Fast
+    // codec inputs and single-chunk inputs skip pool init entirely.
+    var lazy_pool = LazyPool.init(allocator_opt);
+    defer lazy_pool.deinit();
 
     // Multi-piece support: the encoder's `compressFramed` retry
     // ladder (step 39) emits concatenated SLZ1 frames when the
@@ -89,7 +106,7 @@ fn decompressFramedInner(
     while (src_pos < src.len) {
         const piece_src = src[src_pos..];
         const piece_dst = dst[dst_off..];
-        const pair = try decompressOneFrame(allocator_opt, pool_opt, piece_src, piece_dst);
+        const pair = try decompressOneFrame(allocator_opt, &lazy_pool, piece_src, piece_dst);
         src_pos += pair.src_consumed;
         dst_off += pair.dst_written;
         if (pair.src_consumed == 0) break;
@@ -101,7 +118,7 @@ const FrameResult = struct { src_consumed: usize, dst_written: usize };
 
 fn decompressOneFrame(
     allocator_opt: ?std.mem.Allocator,
-    pool_opt: ?*std.Thread.Pool,
+    lazy_pool: *LazyPool,
     src: []const u8,
     dst: []u8,
 ) DecompressError!FrameResult {
@@ -162,7 +179,7 @@ fn decompressOneFrame(
                     if (ph.self_contained and has_many_chunks) {
                         try parallel.decompressCoreParallel(
                             allocator,
-                            pool_opt,
+                            lazy_pool.get(),
                             block_src,
                             dst,
                             &dst_off,
@@ -172,7 +189,7 @@ fn decompressOneFrame(
                     } else if (ph.decoder_type == .high and has_many_chunks) {
                         const ok = try parallel.decompressCoreTwoPhase(
                             allocator,
-                            pool_opt,
+                            lazy_pool.get(),
                             block_src,
                             dst,
                             &dst_off,
