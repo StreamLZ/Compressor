@@ -88,7 +88,14 @@ pub fn MatchHasher(comptime num_hash: u32, comptime dual_hash: bool) type {
         pub fn init(allocator: std.mem.Allocator, hash_bits: u6, min_match_length: u32) !Self {
             if (hash_bits < 8 or hash_bits > 24) return error.HashBitsOutOfRange;
             const size: usize = @as(usize, 1) << hash_bits;
-            const table = try allocator.alloc(u32, size);
+            // 64-byte-aligned allocation so every 16-entry bucket
+            // (which the hash mask forces to start at a multiple of
+            // 16 → 64-byte offset) lands on a single cache line.
+            // VTune showed bucket loads as the dominant hot spot in
+            // findMatchesHashBased; with default 4-byte allocator
+            // alignment, 15 of 16 buckets straddled two cache lines.
+            const table_aligned = try allocator.alignedAlloc(u32, .fromByteUnits(64), size);
+            const table: []u32 = table_aligned;
             @memset(table, 0);
 
             const k_in: u32 = if (min_match_length == 0) 4 else min_match_length;
@@ -161,7 +168,11 @@ pub fn MatchHasher(comptime num_hash: u32, comptime dual_hash: bool) type {
             }
         }
 
-        /// `setHashPos` + prefetch the cache line containing the target bucket.
+        /// `setHashPos` + prefetch the cache lines containing the target
+        /// bucket(s). For dual-hash mode, prefetches BOTH the primary
+        /// (cur1) and dual (cur2) buckets — matching C#. Without this,
+        /// every iteration of `findMatchesHashBased` cache-missed on
+        /// the dual bucket → ~8 sec of DRAM stalls on 100 MB enwik8 L9.
         pub inline fn setHashPosPrefetch(self: *Self, p: [*]const u8) void {
             self.setHashPos(p);
             @prefetch(&self.hash_table[self.hash_entry_ptr_index], .{
@@ -169,6 +180,13 @@ pub fn MatchHasher(comptime num_hash: u32, comptime dual_hash: bool) type {
                 .locality = 3,
                 .cache = .data,
             });
+            if (dual_hash) {
+                @prefetch(&self.hash_table[self.hash_entry2_ptr_index], .{
+                    .rw = .read,
+                    .locality = 3,
+                    .cache = .data,
+                });
+            }
         }
 
         /// Capture the current state as an immutable snapshot.

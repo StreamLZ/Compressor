@@ -108,21 +108,93 @@ pub fn findMatchesHashBased(
         while (pass < 2) : (pass += 1) {
             var best_ml: usize = 0;
 
-            // Scalar 16-entry probe. C# uses SSE2 here; we keep it
-            // simple and correct. Each entry is tested for tag match +
-            // offset-in-range + 4-byte prefix match before being extended.
-            var i: u32 = 0;
-            while (i < 16) : (i += 1) {
-                const entry: u32 = hash_table[hash_cur_idx + i];
-                // Offset = (curPos - 1 - pos) & hash_position_mask + 1.
-                const raw_offset: u32 = (((@as(u32, @intCast(cur_pos)) -% 1) -% entry) & lz_constants.hash_position_mask) + 1;
-                const high_match: bool = ((entry ^ cur_hash_tag) & lz_constants.hash_tag_mask) == 0;
-                const max_off: u32 = @min(@as(u32, @intCast(cur_pos)), lz_constants.max_dictionary_size);
-                const in_range: bool = raw_offset <= max_off;
+            // SSE2 vectorized 16-entry hash probe — direct port of C#
+            // MatchFinder.FindMatchesHashBased lines 354-432. Processes
+            // 4 hash entries per @Vector(4, i32), 4 rounds = 16 entries.
+            // Each round computes the (curPos - 1 - pos) & mask + 1
+            // offset, packs it into a 4-bit subfield of a 16-bit
+            // bitmask along with the tag check, and the candidate loop
+            // BSF-iterates only the bits set.
+            const V = @Vector(4, i32);
+            const v_max_pos: V = @splat(@as(i32, @intCast(cur_pos)) - 1);
+            const cur_pos_clamped: i32 = @intCast(@min(cur_pos, lz_constants.max_dictionary_size));
+            const v_max_off: V = @splat(cur_pos_clamped);
+            const v_mask26: V = @splat(@as(i32, @bitCast(lz_constants.hash_position_mask)));
+            const v_one: V = @splat(@as(i32, 1));
+            const v_high_mask: V = @splat(@as(i32, @bitCast(lz_constants.hash_tag_mask)));
+            const v_hash_high: V = @splat(@as(i32, @bitCast(cur_hash_tag)));
 
-                if (!(high_match and in_range)) continue;
+            // Aligned bucket of 16 entries → 4 unaligned 4-lane vectors.
+            // Load via @Vector pointer cast (one MOVDQU each) instead of
+            // std.mem.readInt(u128) which generated scalar-equivalent
+            // shuffle code on Zig 0.15.
+            const h_ptr: [*]const u32 = hash_table.ptr + hash_cur_idx;
+            const VP = [*]align(1) const V;
+            const v0: V = @as(VP, @ptrCast(h_ptr + 0))[0];
+            const v1: V = @as(VP, @ptrCast(h_ptr + 4))[0];
+            const v2: V = @as(VP, @ptrCast(h_ptr + 8))[0];
+            const v3: V = @as(VP, @ptrCast(h_ptr + 12))[0];
 
-                const offset_u: u32 = raw_offset;
+            // u_n = ((maxPos - vN) & mask26) + 1   — the candidate offset.
+            const off0: V = ((v_max_pos - v0) & v_mask26) + v_one;
+            const off1: V = ((v_max_pos - v1) & v_mask26) + v_one;
+            const off2: V = ((v_max_pos - v2) & v_mask26) + v_one;
+            const off3: V = ((v_max_pos - v3) & v_mask26) + v_one;
+
+            // Match condition: off_n <= v_max_off AND (vN ^ hashHigh) & highMask == 0
+            // We compute: !(out_of_range OR tag_mismatch).
+            const out0: V = @select(i32, off0 > v_max_off, @as(V, @splat(-1)), @as(V, @splat(0)));
+            const tag0: V = (v0 ^ v_hash_high) & v_high_mask;
+            const bad0: V = out0 | tag0;
+            const m0: u4 = @bitCast(bad0 == @as(V, @splat(0)));
+
+            const out1: V = @select(i32, off1 > v_max_off, @as(V, @splat(-1)), @as(V, @splat(0)));
+            const tag1: V = (v1 ^ v_hash_high) & v_high_mask;
+            const bad1: V = out1 | tag1;
+            const m1: u4 = @bitCast(bad1 == @as(V, @splat(0)));
+
+            const out2: V = @select(i32, off2 > v_max_off, @as(V, @splat(-1)), @as(V, @splat(0)));
+            const tag2: V = (v2 ^ v_hash_high) & v_high_mask;
+            const bad2: V = out2 | tag2;
+            const m2: u4 = @bitCast(bad2 == @as(V, @splat(0)));
+
+            const out3: V = @select(i32, off3 > v_max_off, @as(V, @splat(-1)), @as(V, @splat(0)));
+            const tag3: V = (v3 ^ v_hash_high) & v_high_mask;
+            const bad3: V = out3 | tag3;
+            const m3: u4 = @bitCast(bad3 == @as(V, @splat(0)));
+
+            const matching_offsets_init: u16 =
+                @as(u16, m0) |
+                (@as(u16, m1) << 4) |
+                (@as(u16, m2) << 8) |
+                (@as(u16, m3) << 12);
+
+            // Stash offsets for BSF iteration. Lane index → which off_n.
+            var offsets_buf: [16]u32 = undefined;
+            offsets_buf[0] = @bitCast(off0[0]);
+            offsets_buf[1] = @bitCast(off0[1]);
+            offsets_buf[2] = @bitCast(off0[2]);
+            offsets_buf[3] = @bitCast(off0[3]);
+            offsets_buf[4] = @bitCast(off1[0]);
+            offsets_buf[5] = @bitCast(off1[1]);
+            offsets_buf[6] = @bitCast(off1[2]);
+            offsets_buf[7] = @bitCast(off1[3]);
+            offsets_buf[8] = @bitCast(off2[0]);
+            offsets_buf[9] = @bitCast(off2[1]);
+            offsets_buf[10] = @bitCast(off2[2]);
+            offsets_buf[11] = @bitCast(off2[3]);
+            offsets_buf[12] = @bitCast(off3[0]);
+            offsets_buf[13] = @bitCast(off3[1]);
+            offsets_buf[14] = @bitCast(off3[2]);
+            offsets_buf[15] = @bitCast(off3[3]);
+
+            // BSF iteration of the bitmask — typically 0-3 candidates pass
+            // the SIMD filter, so this loop body is short.
+            var matching_offsets: u16 = matching_offsets_init;
+            while (matching_offsets != 0) {
+                const bit: u4 = @intCast(@ctz(matching_offsets));
+                matching_offsets &= matching_offsets - 1;
+                const offset_u: u32 = offsets_buf[bit];
                 const offset_s: usize = offset_u;
                 if (cur_pos < offset_s) continue;
 
@@ -130,8 +202,7 @@ pub fn findMatchesHashBased(
                 const match_word: u32 = std.mem.readInt(u32, src[cur_pos - offset_s ..][0..4], .little);
                 if (match_word != u32_to_scan) continue;
 
-                // Quick reject against the current best length: if both
-                // bytes at best_ml don't match, extending can't improve.
+                // Quick reject against the current best length.
                 if (best_ml >= 4) {
                     if (cur_pos + best_ml >= src_safe4) continue;
                     if (src[cur_pos + best_ml] != src[cur_pos + best_ml - offset_s]) continue;
