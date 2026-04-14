@@ -785,3 +785,327 @@ test "writeLzOffsetBits legacy path: full function roundtrip" {
     const decoded = br.readDistance(u8_desc);
     try testing.expectEqual(offset, decoded);
 }
+
+/// Build a legacy-path `u8_offs` descriptor for a near offset.
+fn buildNearU8Desc(off: u32) u8 {
+    const bsr: u32 = std.math.log2_int(u32, off + lz_constants.offset_bias_constant);
+    return @intCast(((off - 8) & 0xF) | (16 * (bsr - 9)));
+}
+
+test "writeLzOffsetBits legacy path: two near offsets (fwd + bwd)" {
+    // Two offsets trigger the alternating forward/backward write path.
+    // Index 0 goes to forward, index 1 goes to backward. flag_ignore_u32_length
+    // is still true so there's no count header competing for bits_b.
+    const bit_reader_mod = @import("../io/bit_reader.zig");
+
+    const off0: u32 = 200;
+    const off1: u32 = 310;
+    var u8_offs: [2]u8 = .{ buildNearU8Desc(off0), buildNearU8Desc(off1) };
+    var u32_offs: [2]u32 = .{ off0, off1 };
+    const u32_len: [0]u32 = .{};
+    var dst: [256]u8 = @splat(0);
+
+    const n = try writeLzOffsetBits(
+        &dst,
+        dst[dst.len..].ptr,
+        &u8_offs,
+        &u32_offs,
+        2,
+        0,
+        &u32_len,
+        0,
+        true,
+    );
+    try testing.expect(n >= 1);
+
+    // Forward reader at dst[0]; backward reader at dst[n..] (end of stream).
+    var bits_a = bit_reader_mod.BitReader.initForward(dst[0..n]);
+    bits_a.refill();
+    var bits_b = bit_reader_mod.BitReader.initBackward(dst[0..n]);
+    bits_b.refillBackwards();
+
+    const d0 = bits_a.readDistance(u8_offs[0]);
+    const d1 = bits_b.readDistanceBackward(u8_offs[1]);
+    try testing.expectEqual(off0, d0);
+    try testing.expectEqual(off1, d1);
+}
+
+test "writeLzOffsetBits legacy path: one offset with length-count header" {
+    // Add the backward length-count header (flag_ignore_u32_length = false,
+    // u32_len_count = 0). This writes a single-bit `1` marker to bits_b
+    // before the offset loop runs. Decoder reads the header first.
+    const bit_reader_mod = @import("../io/bit_reader.zig");
+
+    const offset: u32 = 200;
+    const u8_desc: u8 = buildNearU8Desc(offset);
+
+    var u8_offs: [1]u8 = .{u8_desc};
+    var u32_offs: [1]u32 = .{offset};
+    const u32_len: [0]u32 = .{};
+    var dst: [256]u8 = @splat(0);
+
+    const n = try writeLzOffsetBits(
+        &dst,
+        dst[dst.len..].ptr,
+        &u8_offs,
+        &u32_offs,
+        1,
+        0,
+        &u32_len,
+        0,
+        false, // flag_ignore_u32_length = false: include count header
+    );
+    try testing.expect(n >= 1);
+
+    // Simulate the decoder's reads.
+    var bits_a = bit_reader_mod.BitReader.initForward(dst[0..n]);
+    bits_a.refill();
+    var bits_b = bit_reader_mod.BitReader.initBackward(dst[0..n]);
+    bits_b.refillBackwards();
+
+    // ── Count header (backward) ──
+    // Encoder wrote `cnt_plus_1 = 1` at `nb+1 = 1` bits (just a single 1).
+    // Decoder: leading zeros = 0, read 1 bit = 1, val = 1, u32_len_count = 0.
+    if (bits_b.bits < 0x2000) return error.BitReaderCountHeaderTooSmall;
+    const cz: u32 = @clz(bits_b.bits);
+    const cz_u5: u5 = @intCast(cz);
+    bits_b.bit_pos += @intCast(cz);
+    bits_b.bits <<= cz_u5;
+    bits_b.refillBackwards();
+    const cnt_total_bits: u32 = cz + 1;
+    const cnt_total_u5: u5 = @intCast(cnt_total_bits);
+    const cnt_shift: u5 = @intCast(@as(u32, 32) - cnt_total_bits);
+    const cnt_val = (bits_b.bits >> cnt_shift) - 1;
+    bits_b.bit_pos += @intCast(cnt_total_bits);
+    bits_b.bits <<= cnt_total_u5;
+    bits_b.refillBackwards();
+    try testing.expectEqual(@as(u32, 0), cnt_val);
+
+    // ── Now read the single offset (forward) ──
+    const d0 = bits_a.readDistance(u8_offs[0]);
+    try testing.expectEqual(offset, d0);
+}
+
+test "writeLzOffsetBits legacy path: 10 near offsets + count header" {
+    // Scale up to 10 offsets — alternating forward/backward — while
+    // still including the backward count header. This is the shape the
+    // High codec emits for a realistic sub-chunk.
+    const bit_reader_mod = @import("../io/bit_reader.zig");
+
+    const raw_offsets: [10]u32 = .{ 200, 310, 450, 600, 800, 1100, 1500, 2000, 2800, 4000 };
+    var u8_offs: [10]u8 = undefined;
+    var u32_offs: [10]u32 = undefined;
+    for (raw_offsets, 0..) |off, i| {
+        u8_offs[i] = buildNearU8Desc(off);
+        u32_offs[i] = off;
+    }
+    const u32_len: [0]u32 = .{};
+    var dst: [512]u8 = @splat(0);
+
+    const n = try writeLzOffsetBits(
+        &dst,
+        dst[dst.len..].ptr,
+        &u8_offs,
+        &u32_offs,
+        raw_offsets.len,
+        0,
+        &u32_len,
+        0,
+        false, // include count header
+    );
+    try testing.expect(n >= 1);
+
+    // Simulate the decoder's reads, starting with the backward count header.
+    var bits_a = bit_reader_mod.BitReader.initForward(dst[0..n]);
+    bits_a.refill();
+    var bits_b = bit_reader_mod.BitReader.initBackward(dst[0..n]);
+    bits_b.refillBackwards();
+
+    if (bits_b.bits < 0x2000) return error.BitReaderCountHeaderTooSmall;
+    const cz: u32 = @clz(bits_b.bits);
+    const cz_u5: u5 = @intCast(cz);
+    bits_b.bit_pos += @intCast(cz);
+    bits_b.bits <<= cz_u5;
+    bits_b.refillBackwards();
+    const cnt_total_bits: u32 = cz + 1;
+    const cnt_total_u5: u5 = @intCast(cnt_total_bits);
+    const cnt_shift: u5 = @intCast(@as(u32, 32) - cnt_total_bits);
+    const cnt_val = (bits_b.bits >> cnt_shift) - 1;
+    bits_b.bit_pos += @intCast(cnt_total_bits);
+    bits_b.bits <<= cnt_total_u5;
+    bits_b.refillBackwards();
+    try testing.expectEqual(@as(u32, 0), cnt_val);
+
+    // Read offsets alternating forward / backward.
+    var i: usize = 0;
+    while (i < raw_offsets.len) : (i += 1) {
+        if ((i & 1) == 0) {
+            const d = bits_a.readDistance(u8_offs[i]);
+            try testing.expectEqual(raw_offsets[i], d);
+        } else {
+            const d = bits_b.readDistanceBackward(u8_offs[i]);
+            try testing.expectEqual(raw_offsets[i], d);
+        }
+    }
+}
+
+test "writeLzOffsetBits legacy path: 4 offsets + 2 u32_len overflows" {
+    // Adds the match-length overflow stream — this is where the full
+    // L9/L11 roundtrip desyncs in practice. The decoder reads lengths
+    // via `readLengthBackward` (index 1) and `readLength` (index 0)
+    // alternating, after the offset stream has been consumed.
+    const bit_reader_mod = @import("../io/bit_reader.zig");
+
+    const raw_offsets: [4]u32 = .{ 200, 310, 450, 600 };
+    var u8_offs: [4]u8 = undefined;
+    var u32_offs: [4]u32 = undefined;
+    for (raw_offsets, 0..) |off, i| {
+        u8_offs[i] = buildNearU8Desc(off);
+        u32_offs[i] = off;
+    }
+    // Two u32 match-length overflow values. Decoder reads them as
+    // `len_value = (raw - 64) + 255` pattern — the encoder writes raw -
+    // the `+3` and `+255` adjustments happen downstream in `processLzRuns`.
+    const u32_len: [2]u32 = .{ 100, 200 };
+    var dst: [512]u8 = @splat(0);
+
+    const n = try writeLzOffsetBits(
+        &dst,
+        dst[dst.len..].ptr,
+        &u8_offs,
+        &u32_offs,
+        raw_offsets.len,
+        0,
+        &u32_len,
+        u32_len.len,
+        false, // include count header
+    );
+    try testing.expect(n >= 1);
+
+    var bits_a = bit_reader_mod.BitReader.initForward(dst[0..n]);
+    bits_a.refill();
+    var bits_b = bit_reader_mod.BitReader.initBackward(dst[0..n]);
+    bits_b.refillBackwards();
+
+    // ── Count header (backward): u32_len_count = 2 → cnt_plus_1 = 3, nb = 1, marker = `1..`, payload bit = 1. ──
+    if (bits_b.bits < 0x2000) return error.BitReaderCountHeaderTooSmall;
+    const cz: u32 = @clz(bits_b.bits);
+    const cz_u5: u5 = @intCast(cz);
+    bits_b.bit_pos += @intCast(cz);
+    bits_b.bits <<= cz_u5;
+    bits_b.refillBackwards();
+    const cnt_total_bits: u32 = cz + 1;
+    const cnt_total_u5: u5 = @intCast(cnt_total_bits);
+    const cnt_shift: u5 = @intCast(@as(u32, 32) - cnt_total_bits);
+    const cnt_val = (bits_b.bits >> cnt_shift) - 1;
+    bits_b.bit_pos += @intCast(cnt_total_bits);
+    bits_b.bits <<= cnt_total_u5;
+    bits_b.refillBackwards();
+    try testing.expectEqual(@as(u32, u32_len.len), cnt_val);
+
+    // ── Offsets ──
+    var i: usize = 0;
+    while (i < raw_offsets.len) : (i += 1) {
+        if ((i & 1) == 0) {
+            const d = bits_a.readDistance(u8_offs[i]);
+            try testing.expectEqual(raw_offsets[i], d);
+        } else {
+            const d = bits_b.readDistanceBackward(u8_offs[i]);
+            try testing.expectEqual(raw_offsets[i], d);
+        }
+    }
+
+    // ── u32 length overflow values ──
+    // Encoder writes each value with a gamma prefix for the hi bits
+    // plus 6 raw low bits; the decoder's `readLength` consumes all
+    // `leading_zeros + 7` value bits and returns the composite value
+    // in one call. Alternation matches the offset stream: i=0 →
+    // forward (readLength), i=1 → backward (readLengthBackward).
+    var v0: u32 = 0;
+    try testing.expect(bits_a.readLength(&v0));
+    try testing.expectEqual(u32_len[0], v0);
+
+    var v1: u32 = 0;
+    try testing.expect(bits_b.readLengthBackward(&v1));
+    try testing.expectEqual(u32_len[1], v1);
+}
+
+test "writeLzOffsetBits legacy path: 50 offsets + 20 u32_len overflows" {
+    // Scale test — mimics the shape of a real L9/L11 compressed sub-chunk.
+    // Byte counts here are comparable to what the 4 KB repeating 'A'..'Z'
+    // test would emit, which is where the full-pipe roundtrip currently
+    // fails. If this passes in isolation, the residual desync is NOT in
+    // writeLzOffsetBits' multi-write composition — it's upstream (in
+    // assembleCompressedOutput's stream ordering) or downstream (in the
+    // decoder's read position after literal/cmd/offs/len streams).
+    const bit_reader_mod = @import("../io/bit_reader.zig");
+
+    var raw_offsets: [50]u32 = undefined;
+    var u8_offs: [50]u8 = undefined;
+    var u32_offs: [50]u32 = undefined;
+    for (0..raw_offsets.len) |idx| {
+        const base: u32 = 26 * (@as(u32, @intCast(idx)) + 1);
+        raw_offsets[idx] = base + 174; // keeps bsr >= 9 for small idx
+        u8_offs[idx] = buildNearU8Desc(raw_offsets[idx]);
+        u32_offs[idx] = raw_offsets[idx];
+    }
+    var u32_len: [20]u32 = undefined;
+    for (0..u32_len.len) |idx| u32_len[idx] = 100 + @as(u32, @intCast(idx)) * 7;
+
+    var dst: [4096]u8 = @splat(0);
+    const n = try writeLzOffsetBits(
+        &dst,
+        dst[dst.len..].ptr,
+        &u8_offs,
+        &u32_offs,
+        raw_offsets.len,
+        0,
+        &u32_len,
+        u32_len.len,
+        false,
+    );
+    try testing.expect(n >= 1);
+
+    var bits_a = bit_reader_mod.BitReader.initForward(dst[0..n]);
+    bits_a.refill();
+    var bits_b = bit_reader_mod.BitReader.initBackward(dst[0..n]);
+    bits_b.refillBackwards();
+
+    // Count header decode (matching decoder's unpackOffsets).
+    if (bits_b.bits < 0x2000) return error.BitReaderCountHeaderTooSmall;
+    const cz: u32 = @clz(bits_b.bits);
+    const cz_u5: u5 = @intCast(cz);
+    bits_b.bit_pos += @intCast(cz);
+    bits_b.bits <<= cz_u5;
+    bits_b.refillBackwards();
+    const cnt_total_bits: u32 = cz + 1;
+    const cnt_total_u5: u5 = @intCast(cnt_total_bits);
+    const cnt_shift: u5 = @intCast(@as(u32, 32) - cnt_total_bits);
+    const cnt_val = (bits_b.bits >> cnt_shift) - 1;
+    bits_b.bit_pos += @intCast(cnt_total_bits);
+    bits_b.bits <<= cnt_total_u5;
+    bits_b.refillBackwards();
+    try testing.expectEqual(@as(u32, u32_len.len), cnt_val);
+
+    var i: usize = 0;
+    while (i < raw_offsets.len) : (i += 1) {
+        if ((i & 1) == 0) {
+            const d = bits_a.readDistance(u8_offs[i]);
+            try testing.expectEqual(raw_offsets[i], d);
+        } else {
+            const d = bits_b.readDistanceBackward(u8_offs[i]);
+            try testing.expectEqual(raw_offsets[i], d);
+        }
+    }
+
+    // Read lengths in the same paired order the decoder uses.
+    var k: u32 = 0;
+    while (k + 1 < u32_len.len) : (k += 2) {
+        var v0: u32 = 0;
+        try testing.expect(bits_a.readLength(&v0));
+        try testing.expectEqual(u32_len[k], v0);
+        var v1_tmp: u32 = 0;
+        try testing.expect(bits_b.readLengthBackward(&v1_tmp));
+        try testing.expectEqual(u32_len[k + 1], v1_tmp);
+    }
+}

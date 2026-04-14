@@ -978,11 +978,75 @@ test "compressFramedHigh L9 roundtrip: incompressible input (raw fallback)" {
     try roundtrip(&src, 9);
 }
 
-// NOTE: compressed-output roundtrips at L9/L11 on repetitive input hit a
-// second-order bug AFTER the offset_encoder constants fix — the decoder
-// reaches the match-length stream reader (`readLengthBackward`) but
-// receives a StreamMismatch. The desync has moved deeper into the
-// length stream framing. Tracked as step-34 part 3.
+test "compressFramedHigh L9 roundtrip: 4 KB repeating pattern" {
+    var src: [4096]u8 = undefined;
+    for (&src, 0..) |*b, i| b.* = @intCast('A' + (i % 26));
+    try roundtrip(&src, 9);
+}
+
+test "compressFramedHigh L9 roundtrip: 8 KB English-ish" {
+    var src: [8192]u8 = undefined;
+    const p = "The quick brown fox jumps over a lazy dog. ";
+    var i: usize = 0;
+    while (i < src.len) : (i += 1) src[i] = p[i % p.len];
+    try roundtrip(&src, 9);
+}
+
+test "compressFramedHigh L11 roundtrip: 8 KB English-ish (BT4 path)" {
+    var src: [8192]u8 = undefined;
+    const p = "The quick brown fox jumps over a lazy dog. ";
+    var i: usize = 0;
+    while (i < src.len) : (i += 1) src[i] = p[i % p.len];
+    try roundtrip(&src, 11);
+}
+
+test "compressFramedHigh L6 roundtrip: 64 KB repeating pattern" {
+    var src: [65536]u8 = undefined;
+    for (&src, 0..) |*b, i| b.* = @intCast('A' + (i % 26));
+    try roundtrip(&src, 6);
+}
+
+test "compressFramedHigh L9 roundtrip: 64 KB repeating pattern" {
+    var src: [65536]u8 = undefined;
+    for (&src, 0..) |*b, i| b.* = @intCast('A' + (i % 26));
+    try roundtrip(&src, 9);
+}
+
+test "compressFramedHigh L11 roundtrip: 128 KB highly repetitive" {
+    var src: [128 * 1024]u8 = undefined;
+    for (&src, 0..) |*b, i| b.* = @intCast(i % 16);
+    try roundtrip(&src, 11);
+}
+
+test "compressFramedHigh L9 roundtrip: 100 KB English-ish (fits 1 sub-chunk)" {
+    var src: [100 * 1024]u8 = undefined;
+    const p = "The quick brown fox jumps over a lazy dog. ";
+    var i: usize = 0;
+    while (i < src.len) : (i += 1) src[i] = p[i % p.len];
+    try roundtrip(&src, 9);
+}
+
+test "compressFramedHigh L9 roundtrip: 192 KB English-ish (spans 2 sub-chunks)" {
+    var src: [192 * 1024]u8 = undefined;
+    const p = "The quick brown fox jumps over a lazy dog. ";
+    var i: usize = 0;
+    while (i < src.len) : (i += 1) src[i] = p[i % p.len];
+    try roundtrip(&src, 9);
+}
+
+test "compressFramedHigh L11 roundtrip: 192 KB English-ish (BT4, 2 sub-chunks)" {
+    var src: [192 * 1024]u8 = undefined;
+    const p = "The quick brown fox jumps over a lazy dog. ";
+    var i: usize = 0;
+    while (i < src.len) : (i += 1) src[i] = p[i % p.len];
+    try roundtrip(&src, 11);
+}
+
+test "compressFramedHigh L9 roundtrip: 256 KB repeating (1 full chunk)" {
+    var src: [256 * 1024]u8 = undefined;
+    for (&src, 0..) |*b, i| b.* = @intCast('A' + (i % 26));
+    try roundtrip(&src, 9);
+}
 
 test "compressFramed L1 roundtrip: 4 KB repeating pattern" {
     var src: [4096]u8 = undefined;

@@ -186,17 +186,32 @@ pub inline fn bitsForLiteralLength(cost_model: *const CostModel, cur_litlen: i32
 }
 
 /// Port of C# `BitsForLiteral` (`CostModel.cs:225-229`).
+///
+/// `sub_or_copy_mask` is `0` (copy mode, literals unchanged) or `-1`
+/// (subtract mode, delta vs recent0). C# uses `byte & (byte)mask`
+/// which truncates the i32 mask to the low 8 bits (0 or 0xFF) and
+/// relies on signed int pointer arithmetic that silently wraps on
+/// `pos - recent` underflow — the masked result is still valid
+/// because C# implicitly guarantees the match is in-window.
+///
+/// Zig panics on both the `@intCast(-1 → u8)` cast and the `pos -
+/// recent` underflow. We fix both: bitcast the mask byte, and take
+/// the copy-mode fast path (no subtract at all) when the mask is 0,
+/// which bypasses the potentially-underflowing `pos - recent`.
 pub inline fn bitsForLiteral(
     src: [*]const u8,
     pos: usize,
     recent: i32,
     cost_model: *const CostModel,
 ) u32 {
+    if (cost_model.sub_or_copy_mask == 0) {
+        // Copy mode: literal is the raw source byte, no delta.
+        return cost_model.lit_cost[src[pos]];
+    }
     const recent_u: usize = @intCast(recent);
     const byte_cur: u8 = src[pos];
     const byte_prev: u8 = src[pos - recent_u];
-    const masked: u8 = byte_prev & @as(u8, @intCast(cost_model.sub_or_copy_mask));
-    const delta: u8 = byte_cur -% masked;
+    const delta: u8 = byte_cur -% byte_prev;
     return cost_model.lit_cost[delta];
 }
 
@@ -208,14 +223,21 @@ pub inline fn bitsForLiterals(
     recent: i32,
     cost_model: *const CostModel,
 ) u32 {
+    if (cost_model.sub_or_copy_mask == 0) {
+        var sum: u32 = 0;
+        var i: usize = 0;
+        while (i < num) : (i += 1) {
+            sum += cost_model.lit_cost[src[pos + i]];
+        }
+        return sum;
+    }
     const recent_u: usize = @intCast(recent);
     var sum: u32 = 0;
     var i: usize = 0;
     while (i < num) : (i += 1) {
         const byte_cur: u8 = src[pos + i];
         const byte_prev: u8 = src[pos + i - recent_u];
-        const masked: u8 = byte_prev & @as(u8, @intCast(cost_model.sub_or_copy_mask));
-        const delta: u8 = byte_cur -% masked;
+        const delta: u8 = byte_cur -% byte_prev;
         sum += cost_model.lit_cost[delta];
     }
     return sum;

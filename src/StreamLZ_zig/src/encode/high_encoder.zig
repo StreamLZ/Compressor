@@ -204,9 +204,11 @@ inline fn writeLiterals(writer: *HighStreamWriter, src: [*]const u8, len: usize,
     }
 
     // Branchless run-length write: always store `len - 3`, only advance
-    // the pointer when `len >= 3`.
+    // the pointer when `len >= 3`. C# relies on `(byte)(len - 3)` wrapping
+    // when `len < 3`; Zig's `@intCast` would panic on the negative value,
+    // so compute the wrap explicitly via `-%` + `@truncate`.
     const lrl8: [*]u8 = writer.literal_run_lengths;
-    lrl8[0] = @intCast(@as(i32, @intCast(len)) - 3);
+    lrl8[0] = @truncate(len -% @as(usize, 3));
     writer.literal_run_lengths = if (len >= 3) lrl8 + 1 else lrl8;
 
     // 8-byte unaligned copy (safe due to headroom).
@@ -540,6 +542,11 @@ pub fn assembleCompressedOutput(
     // ── Offset extra bits (dual-ended bit stream) ──
     const bits_n = blk: {
         const dst_remaining: usize = @intFromPtr(dst_end) - @intFromPtr(dst);
+        // `overflow_lengths` / `overflow_lengths_start` are both `[*]u32`, so
+        // the pointer-byte diff must be divided by `@sizeOf(u32)` to recover
+        // the element count expected by `writeLzOffsetBits`.
+        const u32_len_count: usize =
+            (@intFromPtr(writer.overflow_lengths) - @intFromPtr(writer.overflow_lengths_start)) / @sizeOf(u32);
         const res = offset_enc.writeLzOffsetBits(
             dst,
             dst + dst_remaining,
@@ -548,7 +555,7 @@ pub fn assembleCompressedOutput(
             num_off,
             @intCast(offs_encode_type),
             writer.overflow_lengths_start,
-            @intFromPtr(writer.overflow_lengths) - @intFromPtr(writer.overflow_lengths_start),
+            u32_len_count,
             flag_ignore_u32_length,
         ) catch return source_length;
         break :blk res;
