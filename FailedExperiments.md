@@ -481,6 +481,57 @@ vector unit end-to-end.
 - Inline assembly to emit `PSHUFB` directly (escapes Zig's type system,
   unclear if the integer↔XMM transit can be avoided)
 
+### ❌ Conditional 16-byte SIMD copy for Fast short-token match (L1/L5)
+
+**Context:** VTune Hotspots on L1 100 MB enwik8 showed `writeInt`
+(inlined into `copy64`) at ~63% of CPU — same dominant pattern as the
+L9 path before we switched it to `copy16`. The L9 fix yielded +3%
+wall-time. We hoped the same trick would help L1/L5.
+
+**Hypothesis:** Replace the 2× `copy64` (16 bytes via 8-byte stores) in
+the short-token match copy with 1× `copy16` (16 bytes via SIMD store).
+The SIMD load is atomic, so we need offset ≥ 16 to avoid reading the
+not-yet-written destination region. Branch on offset:
+
+```zig
+if (recent_offs <= -16) {  // back-distance >= 16, safe
+    @branchHint(.likely);
+    copy.copy16(dst, match_ptr);
+} else {
+    copy.copy64(dst, match_ptr);
+    copy.copy64(dst + 8, match_ptr + 8);
+}
+```
+
+**Result:** ~3% regression on L1 (6132 → 5950 MB/s) and similar on L5.
+
+**Why VTune showed `writeInt` collapse but wall time got slower:**
+- VTune confirmed `writeInt` time dropped from ~683ms → ~46ms (-93%).
+- A new hotspot `storeV16` appeared at ~139ms (the SIMD store from
+  `copy16`).
+- Total CPU time dropped, but wall time got slightly worse.
+
+Best explanation: the per-token branch cost (~1-2 cycles for the
+compare + conditional jump) exactly offsets the per-token uop savings
+(2 µops fewer per token from the wider store), AND the additional code
+in the inner loop body increases DSB / icache pressure, slightly
+hurting steady-state IPC.
+
+**Lesson:** A profiler showing a hotspot collapse doesn't mean the
+total time will improve. The new code path has its own overhead, and
+in tight inner loops the branch cost competes directly with the
+instruction savings. This is different from the L9 case where the
+inner loop already had MORE branches (the conditional on lit_len > 8
+etc.) so adding one more was relatively cheaper.
+
+**Workaround (not tried):** Split the Fast decoder into two
+specialized variants (one for streams known to have all offsets >= 16,
+one for the general case) selected by a per-block flag set by the
+encoder. Adds encoder complexity for a small expected gain.
+
+**Disposition:** Reverted. L1-L5 stay at C# parity (within ±1% on the
+regression benchmark), which is the goal anyway.
+
 ### ❌ 16-byte SIMD copies for Fast medium-match path (L5)
 
 **Context:** After fixing L1 (lazy pool, +10%) and L6-L8 (SC scratch
