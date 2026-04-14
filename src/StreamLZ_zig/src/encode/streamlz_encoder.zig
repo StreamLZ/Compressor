@@ -729,6 +729,8 @@ fn compressFramedHigh(
     const frame_block_start: usize = pos;
 
     const can_compress = src.len > fast_constants.min_source_length;
+    const self_contained: bool = mapping.self_contained or opts.self_contained or opts.two_phase;
+    const sc_flag_bit: u8 = if (self_contained) 0x10 else 0;
 
     // ── High encoder context ───────────────────────────────────────────
     // L5+ enables `export_tokens`. Entropy options per C# SetupEncoder:
@@ -782,11 +784,12 @@ fn compressFramedHigh(
         const block_src: []const u8 = src[src_off..][0..block_src_len];
 
         const block_start: usize = pos;
-        const keyframe = src_off == 0;
+        // SC mode: every block is a keyframe (independently decodable).
+        const keyframe = self_contained or src_off == 0;
 
         // 2-byte block header (compressed, codec=high)
         if (pos + 2 > dst.len) return error.DestinationTooSmall;
-        var flags0: u8 = 0x05;
+        var flags0: u8 = 0x05 | sc_flag_bit;
         if (keyframe) flags0 |= 0x40;
         dst[pos] = flags0;
         dst[pos + 1] = @intFromEnum(block_header.CodecType.high);
@@ -893,7 +896,7 @@ fn compressFramedHigh(
         if (should_bail) {
             pos = block_start;
             if (pos + 2 + block_src_len > dst.len) return error.DestinationTooSmall;
-            var unc_flags0: u8 = 0x05 | 0x80;
+            var unc_flags0: u8 = 0x05 | 0x80 | sc_flag_bit;
             if (keyframe) unc_flags0 |= 0x40;
             dst[pos] = unc_flags0;
             dst[pos + 1] = @intFromEnum(block_header.CodecType.high);
@@ -906,6 +909,23 @@ fn compressFramedHigh(
         }
 
         src_off += block_src_len;
+    }
+
+    // SC mode: append the per-chunk first-8-bytes prefix table at the
+    // end of the frame block. Matches the Fast path in `compressFramed`
+    // and `StreamLzCompressor.AppendSelfContainedPrefixTable`.
+    if (self_contained and can_compress) {
+        const num_chunks: usize = (src.len + lz_constants.chunk_size - 1) / lz_constants.chunk_size;
+        var i: usize = 1;
+        while (i < num_chunks) : (i += 1) {
+            const chunk_start = i * lz_constants.chunk_size;
+            if (chunk_start >= src.len) break;
+            const copy_size: usize = @min(@as(usize, 8), src.len - chunk_start);
+            if (pos + 8 > dst.len) return error.DestinationTooSmall;
+            @memset(dst[pos..][0..8], 0);
+            @memcpy(dst[pos..][0..copy_size], src[chunk_start..][0..copy_size]);
+            pos += 8;
+        }
     }
 
     // Frame block fallback: if compressed total didn't beat uncompressed,
@@ -1040,6 +1060,35 @@ test "compressFramedHigh L11 roundtrip: 192 KB English-ish (BT4, 2 sub-chunks)" 
     var i: usize = 0;
     while (i < src.len) : (i += 1) src[i] = p[i % p.len];
     try roundtrip(&src, 11);
+}
+
+test "compressFramedHigh L6 roundtrip: 8 KB English-ish (SC path)" {
+    var src: [8192]u8 = undefined;
+    const p = "The quick brown fox jumps over a lazy dog. ";
+    var i: usize = 0;
+    while (i < src.len) : (i += 1) src[i] = p[i % p.len];
+    try roundtrip(&src, 6);
+}
+
+test "compressFramedHigh L7 roundtrip: 64 KB repeating pattern (SC path)" {
+    var src: [65536]u8 = undefined;
+    for (&src, 0..) |*b, i| b.* = @intCast('A' + (i % 26));
+    try roundtrip(&src, 7);
+}
+
+test "compressFramedHigh L8 roundtrip: 64 KB repeating pattern (SC + BT4)" {
+    var src: [65536]u8 = undefined;
+    for (&src, 0..) |*b, i| b.* = @intCast('A' + (i % 26));
+    try roundtrip(&src, 8);
+}
+
+test "compressFramedHigh L6 roundtrip: 384 KB English-ish (SC, 2 chunks)" {
+    // 384 KB = 1.5 * chunk_size → two SC chunks with a prefix table entry.
+    var src: [384 * 1024]u8 = undefined;
+    const p = "The quick brown fox jumps over a lazy dog. ";
+    var i: usize = 0;
+    while (i < src.len) : (i += 1) src[i] = p[i % p.len];
+    try roundtrip(&src, 6);
 }
 
 test "compressFramedHigh L9 roundtrip: 256 KB repeating (1 full chunk)" {
