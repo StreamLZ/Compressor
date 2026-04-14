@@ -830,7 +830,17 @@ fn compressFramedHigh(
                 const sub_hdr_pos: usize = pos;
                 pos += 3;
                 const sub_payload_start: usize = pos;
-                const start_position_for_sub: usize = src_off + sub_off;
+                // SC mode: `start_pos` must be relative to the CURRENT
+                // SC group's start (not the source start), so the
+                // optimal parser's `max_back = start_pos + pos` filter
+                // correctly drops matches that cross group boundaries.
+                // Matches C# `OptimalParser.cs:222` — "startPos = group
+                // offset, allows full within-group references".
+                const sc_group_bytes: usize = lz_constants.sc_group_size * lz_constants.chunk_size;
+                const start_position_for_sub: usize = if (self_contained)
+                    ((src_off + sub_off) % sc_group_bytes)
+                else
+                    (src_off + sub_off);
 
                 var chunk_type: i32 = -1;
                 var lz_cost: f32 = std.math.inf(f32);

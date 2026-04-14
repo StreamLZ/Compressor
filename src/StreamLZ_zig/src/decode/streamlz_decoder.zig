@@ -15,6 +15,7 @@ const block_header = @import("../format/block_header.zig");
 const constants = @import("../format/streamlz_constants.zig");
 const fast = @import("fast_lz_decoder.zig");
 const high = @import("high_lz_decoder.zig");
+const parallel = @import("decompress_parallel.zig");
 
 /// Extra bytes the decoder is allowed to write past `dst_len`.
 /// Ported from `StreamLZDecoder.SafeSpace` (64 in C#).
@@ -31,12 +32,32 @@ pub const DecompressError = error{
     OutputTooSmall,
     HighNotImplemented,
     ChecksumMismatch,
-} || fast.DecodeError || high.DecodeError || std.mem.Allocator.Error;
+    ChunkSizeMismatch,
+} || fast.DecodeError || high.DecodeError || std.mem.Allocator.Error || std.Thread.SpawnError || std.Thread.CpuCountError;
 
 /// Streams `src` (an SLZ1-framed buffer) into `dst`, returning the number
 /// of bytes written to `dst`. `dst.len` must be at least `content_size + safe_space`
 /// bytes when the frame declares a content size.
 pub fn decompressFramed(src: []const u8, dst: []u8) DecompressError!usize {
+    return decompressFramedInner(null, src, dst);
+}
+
+/// Parallel variant of `decompressFramed`. Uses `allocator` to spawn
+/// worker threads + allocate per-thread scratch for SC (L6-L8) blocks.
+/// Non-SC blocks fall through to the serial path. Phase 13 step 35 (A1).
+pub fn decompressFramedParallel(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+    dst: []u8,
+) DecompressError!usize {
+    return decompressFramedInner(allocator, src, dst);
+}
+
+fn decompressFramedInner(
+    allocator_opt: ?std.mem.Allocator,
+    src: []const u8,
+    dst: []u8,
+) DecompressError!usize {
     if (src.len == 0) return 0;
 
     const hdr = frame.parseHeader(src) catch return error.BadFrame;
@@ -71,14 +92,40 @@ pub fn decompressFramed(src: []const u8, dst: []u8) DecompressError!usize {
             continue;
         }
 
-        // Compressed block — iterate 256 KB chunks inside.
-        try decompressCompressedBlock(
-            src[pos .. pos + bh.compressed_size],
-            dst,
-            &dst_off,
-            bh.decompressed_size,
-            &scratch,
-        );
+        // Dispatch: if caller provided an allocator AND this block is
+        // SC (L6-L8 serial encoder marker) with more than one chunk,
+        // take the parallel fast path. Otherwise the serial loop.
+        const block_src = src[pos .. pos + bh.compressed_size];
+        var dispatched_parallel: bool = false;
+        if (allocator_opt) |allocator| {
+            if (block_src.len >= 2) {
+                const peek = block_header.parseBlockHeader(block_src) catch null;
+                if (peek) |ph| {
+                    const has_many_chunks = bh.decompressed_size > constants.chunk_size;
+                    if (ph.self_contained and has_many_chunks) {
+                        try parallel.decompressCoreParallel(
+                            allocator,
+                            block_src,
+                            dst,
+                            &dst_off,
+                            bh.decompressed_size,
+                        );
+                        dispatched_parallel = true;
+                    }
+                }
+            }
+        }
+
+        if (!dispatched_parallel) {
+            // Compressed block — iterate 256 KB chunks inside serially.
+            try decompressCompressedBlock(
+                block_src,
+                dst,
+                &dst_off,
+                bh.decompressed_size,
+                &scratch,
+            );
+        }
         pos += bh.compressed_size;
     }
 

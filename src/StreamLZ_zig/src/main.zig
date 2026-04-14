@@ -558,6 +558,7 @@ test {
     _ = @import("decode/high_lz_decoder.zig");
     _ = @import("decode/high_lz_process_runs.zig");
     _ = @import("decode/tans_decoder.zig");
+    _ = @import("decode/decompress_parallel.zig");
     _ = @import("decode/fixture_tests.zig");
     _ = @import("encode/byte_histogram.zig");
     _ = @import("encode/fast_constants.zig");
