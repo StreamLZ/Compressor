@@ -921,6 +921,7 @@ fn compressFramedHigh(
         ),
         .entropy_options = @bitCast(entropy_raw),
         .encode_flags = 4, // export_tokens, per C# SetupEncoder line 75
+        .self_contained = self_contained,
         .cross_block = &cross_block_state,
     };
 
@@ -1124,7 +1125,6 @@ fn compressFramedHigh(
                 src_off,
                 block_src_len,
                 dst[pos..][0..block_dst_remaining],
-                self_contained,
                 sc_flag_bit,
                 keyframe,
             );
@@ -1230,7 +1230,6 @@ fn compressOneFrameBlockWindowed(
             src_off_abs + inner_off,
             inner_len,
             dst[pos..],
-            false, // self_contained
             0, // sc_flag_bit
             keyframe,
         );
@@ -1340,7 +1339,6 @@ fn compressOneHighBlock(
     src_off: usize,
     block_src_len: usize,
     dst_block: []u8,
-    self_contained: bool,
     sc_flag_bit: u8,
     keyframe: bool,
 ) CompressError!usize {
@@ -1389,14 +1387,13 @@ fn compressOneHighBlock(
             const sub_hdr_pos: usize = local_pos;
             local_pos += 3;
             const sub_payload_start: usize = local_pos;
-            // SC mode: `start_pos` must be relative to the CURRENT
-            // SC group's start (not the source start). Matches C#
-            // `OptimalParser.cs:222`.
-            const sc_group_bytes: usize = lz_constants.sc_group_size * lz_constants.chunk_size;
-            const start_position_for_sub: usize = if (self_contained)
-                ((src_off + sub_off) % sc_group_bytes)
-            else
-                (src_off + sub_off);
+            // `start_pos` is the cumulative offset from `windowBase` —
+            // the absolute position of this sub-chunk within the
+            // current frame block. Matches C# `CompressChunk` line 900:
+            // `offset + (int)(src - sourceStart)`. Both SC and non-SC
+            // pass the same monotonic offset; the SC enforcement happens
+            // inside the optimal parser via `scMaxBack = startPos + pos`.
+            const start_position_for_sub: usize = src_off + sub_off;
 
             var chunk_type: i32 = -1;
             var lz_cost: f32 = std.math.inf(f32);
@@ -1551,6 +1548,13 @@ fn pcWorkerFn(shared: *PcShared) void {
         if (block_idx >= shared.num_blocks) return;
         if (shared.error_flag.load(.monotonic) != 0) return;
 
+        // Fresh cross-block state per block → output is deterministic
+        // regardless of which thread wins which block via the atomic
+        // counter. Without this, a thread that processes blocks 0, 5,
+        // 10, ... carries different stats forward than one processing
+        // 1, 6, 11, ... → run-to-run nondeterminism.
+        worker_cross_block = .{};
+
         const src_off = block_idx * lz_constants.chunk_size;
         const block_src_len = @min(shared.src.len - src_off, lz_constants.chunk_size);
         const keyframe = shared.self_contained or src_off == 0;
@@ -1563,7 +1567,6 @@ fn pcWorkerFn(shared: *PcShared) void {
             src_off,
             block_src_len,
             shared.tmp_bufs[block_idx],
-            shared.self_contained,
             shared.sc_flag_bit,
             keyframe,
         );
@@ -1709,6 +1712,15 @@ fn scWorkerFn(shared: *ScShared) void {
     var worker_ctx = shared.base_ctx.*;
     worker_ctx.allocator = arena.allocator();
 
+    // Per-worker cross-block state. Resets to default at the start of
+    // every group so output is deterministic regardless of which thread
+    // happens to claim which group via the atomic counter. Without this,
+    // a thread that processes groups 0, 5, 10, ... would carry stats
+    // forward across them and produce different output than a thread
+    // that processes 1, 6, 11, ...
+    var worker_cross_block: high_encoder.HighCrossBlockState = .{};
+    worker_ctx.cross_block = &worker_cross_block;
+
     var hasher: high_compressor.HighHasher = .{ .none = {} };
     defer hasher.deinit();
 
@@ -1718,6 +1730,9 @@ fn scWorkerFn(shared: *ScShared) void {
         const g = shared.next_group.fetchAdd(1, .monotonic);
         if (g >= shared.num_groups) return;
         if (shared.error_flag.load(.monotonic) != 0) return;
+
+        // Fresh cross-block state per group → deterministic output.
+        worker_cross_block = .{};
 
         const first_chunk = g * group_size;
         const last_chunk = @min(first_chunk + group_size, shared.num_chunks);
@@ -1777,8 +1792,11 @@ fn scWorkerFn(shared: *ScShared) void {
             const chunk_idx = first_chunk + ci;
             const in_group_src_off = ci * lz_constants.chunk_size;
             const block_src_len = @min(group_src.len - in_group_src_off, lz_constants.chunk_size);
-            // First chunk in every group is a keyframe (SC contract).
-            const keyframe = true;
+            // Only the first chunk in each group is a keyframe — matches
+            // C# `CompressInternalParallelSC` (StreamLzCompressor.cs:580).
+            // The block header keyframe bit (0x40) is part of the 2-byte
+            // header so getting this wrong shifts every block's bytes.
+            const keyframe = (ci == 0);
 
             const n_or_err = compressOneHighBlock(
                 &worker_ctx,
@@ -1788,7 +1806,6 @@ fn scWorkerFn(shared: *ScShared) void {
                 in_group_src_off,
                 block_src_len,
                 shared.tmp_bufs[chunk_idx],
-                true, // self_contained
                 shared.sc_flag_bit,
                 keyframe,
             );

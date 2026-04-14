@@ -283,7 +283,7 @@ pub fn doCompress(
     if (ctx.compression_level >= 5) {
         return high_optimal_parser.optimal(
             ctx,
-            .{},
+            .{ .self_contained = ctx.self_contained },
             mls,
             src,
             src_size,
@@ -296,7 +296,7 @@ pub fn doCompress(
     }
 
     const num_lazy = numLazyFor(ctx.compression_level);
-    const opts: high_fast_parser.FastParserOptions = .{};
+    const opts: high_fast_parser.FastParserOptions = .{ .self_contained = ctx.self_contained };
     return switch (hasher.*) {
         .h1 => |*h| try high_fast_parser.compressFast(
             MatchHasher1,

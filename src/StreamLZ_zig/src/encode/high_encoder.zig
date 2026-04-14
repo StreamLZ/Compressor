@@ -45,6 +45,10 @@ pub const HighEncoderContext = struct {
     entropy_options: entropy_enc.EntropyOptions,
     encode_flags: u32,
     sub_or_copy_mask: i32 = 0,
+    /// Mirrors C# `lzcoder.Options.SelfContained`. Read by the optimal
+    /// parser (and the fast parser) to enable per-position SC max-back
+    /// enforcement and the LAO pre-filter pass.
+    self_contained: bool = false,
     /// Optional cross-block state. When present, the optimal parser
     /// reads `prev_stats` to seed the cost model and writes back the
     /// final stats for the next block. `null` = independent blocks.

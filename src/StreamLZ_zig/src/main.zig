@@ -81,34 +81,55 @@ pub fn main() !void {
 /// output: per-run timings, median (not mean), and a final round-trip
 /// pass/fail check.
 fn runBenchCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const []const u8) !void {
-    if (args.len < 2 or args.len > 3) {
-        try w.writeAll("usage: streamlz benchc <raw-file> <level> [runs]\n");
+    var level: u8 = 6;
+    var runs: u32 = 3;
+    var path: ?[]const u8 = null;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (std.mem.eql(u8, a, "-l") and i + 1 < args.len) {
+            level = std.fmt.parseInt(u8, args[i + 1], 10) catch {
+                try w.print("error: invalid level '{s}'\n", .{args[i + 1]});
+                try w.flush();
+                std.process.exit(2);
+            };
+            i += 1;
+        } else if (std.mem.eql(u8, a, "-r") and i + 1 < args.len) {
+            runs = std.fmt.parseInt(u32, args[i + 1], 10) catch {
+                try w.print("error: invalid runs '{s}'\n", .{args[i + 1]});
+                try w.flush();
+                std.process.exit(2);
+            };
+            i += 1;
+        } else if (path == null) {
+            path = a;
+        } else {
+            try w.writeAll("usage: streamlz benchc [-l N] [-r N] <raw-file>\n");
+            try w.flush();
+            std.process.exit(2);
+        }
+    }
+
+    if (path == null) {
+        try w.writeAll("usage: streamlz benchc [-l N] [-r N] <raw-file>\n");
         try w.flush();
         std.process.exit(2);
     }
-    const path = args[0];
-    const level: u8 = std.fmt.parseInt(u8, args[1], 10) catch {
-        try w.writeAll("error: level must be 1..11\n");
-        try w.flush();
-        std.process.exit(2);
-    };
     if (level < 1 or level > 11) {
-        try w.writeAll("error: level must be 1..11\n");
+        try w.print("error: level must be 1..11 (got {d})\n", .{level});
         try w.flush();
         std.process.exit(2);
     }
-    const runs: u32 = if (args.len == 3)
-        std.fmt.parseInt(u32, args[2], 10) catch 3
-    else
-        3;
     if (runs == 0) {
         try w.writeAll("error: runs must be >= 1\n");
         try w.flush();
         std.process.exit(2);
     }
 
-    const in_file = std.fs.cwd().openFile(path, .{}) catch |err| {
-        try w.print("error: cannot open '{s}': {s}\n", .{ path, @errorName(err) });
+    const path_unwrapped: []const u8 = path.?;
+    const in_file = std.fs.cwd().openFile(path_unwrapped, .{}) catch |err| {
+        try w.print("error: cannot open '{s}': {s}\n", .{ path_unwrapped, @errorName(err) });
         try w.flush();
         std.process.exit(1);
     };
@@ -116,7 +137,7 @@ fn runBenchCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []con
 
     const max_bytes: usize = 1 << 31;
     const src = in_file.readToEndAlloc(allocator, max_bytes) catch |err| {
-        try w.print("error: cannot read '{s}': {s}\n", .{ path, @errorName(err) });
+        try w.print("error: cannot read '{s}': {s}\n", .{ path_unwrapped, @errorName(err) });
         try w.flush();
         std.process.exit(1);
     };
@@ -129,7 +150,7 @@ fn runBenchCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []con
     defer allocator.free(decompressed);
 
     const mb: f64 = @as(f64, @floatFromInt(src.len)) / (1024.0 * 1024.0);
-    try w.print("Input: {s} ({d} bytes, {d:.2} MB)\n", .{ path, src.len, mb });
+    try w.print("Input: {s} ({d} bytes, {d:.2} MB)\n", .{ path_unwrapped, src.len, mb });
 
     // Warm-up compress (untimed) — first run would otherwise include one-time
     // page-fault cost on the output buffers.
@@ -160,8 +181,8 @@ fn runBenchCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []con
     const comp_median_mbps = mb * 1000.0 / comp_median_ms;
     try w.print("  Compress median: {d:.0}ms ({d:.1} MB/s)\n\n", .{ comp_median_ms, comp_median_mbps });
 
-    // Warm-up decompress.
-    _ = try decoder.decompressFramed(compressed[0..comp_size], decompressed);
+    // Warm-up decompress (parallel — matches what C# `-b` does for SC files).
+    _ = try decoder.decompressFramedParallel(allocator, compressed[0..comp_size], decompressed);
 
     // ── Decompress benchmark ──────────────────────────────────────────
     const dec_times = try allocator.alloc(u64, runs);
@@ -169,7 +190,7 @@ fn runBenchCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []con
     r = 0;
     while (r < runs) : (r += 1) {
         var timer = try std.time.Timer.start();
-        _ = try decoder.decompressFramed(compressed[0..comp_size], decompressed);
+        _ = try decoder.decompressFramedParallel(allocator, compressed[0..comp_size], decompressed);
         dec_times[r] = timer.read();
         const run_ms = @as(f64, @floatFromInt(dec_times[r])) / 1_000_000.0;
         const run_mbps = mb * 1000.0 / run_ms;
