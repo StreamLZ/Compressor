@@ -194,12 +194,17 @@ fn bt4SearchAndInsert(
     // Dangling-ref slots. Both start at `pos` — left[pos] and right[pos]
     // will be populated with the pos's final left/right subtree roots as
     // the descent narrows.
+    //
+    // The two bools use the SAME semantics as `writeRef`'s `in_left`
+    // parameter: `true` → slot is in `left[*_ref]`, `false` → slot is in
+    // `right[*_ref]`. This lets both refs share the same writeRef call
+    // signature without per-side inversion (an earlier port version used
+    // inverted bools for the right side and silently clobbered its own
+    // child pointer during termination).
     var left_ref: usize = pos;
     var right_ref: usize = pos;
-    // `*_ref_in_left == true` means the slot referenced by `*_ref` lives
-    // in `left[*_ref]`; false means `right[*_ref]`.
     var left_ref_in_left: bool = true;
-    var right_ref_in_right: bool = true;
+    var right_ref_in_left: bool = false;
 
     left[left_ref] = 0;
     right[right_ref] = 0;
@@ -269,7 +274,7 @@ fn bt4SearchAndInsert(
             if (match_len >= max_len) {
                 // Suffix exhausted: splice cur's children into our refs.
                 writeRef(left, right, left_ref, left_ref_in_left, left[cur]);
-                writeRef(left, right, right_ref, right_ref_in_right, right[cur]);
+                writeRef(left, right, right_ref, right_ref_in_left, right[cur]);
                 return num_found;
             }
         }
@@ -278,9 +283,9 @@ fn bt4SearchAndInsert(
         const go_left: bool = src[@as(usize, pos) + match_len] < src[@as(usize, cur) + match_len];
         if (go_left) {
             // cur becomes our right-side subtree root; descend into cur.left.
-            writeRef(left, right, right_ref, right_ref_in_right, cur + 1);
+            writeRef(left, right, right_ref, right_ref_in_left, cur + 1);
             right_ref = cur;
-            right_ref_in_right = false; // right_ref now lives in left[cur]
+            right_ref_in_left = true; // right_ref now lives in left[cur]
             match_len_right = match_len;
             cur_match = @as(i64, left[cur]) - 1;
         } else {
@@ -294,7 +299,7 @@ fn bt4SearchAndInsert(
 
     // Terminate any dangling pointers.
     writeRef(left, right, left_ref, left_ref_in_left, 0);
-    writeRef(left, right, right_ref, right_ref_in_right, 0);
+    writeRef(left, right, right_ref, right_ref_in_left, 0);
 
     return num_found;
 }
@@ -396,3 +401,4 @@ test "findMatchesBT4: long match skip path" {
     }
     try testing.expect(long_found);
 }
+
