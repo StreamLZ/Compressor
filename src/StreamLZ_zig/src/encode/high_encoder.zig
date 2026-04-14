@@ -23,6 +23,19 @@ const HighRecentOffs = high_types.HighRecentOffs;
 const Stats = high_types.Stats;
 const Token = high_types.Token;
 
+/// Cross-block statistics state carried between High-codec compress
+/// calls within a single stream. Mirrors C#
+/// `lzcoder.SymbolStatisticsScratch` + `lzcoder.LastChunkType`: the
+/// optimal parser saves its final `Stats` block after each call so the
+/// next block can seed its cost model via `rescaleAddStats` instead of
+/// the cold-start `rescaleStats`. `last_chunk_type = -1` signals "no
+/// prior block" (same sentinel C# uses on first invocation).
+pub const HighCrossBlockState = struct {
+    prev_stats: Stats = .{},
+    last_chunk_type: i32 = -1,
+    has_prev: bool = false,
+};
+
 /// Runtime encoder context passed through `assembleCompressedOutput`.
 /// Mirrors the subset of `LzCoder` the High encoder consults.
 pub const HighEncoderContext = struct {
@@ -32,6 +45,10 @@ pub const HighEncoderContext = struct {
     entropy_options: entropy_enc.EntropyOptions,
     encode_flags: u32,
     sub_or_copy_mask: i32 = 0,
+    /// Optional cross-block state. When present, the optimal parser
+    /// reads `prev_stats` to seed the cost model and writes back the
+    /// final stats for the next block. `null` = independent blocks.
+    cross_block: ?*HighCrossBlockState = null,
 };
 
 /// Owns the backing scratch allocation for a `HighStreamWriter`. The

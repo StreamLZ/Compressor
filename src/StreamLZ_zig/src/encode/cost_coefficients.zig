@@ -117,6 +117,19 @@ pub fn speedTradeoffFor(space_speed_tradeoff_bytes: i32, use_literal_entropy_cod
     return @as(f32, @floatFromInt(space_speed_tradeoff_bytes)) * speed_tradeoff_scale * factor;
 }
 
+/// Computes the `coder.SpeedTradeoff` scalar the way C#
+/// `High.Compressor.SetupEncoder` does (Compressor.cs:62):
+///   SpeedTradeoff = SpaceSpeedTradeoffBytes * Factor1 * Factor2
+/// Note: this is a DIFFERENT formula than `speedTradeoffFor`, which
+/// applies to the Fast codec only. Using the Fast formula for High
+/// produces speed_tradeoff ~5.6x too high, which throws off every
+/// cost-model comparison and breaks L6-L11 byte-exact parity.
+pub fn speedTradeoffForHigh(space_speed_tradeoff_bytes: i32) f32 {
+    return @as(f32, @floatFromInt(space_speed_tradeoff_bytes)) *
+        speed_tradeoff_factor_1 *
+        speed_tradeoff_factor_2;
+}
+
 const testing = @import("std").testing;
 
 test "speedTradeoffFor raw default" {

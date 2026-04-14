@@ -81,12 +81,19 @@ pub fn updateStats(
         const recent: usize = @intCast(t.recent_offset0);
 
         // Per-literal histogram updates (raw + sub).
+        // C# reads `src[pos + j - recent]` as pointer arithmetic that can
+        // go BEFORE the source buffer when `pos + j < recent` (technically
+        // UB in C# but reads whatever byte happens to be there). Port via
+        // wrap-subtract so Zig doesn't panic on usize underflow — the
+        // computed pointer mirrors C#'s behaviour and the resulting delta
+        // goes into the histogram just like the reference does.
         var j: usize = 0;
         while (j < litlen) : (j += 1) {
             const b: u8 = src[pos + j];
             h.lit_raw.count[b] += increment;
-            // recent is the backward offset; src[pos+j - recent] is the match source.
-            const prev_byte: u8 = src[pos + j - recent];
+            const back_addr: usize = @intFromPtr(src + pos + j) -% recent;
+            const back_ptr: [*]const u8 = @ptrFromInt(back_addr);
+            const prev_byte: u8 = back_ptr[0];
             const delta: u8 = b -% prev_byte;
             h.lit_sub.count[delta] += increment;
         }

@@ -319,6 +319,7 @@ fn printUsage(w: *std.Io.Writer) !void {
 
 fn runCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const []const u8) !void {
     var level: u8 = 1;
+    var num_threads: u32 = 0; // 0 = auto
     var in_path: ?[]const u8 = null;
     var out_path: ?[]const u8 = null;
 
@@ -332,12 +333,19 @@ fn runCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const []
                 std.process.exit(2);
             };
             i += 1;
+        } else if (std.mem.eql(u8, a, "-t") and i + 1 < args.len) {
+            num_threads = std.fmt.parseInt(u32, args[i + 1], 10) catch {
+                try w.print("error: invalid thread count '{s}'\n", .{args[i + 1]});
+                try w.flush();
+                std.process.exit(2);
+            };
+            i += 1;
         } else if (in_path == null) {
             in_path = a;
         } else if (out_path == null) {
             out_path = a;
         } else {
-            try w.writeAll("usage: streamlz compress [-l N] <in> <out>\n");
+            try w.writeAll("usage: streamlz compress [-l N] [-t N] <in> <out>\n");
             try w.flush();
             std.process.exit(2);
         }
@@ -377,7 +385,7 @@ fn runCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const []
     };
     defer allocator.free(dst);
 
-    const written = encoder.compressFramed(allocator, src, dst, .{ .level = level }) catch |err| {
+    const written = encoder.compressFramed(allocator, src, dst, .{ .level = level, .num_threads = num_threads }) catch |err| {
         try w.print("error: compression failed: {s}\n", .{@errorName(err)});
         try w.flush();
         std.process.exit(1);

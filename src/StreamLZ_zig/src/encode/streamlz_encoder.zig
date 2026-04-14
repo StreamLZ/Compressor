@@ -851,20 +851,15 @@ const HighMapping = struct {
 };
 
 fn mapHighLevel(user_level: u8) HighMapping {
-    // NOTE: L8 / L11 `use_bt4 = false` is a temporary workaround.
-    // The Zig BT4 port in `match_finder_bt4.zig` passes byte-exact
-    // roundtrip tests but produces much worse match selection than
-    // the hash-based finder — enwik8 at L11 with BT4 compresses to
-    // ~41% vs ~27% without. Tracked as a step 33 follow-up; see
-    // `match_finder_bt4.zig` for the tree-insertion state that
-    // needs bisecting against the C# reference.
+    // Matches C# `Slz.MapLevel` + `StreamLzCompressor.CompressInternal`:
+    // codec_level >= 9 enables the BT4 match finder.
     return switch (user_level) {
         6 => .{ .codec_level = 5, .self_contained = true, .use_bt4 = false },
         7 => .{ .codec_level = 7, .self_contained = true, .use_bt4 = false },
-        8 => .{ .codec_level = 9, .self_contained = true, .use_bt4 = false },
+        8 => .{ .codec_level = 9, .self_contained = true, .use_bt4 = true },
         9 => .{ .codec_level = 5, .self_contained = false, .use_bt4 = false },
         10 => .{ .codec_level = 7, .self_contained = false, .use_bt4 = false },
-        11 => .{ .codec_level = 9, .self_contained = false, .use_bt4 = false },
+        11 => .{ .codec_level = 9, .self_contained = false, .use_bt4 = true },
         else => unreachable,
     };
 }
@@ -912,15 +907,26 @@ fn compressFramedHigh(
     // when level >= 7.
     var entropy_raw: u8 = 0xFF & ~@as(u8, 0b0100_0000); // clear MultiArrayAdvanced
     if (mapping.codec_level >= 7) entropy_raw |= 0b0100_0000;
+    // Cross-block stats scratch — the C# `lzcoder.SymbolStatisticsScratch`
+    // + `lzcoder.LastChunkType` plumbing. The optimal parser reads these
+    // at the start of each block and writes them back on success. Without
+    // this, multi-block streams seed every block's cost model from cold
+    // and diverge from C# byte-exact.
+    var cross_block_state: high_encoder.HighCrossBlockState = .{};
     const ctx: high_encoder.HighEncoderContext = .{
         .allocator = allocator,
         .compression_level = mapping.codec_level,
-        .speed_tradeoff = cost_coeffs.speedTradeoffFor(
+        // C# `High.Compressor.SetupEncoder` (Compressor.cs:62):
+        //   SpeedTradeoff = SpaceSpeedTradeoffBytes * Factor1 * Factor2
+        // The Fast codec uses a different formula (scale * entropy_factor)
+        // which would produce a speed_tradeoff ~5.6x too high here and
+        // silently corrupt every cost-model comparison.
+        .speed_tradeoff = cost_coeffs.speedTradeoffForHigh(
             cost_coeffs.default_space_speed_tradeoff_bytes,
-            true,
         ),
         .entropy_options = @bitCast(entropy_raw),
         .encode_flags = 4, // export_tokens, per C# SetupEncoder line 75
+        .cross_block = &cross_block_state,
     };
 
     // Decide thread count up front — used to gate both the SC and
@@ -1281,9 +1287,14 @@ fn pcWorkerFn(shared: *PcShared) void {
     var arena = std.heap.ArenaAllocator.init(shared.backing_allocator);
     defer arena.deinit();
 
-    // Worker-local context copy with the arena allocator.
+    // Worker-local context copy with the arena allocator + private
+    // cross-block state. Mirrors C# `Parallel.For` with `CloneForThread`:
+    // each worker has its own `LzCoder` clone so stats accumulate
+    // within a worker's block range but not across workers.
     var worker_ctx = shared.base_ctx.*;
     worker_ctx.allocator = arena.allocator();
+    var worker_cross_block: high_encoder.HighCrossBlockState = .{};
+    worker_ctx.cross_block = &worker_cross_block;
 
     // Each worker allocates its OWN `HighHasher` once and reuses it
     // across blocks, matching the C# per-thread `LzCoder` clone. For

@@ -251,12 +251,18 @@ test "encodeArrayU8 with tANS picks compressed path for compressible data" {
 
     var dst: [2048]u8 = @splat(0);
     var cost: f32 = std.math.inf(f32);
+    // Use the High-codec speed tradeoff so tANS cost pricing matches
+    // production call sites (the default for L9). At `speed_tradeoff = 1.0`
+    // the tANS speed-penalty would exceed the memcpy budget and force
+    // the encoder into memcpy fallback.
+    const cost_coeffs = @import("cost_coefficients.zig");
+    const real_speed_tradeoff = cost_coeffs.speedTradeoffForHigh(cost_coeffs.default_space_speed_tradeoff_bytes);
     const n = try encodeArrayU8(
         testing.allocator,
         &dst,
         &src,
         .{ .allow_tans = true },
-        1.0,
+        real_speed_tradeoff,
         &cost,
         0,
         null,

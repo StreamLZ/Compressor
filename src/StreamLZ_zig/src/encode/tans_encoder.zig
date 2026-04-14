@@ -30,6 +30,7 @@
 const std = @import("std");
 const hist_mod = @import("byte_histogram.zig");
 const bw_mod = @import("../io/bit_writer_64.zig");
+const cost_coeffs = @import("cost_coefficients.zig");
 
 const ByteHistogram = hist_mod.ByteHistogram;
 const BitWriter64Forward = bw_mod.BitWriter64Forward;
@@ -960,9 +961,6 @@ pub fn encodeArrayU8Tans(
     speed_tradeoff: f32,
     cost_out: *f32,
 ) EncodeError!usize {
-    _ = speed_tradeoff; // reserved: C# uses this in TansEncoder to bias the
-    // normalize step + size tradeoff decision. Our current `tansNormalizeCounts`
-    // doesn't yet weight by speed_tradeoff — placeholder for parity.
     if (src.len < 32) return error.TansNotBeneficial;
 
     // Temporarily subtract last 5 bytes from histogram.
@@ -1000,6 +998,33 @@ pub fn encodeArrayU8Tans(
     );
     if (used_symbols <= 1) return error.TooFewSymbols;
 
+    // Speed-adjusted cost estimate. Port of C# `TansEncoder.EncodeArrayU8_tANS`
+    // (TansEncoder.cs:922). The caller seeds `cost_out.*` with the best-known
+    // alternative (typically `memcpy_cost = src.len + 3`); if the speed cost
+    // alone already eats the remaining budget, tANS is not worth attempting.
+    const src_len_minus_5: usize = src.len - 5;
+    const src_len_f: f32 = @floatFromInt(src_len_minus_5);
+    const used_sym_f: f32 = @floatFromInt(used_symbols);
+    const table_entries_f: f32 = @floatFromInt(@as(u32, 1) << @intCast(log_table_bits));
+    const cost: f32 = (cost_coeffs.tans_base +
+        src_len_f * cost_coeffs.tans_per_src_byte +
+        used_sym_f * cost_coeffs.tans_per_used_symbol +
+        table_entries_f * cost_coeffs.tans_per_table_entry) *
+        speed_tradeoff + 5;
+
+    const cost_left_f: f32 = cost_out.* - cost;
+    // Clamp to i32 range so an `inf` budget (test helpers pass `inf` to
+    // mean "always accept") doesn't overflow `@intFromFloat`.
+    const max_i32_f: f32 = @floatFromInt(std.math.maxInt(i32));
+    const min_i32_f: f32 = @floatFromInt(std.math.minInt(i32));
+    const cost_left: i32 = if (cost_left_f >= max_i32_f)
+        std.math.maxInt(i32)
+    else if (cost_left_f <= min_i32_f)
+        std.math.minInt(i32)
+    else
+        @intFromFloat(cost_left_f);
+    if (cost_left < 4) return error.TansNotBeneficial;
+
     // Emit the table into a scratch buffer. We use a separate scratch so
     // the bit writer's 8-byte overshoot stores don't clobber adjacent data.
     var table_buf: [512]u8 = @splat(0);
@@ -1022,7 +1047,10 @@ pub fn encodeArrayU8Tans(
 
     const total_size: usize = table_bytes + payload_bytes;
     if (total_size + 8 > dst.len) return error.DestinationTooSmall;
-    if (total_size >= src.len - 5) return error.TansNotBeneficial;
+    // Mirrors C# `if (totalSize >= costLeft || totalSize + cost >= *costPtr)`:
+    // both conditions must leave headroom vs the caller's budget.
+    if (@as(i32, @intCast(total_size)) >= cost_left) return error.TansNotBeneficial;
+    if (@as(f32, @floatFromInt(total_size)) + cost >= cost_out.*) return error.TansNotBeneficial;
 
     // Encode the body into a scratch buffer sized to the payload plus
     // 48 bytes of slack (16 at each end + 16 for the writers' overshoot
@@ -1055,13 +1083,10 @@ pub fn encodeArrayU8Tans(
     @memcpy(dst[table_bytes..][0..body.backward_bytes], body.backward_start[0..body.backward_bytes]);
     @memcpy(dst[table_bytes + body.backward_bytes ..][0..body.forward_bytes], body.forward_start[0..body.forward_bytes]);
 
-    // Cost for the tANS branch = payload byte count (which is the number
-    // of compressed bytes NOT including the 5-byte non-compact chunk
-    // header the caller writes). Mirrors C# `TansEncoder.EncodeArrayU8_tANS`
-    // which reports `*cost = tansTotalBytes` in the same way. The caller's
-    // `encodeArrayU8Core` compares this against `memcpyCost = src.len + 3`
-    // and picks the cheaper path.
-    cost_out.* = @floatFromInt(total_size);
+    // Mirrors C# `*costPtr = cost + totalSize` — the reported cost is
+    // the speed-adjusted overhead plus the actual encoded byte count, so
+    // the caller's `cost < memcpyCost` check includes both terms.
+    cost_out.* = cost + @as(f32, @floatFromInt(total_size));
     return table_bytes + payload_bytes;
 }
 

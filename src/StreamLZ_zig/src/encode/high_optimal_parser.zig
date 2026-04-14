@@ -473,13 +473,18 @@ pub fn optimal(
     }
 
     var outer_loop_index_mut: u32 = 0;
-    // NOTE: C# tracks a separate scratch area for stats from the previous
-    // chunk (`lzcoder.SymbolStatisticsScratch`). Zig's per-call context is
-    // stateless, so we track it locally here — matches the C# semantics
-    // when the caller only invokes `optimal` once per block (which is
-    // the common path; cross-block stats carry would be step 41 territory).
-    const prev_stats: ?Stats = null;
-    const last_chunk_type: i32 = -1;
+    // Cross-block stats carry: if the caller plumbed a `HighCrossBlockState`,
+    // read the previous block's stats as a seed for `rescaleAddStats`. C#
+    // stores these in `lzcoder.SymbolStatisticsScratch` + `lzcoder.LastChunkType`;
+    // without plumbing this, multi-block streams diverge byte-exact parity.
+    var prev_stats: ?Stats = null;
+    var last_chunk_type: i32 = -1;
+    if (ctx.cross_block) |cb| {
+        if (cb.has_prev) {
+            prev_stats = cb.prev_stats;
+            last_chunk_type = cb.last_chunk_type;
+        }
+    }
 
     // ── Outer loop: re-run up to twice for L8+ ──
     while (true) {
@@ -632,8 +637,12 @@ pub fn optimal(
 
                 var lao_index: usize = 0;
                 while (lao_index < 4) : (lao_index += 1) {
-                    var lao_ml: u32 = @intCast(match_table[4 * pos + lao_index].length);
-                    var lao_offs: u32 = @intCast(match_table[4 * pos + lao_index].offset);
+                    // Matches C# `(uint)matchTable[i].Length` / `(uint)matchTable[i].Offset`:
+                    // bit reinterpretation, not a range-checked cast. The varlen extractor
+                    // may have written a garbage value into the offset slot immediately after
+                    // a length=0 terminator; the break below catches that case safely.
+                    var lao_ml: u32 = @bitCast(match_table[4 * pos + lao_index].length);
+                    var lao_offs: u32 = @bitCast(match_table[4 * pos + lao_index].offset);
                     if (lao_ml < @as(u32, @intCast(min_match_length))) break;
                     const remaining: usize = @intFromPtr(src_end_safe) - @intFromPtr(src_cur);
                     lao_ml = @min(lao_ml, @as(u32, @intCast(remaining)));
@@ -1070,9 +1079,21 @@ pub fn optimal(
 
         // Outer loop: for L8+, when the chosen chunk type disagrees with
         // the cost model's expected chunk type, re-run once with fresh
-        // stats (last_chunk_type = -1). Otherwise break.
-        if (ctx.compression_level < 8 or outer_loop_index_mut != 0 or cost_model.chunk_type == tmp_ct) break;
+        // stats (last_chunk_type = -1). Otherwise break. Matches C#
+        // `if (lzcoder.CompressionLevel < 8 || outerLoopIndex != 0 ||
+        //     costModel.ChunkType == tmpChunkType) { save stats; break; }`.
+        if (ctx.compression_level < 8 or outer_loop_index_mut != 0 or cost_model.chunk_type == tmp_ct) {
+            // Persist this block's stats so the next block can seed
+            // `rescaleAddStats` instead of cold-starting.
+            if (ctx.cross_block) |cb| {
+                cb.prev_stats = stats;
+                cb.last_chunk_type = tmp_ct;
+                cb.has_prev = true;
+            }
+            break;
+        }
 
+        last_chunk_type = -1;
         outer_loop_index_mut = 1;
     }
 
