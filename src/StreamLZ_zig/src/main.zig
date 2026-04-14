@@ -576,6 +576,7 @@ test {
     _ = @import("encode/block_header_writer.zig");
     _ = @import("encode/managed_match_len_storage.zig");
     _ = @import("encode/match_finder.zig");
+    _ = @import("encode/match_finder_bt4.zig");
     _ = @import("encode/high_types.zig");
     _ = @import("encode/high_matcher.zig");
     _ = @import("encode/high_cost_model.zig");
