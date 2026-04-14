@@ -406,3 +406,216 @@ reshuffled in a suboptimal way when the prefetch constraint was removed.
 
 **Disposition:** Reverted. The off32 prefetch was actually helping the
 register allocator find a better allocation by constraining its choices.
+
+---
+
+## Zig L9 decompress micro-optimizations (2026-04-14)
+
+After the big wins (`c_allocator` for token fallback, register-resident
+recent-offset LIFO, 16-byte SIMD literal copies, prefetch-safe + tail
+loop split) brought Zig L9 100MB enwik8 decompress from 868 → 2143 MB/s
+(beating C# 1850 by ~16%), we tried these incremental tweaks looking for
+more. **None of them moved the needle.**
+
+VTune was the tool throughout — Hotspots collection at 1000 Hz,
+function-level CPU breakdown, and source/asm view for register
+allocation analysis.
+
+### ❌ Token cursor refactor
+
+**Change:** Replace `tokens[token_index] = ...; token_index += 1;` with
+`tokens_cur[0] = ...; tokens_cur += 1;` and compute the count via
+pointer subtraction at return. Hypothesis: removes the separate index
+counter that VTune saw spilled to stack as `[rbp]`.
+
+**Result:** ~2111 MB/s mean (vs ~2143 baseline) — **slight regression**
+within noise. VTune disasm showed LLVM **still** spilled an internal
+byte-offset counter to `[rbp]` after the refactor. The compiler's
+canonicalization defeated the source change.
+
+**Lesson:** "use a pointer instead of an index" doesn't translate to
+register-level savings when the function has many other live values.
+The compiler decides where to spill, not the source.
+
+### ❌ SIMD `@shuffle` to pack ros into one XMM (table version)
+
+**Change:** Hold `ro3`, `ro4`, `ro5`, `new_off` in a single
+`@Vector(4, i32)` and do the LIFO shuffle as one `@shuffle` with a
+per-`oi` mask indexed from a comptime table.
+
+**Result:** **Did not compile** — Zig 0.15 requires the `@shuffle` mask
+to be `comptime`-known. Runtime mask indexing is not supported.
+
+### ❌ Comptime PSHUFD switch (4 cases, one mask per case)
+
+**Change:** Workaround for the previous failure: use a 4-case
+`switch (offset_index)` where each case has its own comptime mask:
+```zig
+ro_vec = switch (offset_index) {
+    0 => @shuffle(i32, ro_with_new, undefined, [_]i32{ 0, 1, 2, 0 }),
+    1 => @shuffle(i32, ro_with_new, undefined, [_]i32{ 1, 0, 2, 0 }),
+    2 => @shuffle(i32, ro_with_new, undefined, [_]i32{ 2, 0, 1, 0 }),
+    else => @shuffle(i32, ro_with_new, undefined, [_]i32{ 3, 0, 1, 0 }),
+};
+const picked: i32 = ro_vec[0];
+```
+
+**Result:** ~2039 MB/s mean (vs ~2143 baseline) — **regression of ~5%**.
+Roundtrip valid. The XMM lane extract (`ro_vec[0]`) plus the case
+dispatch overhead (each case is a separate basic block branched into)
+beat out the GPR savings.
+
+**Why:** The 4-case switch over an XMM-producing branch generates
+something close to a jump table on XMM operands. Picking the resulting
+`picked` requires a `MOVD r32, xmm` extract which is ~3-cycle latency.
+Vs the CMOV chain which is ~3-4 cycles of integer dependency. The
+shuffle path adds latency without removing any.
+
+**Lesson:** SIMD only wins when the data flows through the vector unit
+for multiple operations. If you immediately extract back to GPR (as we
+do for `picked`, which then feeds the integer LzToken store), the
+GPR↔XMM transit eats the savings. SIMD shuffles want to stay in the
+vector unit end-to-end.
+
+**Workarounds (not yet tried):**
+- Inline assembly to emit `PSHUFB` directly (escapes Zig's type system,
+  unclear if the integer↔XMM transit can be avoided)
+
+### ❌ Pack `ro4` || `ro5` into a single `u64`
+
+**Change:**
+```zig
+var ro45: u64 = (@as(u64, init_u32) << 32) | @as(u64, init_u32);
+// per iter:
+const ro4: i32 = @bitCast(@as(u32, @truncate(ro45)));
+const ro5: i32 = @bitCast(@as(u32, @truncate(ro45 >> 32)));
+// ... compute next_ro4, next_ro5 ...
+ro45 = (@as(u64, @as(u32, @bitCast(next_ro5))) << 32) |
+       @as(u64, @as(u32, @bitCast(next_ro4)));
+```
+
+Hypothesis: frees one GPR vs three separate i32 locals; the pack/unpack
+via shifts is cheap.
+
+**Result:** ~2121 MB/s mean (vs ~2143 baseline) — **slightly slower**.
+The truncate/shift/or per iteration cost more than the GPR savings.
+The CMOV chain was already working with 3 GPRs without spills, so
+freeing one didn't help downstream.
+
+**Lesson:** Pack-into-wider-int wins only when the loop is genuinely
+register-pressured AND the unpack cost is amortized across many uses.
+Reading each ro once per iteration means the unpack cost happens every
+iteration with no amortization.
+
+### ❌ 2× manual loop unroll for ILP
+
+**Change:** Process two cmd bytes per loop iteration. Each token's body
+kept intact (preserving `len_stream` and `offs_stream` consumption order)
+but two of them per iteration. Hypothesis: the compiler can schedule the
+two independent token bodies at IPC > 1 even though the recent-offset
+LIFO update is serially dependent across iterations.
+
+**Subtle bug on first attempt:** re-ordering `len_stream` reads across
+the two tokens (e.g., reading `spec_long_b` before `aml_a` may have
+advanced `len_stream`) caused `StreamMismatch` errors. Fix: process each
+token's full body before starting the next.
+
+**Result:** ~2055 MB/s mean (vs ~2143 baseline) — **regression of ~4%**.
+Why:
+1. The unrolled body is ~2× larger → falls out of the DSB (decoded uop
+   cache, ~4K uops on Arrow Lake), forced into the legacy decoder.
+2. Doubled register pressure → more spills.
+3. The serial dep chain on the ros wasn't actually breakable — token B's
+   pick still waits on token A's LIFO update.
+
+**Lesson:** Manual unrolling helps when the loop body is small and the
+dep chain is breakable. Ours is complex and serial — the CPU was already
+doing as much OoO scheduling as it could.
+
+### ❌ Bumping `scratch_per_chunk` to fit worst-case token array
+
+**Change:** Increase per-worker scratch from `884 KB` (`scratch_size * 2`)
+to `1.9 MB` (`scratch_size * 2 + 1 MB`) so the token array always fits
+without falling back to the heap. Goal: eliminate the ~4% CPU spent in
+libc `free_base` for the c_allocator fallback path.
+
+**Result:** Total throughput **dropped from ~2143 to ~1985 MB/s (-7%)**.
+VTune showed `executeTokensType1` went from 0.372s → 0.549s (+48%) due
+to **L3 cache misses on the token reads**.
+
+**Why:** scratch is allocated per worker, and we have 24 workers.
+- Old: 24 × 884 KB = **21 MB** → fits comfortably in 36 MB L3
+- New: 24 × 1.9 MB = **46 MB** → **overflows L3 by 28%**
+
+Token reads from each worker's scratch went L3 → DRAM. The cache penalty
+overwhelmed the 4% saved on `free_base`.
+
+**Lesson:** Per-worker memory bumps must be evaluated against
+**total L3** (`worker_count × per_worker_size`), not just per-worker
+L1/L2. On a 24-core system, even 1 MB of per-worker overhead times 24 =
+24 MB which is most of L3.
+
+### Tweaks that compiled but didn't measurably move the needle
+
+These are kept in the code (committed in `2055c2a`) because they make
+the asm cleaner / safer even though wall-time was unchanged within noise:
+
+1. **CMOV-chain rewrite of `switch (offset_index)` for `picked`.** The
+   original compiled to a jump table with `jmp rbx` + a stack spill of
+   one of the ros. The if-chain version emits `cmovb`/`cmovs`/`cmovnb`
+   with no spills. Wall time unchanged because the BTB was predicting
+   the indirect jump well.
+
+2. **Branchless `offs_stream` advance** (`(oi + 1) & 4`). VTune flagged
+   the `if (oi == 3) offs_stream += 1` branch at ~11% of `resolveTokens`.
+   Replacing it with the bitmask advance produced cleaner asm. Wall time
+   unchanged because LLVM was already CMOV-ing the original branch.
+
+3. **`@branchHint(.unlikely / .likely / .cold)`** on the long-literal,
+   long-match, and bounds-check paths. Improved code layout (cold paths
+   moved out of hot region) but no measurable speedup.
+
+4. **`std.debug.assert(offset_index <= 3)`**. Meant to tell LLVM the
+   value is in {0,1,2,3}. LLVM was already inferring this from the
+   `u8 → u32` widening on `cmd_stream[0]`. No measurable change.
+
+### Things tried but not yet proven (worth revisiting)
+
+- **Inline asm `PSHUFB` for ro shuffle**: bypass Zig's `@shuffle`
+  comptime restriction and use SSSE3's runtime byte-shuffle directly.
+  Could free 3 GPRs (ros → 1 XMM register). The expected win is small
+  given the current asm is already CMOV-clean, but worth keeping in
+  mind if more pressure shows up.
+
+- **Two-tier ro storage** (small i16 fast path + i32 escape for large):
+  empirically most LZ offsets in text are < 16 bits. Could pack 3 i16
+  ros into one u64 with a flag bit per slot indicating "this slot needs
+  a separate i32 escape word." Adds complexity. Worth it only if the
+  fast path is taken > 95% of the time.
+
+- **Vectorized cmd_stream parser**: process N command bytes at once
+  with SSE/AVX2 bit ops to extract the lit_len/oi/match_len fields in
+  parallel. Then sequentially apply the LIFO updates. Could give a 2-4×
+  speedup on the decode portion if doable.
+
+- **AVX-512 `VPCOMPRESSD` / mask registers**: would help with branchless
+  variable-length decode. **Not available on Arrow Lake** — Intel
+  disabled AVX-512 on consumer Core Ultra chips (E-cores can't do it).
+  Don't waste time exploring this path on consumer CPUs.
+
+### Cache geometry reference (Intel Core Ultra 9 285K, Arrow Lake-S)
+
+For future scratch-sizing / data-layout decisions:
+
+| Level | Size | Per | Notes |
+|---|---|---|---|
+| L1d | 48 KB | per P-core | 12-way; covers ~768 cache lines |
+| L1i | 32 KB | per P-core | 8-way |
+| L2 | 2.5 MB | per P-core | DSB caches ~4K uops on top of this |
+| L3 | 36 MB | shared by all 24 cores | the per-worker scratch sum lives here |
+| DRAM | 32+ GB | host RAM | hundreds of cycles latency |
+
+**Per-worker scratch budget rule of thumb**: `worker_count × per_worker_size
+≤ L3 / 2` (leaving room for other working sets). For 24 workers and 36 MB
+L3, that's ~750 KB per worker max. The current 884 KB is right at the
+edge; the bumped 1.9 MB blew through it.
