@@ -301,10 +301,15 @@ fn resolveTokens(
         var literal_length: u32 = command_byte & 0x3;
         const offset_index: u32 = command_byte >> 6;
         const match_length: u32 = (command_byte >> 2) & 0xF;
+        // command_byte >> 6 has at most 2 bits, so offset_index ∈ {0,1,2,3}.
+        // Telling LLVM eliminates impossible-case constraints in the
+        // CMOV chain below.
+        std.debug.assert(offset_index <= 3);
 
         // Speculative long-literal decode.
         const speculative_long: u32 = @bitCast(len_stream[0]);
         if (literal_length == 3) {
+            @branchHint(.unlikely);
             literal_length = speculative_long;
             len_stream += 1;
         }
@@ -313,12 +318,15 @@ fn resolveTokens(
         // consume (advance) when oi == 3. Mirrors the C# pattern.
         const new_off: i32 = offs_stream[0];
 
-        const picked: i32 = switch (offset_index) {
-            0 => ro3,
-            1 => ro4,
-            2 => ro5,
-            else => new_off,
-        };
+        // CMOV chain instead of a switch. The original `switch (oi)`
+        // version compiled to a jump table with an indirect `jmp rbx`
+        // and even spilled ro5 to the stack (VTune disasm). This 3-cmp
+        // chain forces the compiler to keep ro3..ro5 in registers and
+        // emit CMOVcc, eliminating the indirect jump.
+        var picked: i32 = ro3;
+        if (offset_index >= 1) picked = ro4;
+        if (offset_index >= 2) picked = ro5;
+        if (offset_index >= 3) picked = new_off;
         // Compute next state without an array store dependency.
         const next_ro4: i32 = if (offset_index == 0) ro4 else ro3;
         const next_ro5: i32 = if (offset_index < 2) ro5 else ro4;
@@ -326,10 +334,17 @@ fn resolveTokens(
         ro4 = next_ro4;
         ro5 = next_ro5;
 
-        if (offset_index == 3) offs_stream += 1;
+        // Branchless offs_stream advance: (oi + 1) & 4 is 0 for oi in
+        // {0,1,2} and 4 (= sizeof(i32)) for oi == 3. Saves the branch
+        // VTune flagged at 11% of resolveTokens. Matches C# pattern.
+        const offs_adv: usize = (@as(usize, offset_index) + 1) & 4;
+        offs_stream = @ptrFromInt(@intFromPtr(offs_stream) + offs_adv);
 
         const actual_match_len: i32 = blk: {
-            if (match_length != 15) break :blk @as(i32, @intCast(match_length + 2));
+            if (match_length != 15) {
+                @branchHint(.likely);
+                break :blk @as(i32, @intCast(match_length + 2));
+            }
             const extra: i32 = len_stream[0];
             len_stream += 1;
             break :blk 14 + extra;
@@ -344,7 +359,10 @@ fn resolveTokens(
         token_index += 1;
 
         dst_pos += @as(i32, @intCast(literal_length)) + actual_match_len;
-        if (dst_pos > dst_size) return error.OutputTruncated;
+        if (dst_pos > dst_size) {
+            @branchHint(.cold);
+            return error.OutputTruncated;
+        }
     }
 
     offs_final_out.* = offs_stream;

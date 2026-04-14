@@ -600,7 +600,12 @@ pub fn decompressCoreTwoPhase(
 
     const cpu_count_raw: usize = std.Thread.getCpuCount() catch 1;
     const batch_size: usize = @max(@as(usize, 1), cpu_count_raw);
-    // Per-chunk scratch: 2 sub-chunks, each needing up to `scratch_size` bytes.
+    // Per-chunk scratch: 2 sub-chunks, each up to `scratch_size` bytes.
+    // Tested bumping this to fit the worst-case token array (1 MB) but
+    // it overflows L2 (2.5 MB per core) → executeTokensType1 went +48%
+    // from L2 misses on the token reads. The 4% CPU we save on the
+    // libc free_base path is way smaller than the cache penalty, so
+    // we keep the heap fallback as the rare-case safety net.
     const scratch_per_chunk: usize = constants.scratch_size * 2;
 
     // Allocate `batch_size` scratches upfront; reused across batches.
