@@ -754,13 +754,30 @@ fn compressFramedHigh(
         .encode_flags = 4, // export_tokens, per C# SetupEncoder line 75
     };
 
+    // Decide thread count up front — used to gate both the SC and
+    // non-SC parallel paths.
+    const num_blocks: usize = if (can_compress) ((src.len + lz_constants.chunk_size - 1) / lz_constants.chunk_size) else 0;
+    const resolved_threads: u32 = blk: {
+        if (opts.num_threads == 1) break :blk 1;
+        if (opts.num_threads > 1) break :blk opts.num_threads;
+        const cpu: u32 = @intCast(std.Thread.getCpuCount() catch 1);
+        break :blk @max(@as(u32, 1), cpu);
+    };
+    const can_parallel_sc: bool =
+        can_compress and
+        self_contained and
+        mapping.codec_level >= 5 and
+        num_blocks > 1 and
+        resolved_threads > 1;
+
     // ── Allocate MLS + run match finder on the whole source ───────────
-    // C# allocates MLS over dictSize + srcSize; for the initial wiring
-    // we pass preload_size=0 and let the optimal parser's SC filter
-    // handle boundary cases when needed.
+    // For SC parallel we skip this — each worker computes a per-group
+    // MLS on its own subset of the source (see compressInternalParallelSc).
+    // The global MLS is only used for: (a) non-SC High optimal parse
+    // (serial or parallel), (b) SC serial, and (c) SC with num_threads=1.
     var mls_opt: ?mls_mod.ManagedMatchLenStorage = null;
     defer if (mls_opt) |*m| m.deinit();
-    if (can_compress and mapping.codec_level >= 5) {
+    if (can_compress and mapping.codec_level >= 5 and !can_parallel_sc) {
         var mls = try mls_mod.ManagedMatchLenStorage.init(allocator, src.len + 1, 8.0);
         mls.window_base_offset = 0;
         mls.round_start_pos = 0;
@@ -783,18 +800,7 @@ fn compressFramedHigh(
     var hasher = try high_compressor.allocateHighHasher(allocator, setup);
     defer hasher.deinit();
 
-    // Decide between serial and parallel block dispatch. Parallel is
-    // valid when: caller allows it (num_threads != 1), we have more
-    // than one block, we have a pre-computed MLS (so workers don't
-    // share the Fast L1-L4 hasher), and not SC (SC has its own
-    // parallel path — step 38).
-    const num_blocks: usize = if (can_compress) ((src.len + lz_constants.chunk_size - 1) / lz_constants.chunk_size) else 0;
-    const resolved_threads: u32 = blk: {
-        if (opts.num_threads == 1) break :blk 1;
-        if (opts.num_threads > 1) break :blk opts.num_threads;
-        const cpu: u32 = @intCast(std.Thread.getCpuCount() catch 1);
-        break :blk @max(@as(u32, 1), cpu);
-    };
+    // Non-SC parallel: requires the global MLS to be present.
     const can_parallel_blocks: bool =
         can_compress and
         num_blocks > 1 and
@@ -802,7 +808,18 @@ fn compressFramedHigh(
         mls_opt != null and
         !self_contained;
 
-    if (can_parallel_blocks) {
+    if (can_parallel_sc) {
+        const written = try compressInternalParallelSc(
+            allocator,
+            src,
+            dst[pos..],
+            &ctx,
+            mapping,
+            sc_flag_bit,
+            resolved_threads,
+        );
+        pos += written;
+    } else if (can_parallel_blocks) {
         const written = try compressBlocksParallel(
             allocator,
             src,
@@ -1218,6 +1235,225 @@ fn compressBlocksParallel(
     // Assemble results into dst_tail in order.
     var dst_pos: usize = 0;
     for (0..num_blocks) |i| {
+        const n = written[i];
+        if (dst_pos + n > dst_tail.len) return error.DestinationTooSmall;
+        @memcpy(dst_tail[dst_pos..][0..n], tmp_bufs[i][0..n]);
+        dst_pos += n;
+    }
+    return dst_pos;
+}
+
+// ────────────────────────────────────────────────────────────
+//  compressInternalParallelSc — SC parallel across chunk groups
+// ────────────────────────────────────────────────────────────
+//
+// Port of C# `StreamLzCompressor.CompressInternalParallelSC` at
+// `StreamLzCompressor.cs:528`. The key difference vs
+// `compressBlocksParallel`: each worker runs its OWN match finder
+// on only its group's `sc_group_size * chunk_size` bytes, so
+// there's no shared global MLS. This is required for SC mode
+// because LZ references must not cross group boundaries — a
+// per-group match finder naturally enforces that (matches found
+// within the group can't exceed the group's bounds).
+//
+// Within a group, chunks are compressed sequentially with a
+// cumulative `group_offset` so cross-chunk references ARE allowed
+// (within the group). Output is assembled chunk-by-chunk into
+// per-chunk tmp buffers then concatenated.
+
+const ScShared = struct {
+    src: []const u8,
+    base_ctx: *const high_encoder.HighEncoderContext,
+    backing_allocator: std.mem.Allocator,
+    mapping: HighMapping,
+    sc_flag_bit: u8,
+    /// Per-chunk result slots (one per 256 KB output chunk).
+    tmp_bufs: []const []u8,
+    written: []usize,
+    /// Work-stealing counter over group indices (not chunk indices).
+    next_group: std.atomic.Value(usize),
+    error_flag: std.atomic.Value(u32),
+    captured_err: std.atomic.Value(u16),
+    num_chunks: usize,
+    num_groups: usize,
+};
+
+fn scWorkerFn(shared: *ScShared) void {
+    var arena = std.heap.ArenaAllocator.init(shared.backing_allocator);
+    defer arena.deinit();
+
+    var worker_ctx = shared.base_ctx.*;
+    worker_ctx.allocator = arena.allocator();
+
+    var hasher: high_compressor.HighHasher = .{ .none = {} };
+    defer hasher.deinit();
+
+    const group_size = lz_constants.sc_group_size;
+
+    while (true) {
+        const g = shared.next_group.fetchAdd(1, .monotonic);
+        if (g >= shared.num_groups) return;
+        if (shared.error_flag.load(.monotonic) != 0) return;
+
+        const first_chunk = g * group_size;
+        const last_chunk = @min(first_chunk + group_size, shared.num_chunks);
+        const chunks_in_group = last_chunk - first_chunk;
+
+        const group_src_off = first_chunk * lz_constants.chunk_size;
+        const group_src_end = @min(group_src_off + chunks_in_group * lz_constants.chunk_size, shared.src.len);
+        const group_src = shared.src[group_src_off..group_src_end];
+
+        // Reset arena once per group so the per-group MLS alloc +
+        // match-finder working set are released before the next group.
+        _ = arena.reset(.retain_capacity);
+
+        // Per-group match finder → MLS rooted at group-relative
+        // positions. This enforces the SC "no cross-group refs"
+        // invariant by construction — matches discovered against
+        // `group_src` can only reach other bytes inside the same
+        // `group_src` slice.
+        var mls = mls_mod.ManagedMatchLenStorage.init(arena.allocator(), group_src.len + 1, 8.0) catch {
+            _ = shared.error_flag.store(1, .monotonic);
+            _ = shared.captured_err.cmpxchgStrong(0, @intFromError(error.OutOfMemory), .monotonic, .monotonic);
+            return;
+        };
+        // No `mls.deinit()` — arena owns the allocation.
+        mls.window_base_offset = 0;
+        mls.round_start_pos = 0;
+
+        const mf_ok = blk: {
+            if (shared.mapping.use_bt4) {
+                match_finder_bt4.findMatchesBT4(arena.allocator(), group_src, &mls, 4, 0, 96) catch |err| {
+                    const code: u16 = @intFromError(err);
+                    _ = shared.captured_err.cmpxchgStrong(0, code, .monotonic, .monotonic);
+                    break :blk false;
+                };
+            } else {
+                match_finder.findMatchesHashBased(arena.allocator(), group_src, &mls, 4, 0) catch |err| {
+                    const code: u16 = @intFromError(err);
+                    _ = shared.captured_err.cmpxchgStrong(0, code, .monotonic, .monotonic);
+                    break :blk false;
+                };
+            }
+            break :blk true;
+        };
+        if (!mf_ok) {
+            _ = shared.error_flag.store(1, .monotonic);
+            return;
+        }
+
+        // Compress each chunk in the group sequentially. The shared
+        // source slice view lets `compressOneHighBlock` compute offsets
+        // into `group_src` via `(src_off + sub_off) % sc_group_bytes`,
+        // but because we're passing `group_src` (not `shared.src`) as
+        // the source buffer, the % reduces to `src_off + sub_off`
+        // within the group — same effect.
+        var ci: usize = 0;
+        while (ci < chunks_in_group) : (ci += 1) {
+            const chunk_idx = first_chunk + ci;
+            const in_group_src_off = ci * lz_constants.chunk_size;
+            const block_src_len = @min(group_src.len - in_group_src_off, lz_constants.chunk_size);
+            // First chunk in every group is a keyframe (SC contract).
+            const keyframe = true;
+
+            const n_or_err = compressOneHighBlock(
+                &worker_ctx,
+                &hasher,
+                &mls,
+                group_src,
+                in_group_src_off,
+                block_src_len,
+                shared.tmp_bufs[chunk_idx],
+                true, // self_contained
+                shared.sc_flag_bit,
+                keyframe,
+            );
+            if (n_or_err) |n| {
+                shared.written[chunk_idx] = n;
+            } else |err| {
+                const code: u16 = @intFromError(err);
+                _ = shared.captured_err.cmpxchgStrong(0, code, .monotonic, .monotonic);
+                _ = shared.error_flag.store(1, .monotonic);
+                return;
+            }
+        }
+    }
+}
+
+fn compressInternalParallelSc(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+    dst_tail: []u8,
+    ctx: *const high_encoder.HighEncoderContext,
+    mapping: HighMapping,
+    sc_flag_bit: u8,
+    num_threads: u32,
+) CompressError!usize {
+    const num_chunks: usize = (src.len + lz_constants.chunk_size - 1) / lz_constants.chunk_size;
+    const group_size = lz_constants.sc_group_size;
+    const num_groups: usize = (num_chunks + group_size - 1) / group_size;
+
+    // Per-chunk tmp buffers sized to compressBound(block_src_len).
+    const tmp_bufs = try allocator.alloc([]u8, num_chunks);
+    defer {
+        for (tmp_bufs) |b| if (b.len != 0) allocator.free(b);
+        allocator.free(tmp_bufs);
+    }
+    for (tmp_bufs) |*b| b.* = &[_]u8{};
+    for (tmp_bufs, 0..) |*b, i| {
+        const src_off = i * lz_constants.chunk_size;
+        const block_src_len = @min(src.len - src_off, lz_constants.chunk_size);
+        b.* = try allocator.alloc(u8, compressBound(block_src_len));
+    }
+
+    const written = try allocator.alloc(usize, num_chunks);
+    defer allocator.free(written);
+    @memset(written, 0);
+
+    var shared: ScShared = .{
+        .src = src,
+        .base_ctx = ctx,
+        .backing_allocator = allocator,
+        .mapping = mapping,
+        .sc_flag_bit = sc_flag_bit,
+        .tmp_bufs = tmp_bufs,
+        .written = written,
+        .next_group = std.atomic.Value(usize).init(0),
+        .error_flag = std.atomic.Value(u32).init(0),
+        .captured_err = std.atomic.Value(u16).init(0),
+        .num_chunks = num_chunks,
+        .num_groups = num_groups,
+    };
+
+    const worker_count: usize = @min(@as(usize, num_threads), num_groups);
+    if (worker_count == 1) {
+        scWorkerFn(&shared);
+    } else {
+        const threads = try allocator.alloc(std.Thread, worker_count);
+        defer allocator.free(threads);
+        var spawned: usize = 0;
+        while (spawned < worker_count) : (spawned += 1) {
+            threads[spawned] = std.Thread.spawn(.{}, scWorkerFn, .{&shared}) catch |err| {
+                for (threads[0..spawned]) |t| t.join();
+                return err;
+            };
+        }
+        for (threads) |t| t.join();
+    }
+
+    if (shared.error_flag.load(.monotonic) != 0) {
+        const code = shared.captured_err.load(.monotonic);
+        if (code != 0) {
+            const any_err: anyerror = @errorFromInt(code);
+            const narrow: CompressError = @errorCast(any_err);
+            return narrow;
+        }
+        return error.DestinationTooSmall;
+    }
+
+    // Assemble chunk results into dst_tail.
+    var dst_pos: usize = 0;
+    for (0..num_chunks) |i| {
         const n = written[i];
         if (dst_pos + n > dst_tail.len) return error.DestinationTooSmall;
         @memcpy(dst_tail[dst_pos..][0..n], tmp_bufs[i][0..n]);
@@ -1737,5 +1973,48 @@ test "compressBlocksParallel: single-thread override matches serial (L9 384 KB)"
     var i: usize = 0;
     while (i < src.len) : (i += 1) src[i] = p[i % p.len];
     try roundtripParallel(&src, 9, 1);
+}
+
+// ────────────────────────────────────────────────────────────
+//  Phase 14 step 38 — CompressInternalParallelSC tests
+// ────────────────────────────────────────────────────────────
+
+test "compressInternalParallelSc: L6 2 MB (2 SC groups, 2 threads)" {
+    // 2 MB = 8 chunks = 2 full SC groups. Each worker runs its own
+    // per-group match finder and compresses the group's 4 chunks
+    // sequentially with group-relative offsets.
+    var src: [2 * 1024 * 1024]u8 = undefined;
+    const p = "The quick brown fox jumps over a lazy dog. ";
+    var i: usize = 0;
+    while (i < src.len) : (i += 1) src[i] = p[i % p.len];
+    try roundtripParallel(&src, 6, 2);
+}
+
+test "compressInternalParallelSc: L7 1 MB (1 SC group, 1 worker)" {
+    // 1 MB = 4 chunks = 1 full SC group. Worker-count resolves to
+    // 1 because num_groups = 1, so this exercises the single-worker
+    // fast path inside the SC parallel dispatch.
+    var src: [1024 * 1024]u8 = undefined;
+    for (&src, 0..) |*b, i| b.* = @intCast('A' + (i % 26));
+    try roundtripParallel(&src, 7, 4);
+}
+
+test "compressInternalParallelSc: L8 2 MB (SC + BT4, 2 groups, 2 threads)" {
+    // L8 → BT4 match finder (codec_level=9). Verifies the per-worker
+    // BT4 path gives the same byte-exact output that the serial path
+    // would via the serial decoder.
+    var src: [2 * 1024 * 1024]u8 = undefined;
+    for (&src, 0..) |*b, i| b.* = @intCast('A' + (i % 26));
+    try roundtripParallel(&src, 8, 2);
+}
+
+test "compressInternalParallelSc: L6 384 KB (partial last group)" {
+    // 384 KB = 1.5 chunks = 2 chunks → 1 group with only 2 chunks.
+    // Exercises the chunks_in_group < group_size tail path.
+    var src: [384 * 1024]u8 = undefined;
+    const p = "The quick brown fox jumps over a lazy dog. ";
+    var i: usize = 0;
+    while (i < src.len) : (i += 1) src[i] = p[i % p.len];
+    try roundtripParallel(&src, 6, 2);
 }
 
