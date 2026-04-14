@@ -250,9 +250,16 @@ pub fn compressFramed(
     dst: []u8,
     opts: Options,
 ) CompressError!usize {
-    if (opts.level < 1 or opts.level > 5) return error.BadLevel;
+    if (opts.level < 1 or opts.level > 11) return error.BadLevel;
     const min_dst = compressBound(src.len);
     if (dst.len < min_dst) return error.DestinationTooSmall;
+
+    // Levels 6-11 use the High codec (optimal parser + hash-based /
+    // BT4 match finder). Fork here so the Fast path below stays
+    // byte-exact with C# for L1-L5.
+    if (opts.level >= 6) {
+        return compressFramedHigh(allocator, src, dst, opts);
+    }
 
     // ── Frame header ────────────────────────────────────────────────────
     //
@@ -659,6 +666,274 @@ pub fn compressFramed(
 }
 
 // ────────────────────────────────────────────────────────────
+//  High codec (levels 6-11)
+// ────────────────────────────────────────────────────────────
+
+const high_compressor = @import("high_compressor.zig");
+const high_encoder = @import("high_encoder.zig");
+const match_finder = @import("match_finder.zig");
+const match_finder_bt4 = @import("match_finder_bt4.zig");
+const mls_mod = @import("managed_match_len_storage.zig");
+
+/// Unified-to-codec-level mapping for the High codec path. Mirrors
+/// C# `Slz.MapLevel` for unified levels 6-11.
+const HighMapping = struct {
+    codec_level: i32,
+    self_contained: bool,
+    use_bt4: bool,
+};
+
+fn mapHighLevel(user_level: u8) HighMapping {
+    return switch (user_level) {
+        6 => .{ .codec_level = 5, .self_contained = true, .use_bt4 = false },
+        7 => .{ .codec_level = 7, .self_contained = true, .use_bt4 = false },
+        8 => .{ .codec_level = 9, .self_contained = true, .use_bt4 = true },
+        9 => .{ .codec_level = 5, .self_contained = false, .use_bt4 = false },
+        10 => .{ .codec_level = 7, .self_contained = false, .use_bt4 = false },
+        11 => .{ .codec_level = 9, .self_contained = false, .use_bt4 = true },
+        else => unreachable,
+    };
+}
+
+/// Port of the High-codec slice of `StreamLzCompressor.Compress` /
+/// `CompressBlocksSerial` / `CompressOneBlock` / `CompressChunk`.
+/// Initial scope: serial, no SC prefix table emission (treats L6-L8
+/// as non-SC for now). Full SC parity layers on in a follow-up.
+fn compressFramedHigh(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+    dst: []u8,
+    opts: Options,
+) CompressError!usize {
+    const mapping = mapHighLevel(opts.level);
+
+    // ── Frame header ────────────────────────────────────────────────────
+    var pos: usize = 0;
+    const hdr_len = try frame.writeHeader(dst, .{
+        .codec = .high,
+        .level = @intCast(mapping.codec_level),
+        .block_size = opts.block_size,
+        .content_size = if (opts.include_content_size) @as(u64, @intCast(src.len)) else null,
+    });
+    pos += hdr_len;
+
+    if (src.len == 0) {
+        if (pos + 4 > dst.len) return error.DestinationTooSmall;
+        frame.writeEndMark(dst[pos..]);
+        return pos + 4;
+    }
+
+    // ── Frame block header placeholder ─────────────────────────────────
+    const frame_block_hdr_pos: usize = pos;
+    pos += 8;
+    const frame_block_start: usize = pos;
+
+    const can_compress = src.len > fast_constants.min_source_length;
+
+    // ── High encoder context ───────────────────────────────────────────
+    // L5+ enables `export_tokens`. Entropy options per C# SetupEncoder:
+    // start at 0xFF & ~MultiArrayAdvanced, then re-enable MultiArrayAdvanced
+    // when level >= 7.
+    var entropy_raw: u8 = 0xFF & ~@as(u8, 0b0100_0000); // clear MultiArrayAdvanced
+    if (mapping.codec_level >= 7) entropy_raw |= 0b0100_0000;
+    const ctx: high_encoder.HighEncoderContext = .{
+        .allocator = allocator,
+        .compression_level = mapping.codec_level,
+        .speed_tradeoff = cost_coeffs.speedTradeoffFor(
+            cost_coeffs.default_space_speed_tradeoff_bytes,
+            true,
+        ),
+        .entropy_options = @bitCast(entropy_raw),
+        .encode_flags = 4, // export_tokens, per C# SetupEncoder line 75
+    };
+
+    // ── Allocate MLS + run match finder on the whole source ───────────
+    // C# allocates MLS over dictSize + srcSize; for the initial wiring
+    // we pass preload_size=0 and let the optimal parser's SC filter
+    // handle boundary cases when needed.
+    var mls_opt: ?mls_mod.ManagedMatchLenStorage = null;
+    defer if (mls_opt) |*m| m.deinit();
+    if (can_compress and mapping.codec_level >= 5) {
+        var mls = try mls_mod.ManagedMatchLenStorage.init(allocator, src.len + 1, 8.0);
+        mls.window_base_offset = 0;
+        mls.round_start_pos = 0;
+        if (mapping.use_bt4) {
+            try match_finder_bt4.findMatchesBT4(allocator, src, &mls, 4, 0, 128);
+        } else {
+            try match_finder.findMatchesHashBased(allocator, src, &mls, 4, 0);
+        }
+        mls_opt = mls;
+    }
+
+    // Optional hasher for L1-L4. None for L5+.
+    const setup = high_compressor.setupEncoder(
+        mapping.codec_level,
+        src.len,
+        opts.hash_bits,
+        256,
+        opts.min_match_length,
+    );
+    var hasher = try high_compressor.allocateHighHasher(allocator, setup);
+    defer hasher.deinit();
+
+    var src_off: usize = 0;
+    while (can_compress and src_off < src.len) {
+        const block_src_len: usize = @min(src.len - src_off, lz_constants.chunk_size);
+        const block_src: []const u8 = src[src_off..][0..block_src_len];
+
+        const block_start: usize = pos;
+        const keyframe = src_off == 0;
+
+        // 2-byte block header (compressed, codec=high)
+        if (pos + 2 > dst.len) return error.DestinationTooSmall;
+        var flags0: u8 = 0x05;
+        if (keyframe) flags0 |= 0x40;
+        dst[pos] = flags0;
+        dst[pos + 1] = @intFromEnum(block_header.CodecType.high);
+        pos += 2;
+
+        if (areAllBytesEqual(block_src)) {
+            if (pos + 4 + 1 > dst.len) return error.DestinationTooSmall;
+            const memset_hdr: u32 = lz_constants.chunk_size_mask | (@as(u32, 1) << lz_constants.chunk_type_shift);
+            std.mem.writeInt(u32, dst[pos..][0..4], memset_hdr, .little);
+            pos += 4;
+            dst[pos] = block_src[0];
+            pos += 1;
+            src_off += block_src_len;
+            continue;
+        }
+
+        // 4-byte chunk header placeholder
+        if (pos + 4 > dst.len) return error.DestinationTooSmall;
+        const chunk_hdr_pos: usize = pos;
+        pos += 4;
+        const chunk_payload_start: usize = pos;
+
+        var total_cost: f32 = 0;
+        var sub_off: usize = 0;
+
+        while (sub_off < block_src_len) {
+            const round_bytes: usize = @min(block_src_len - sub_off, high_compressor.sub_chunk_size);
+            const sub_src: []const u8 = src[src_off + sub_off ..][0..round_bytes];
+
+            const round_f: f32 = @floatFromInt(round_bytes);
+            const sub_memset_cost: f32 =
+                (round_f * cost_coeffs.memset_per_byte + cost_coeffs.memset_base) *
+                ctx.speed_tradeoff +
+                round_f + 3.0;
+
+            var lz_chose = false;
+            if (round_bytes >= 32 and !areAllBytesEqual(sub_src)) {
+                const sub_hdr_pos: usize = pos;
+                pos += 3;
+                const sub_payload_start: usize = pos;
+                const start_position_for_sub: usize = src_off + sub_off;
+
+                var chunk_type: i32 = -1;
+                var lz_cost: f32 = std.math.inf(f32);
+                const mls_ptr: ?*const mls_mod.ManagedMatchLenStorage = if (mls_opt) |*m| m else null;
+                const n_or_err = high_compressor.doCompress(
+                    &ctx,
+                    &hasher,
+                    mls_ptr,
+                    sub_src.ptr,
+                    @intCast(round_bytes),
+                    dst[sub_payload_start..].ptr,
+                    dst[sub_payload_start..][sub_payload_start + round_bytes - sub_payload_start ..].ptr,
+                    @intCast(start_position_for_sub),
+                    &chunk_type,
+                    &lz_cost,
+                );
+
+                if (n_or_err) |n| {
+                    const total_lz_cost = lz_cost + 3.0;
+                    const lz_wins = total_lz_cost < sub_memset_cost and n > 0 and n < round_bytes;
+                    if (lz_wins) {
+                        const hdr: u32 = @as(u32, @intCast(n)) |
+                            (@as(u32, @intCast(chunk_type)) << lz_constants.sub_chunk_type_shift) |
+                            lz_constants.chunk_header_compressed_flag;
+                        dst[sub_hdr_pos + 0] = @intCast((hdr >> 16) & 0xFF);
+                        dst[sub_hdr_pos + 1] = @intCast((hdr >> 8) & 0xFF);
+                        dst[sub_hdr_pos + 2] = @intCast(hdr & 0xFF);
+                        pos = sub_payload_start + n;
+                        total_cost += total_lz_cost;
+                        lz_chose = true;
+                    } else {
+                        pos = sub_hdr_pos;
+                    }
+                } else |_| {
+                    pos = sub_hdr_pos;
+                }
+            }
+
+            if (!lz_chose) {
+                if (pos + 3 + round_bytes > dst.len) return error.DestinationTooSmall;
+                const hdr: u32 = @as(u32, @intCast(round_bytes)) | lz_constants.chunk_header_compressed_flag;
+                dst[pos + 0] = @intCast((hdr >> 16) & 0xFF);
+                dst[pos + 1] = @intCast((hdr >> 8) & 0xFF);
+                dst[pos + 2] = @intCast(round_bytes & 0xFF);
+                @memcpy(dst[pos + 3 ..][0..round_bytes], sub_src);
+                pos += 3 + round_bytes;
+                total_cost += sub_memset_cost;
+            }
+
+            sub_off += round_bytes;
+        }
+
+        const chunk_compressed_size: usize = pos - chunk_payload_start;
+        const block_f: f32 = @floatFromInt(block_src_len);
+        const block_memset_cost: f32 =
+            (block_f * cost_coeffs.memset_per_byte + cost_coeffs.memset_base) *
+            ctx.speed_tradeoff +
+            block_f + 4.0;
+        const should_bail = chunk_compressed_size >= block_src_len or total_cost > block_memset_cost;
+        if (should_bail) {
+            pos = block_start;
+            if (pos + 2 + block_src_len > dst.len) return error.DestinationTooSmall;
+            var unc_flags0: u8 = 0x05 | 0x80;
+            if (keyframe) unc_flags0 |= 0x40;
+            dst[pos] = unc_flags0;
+            dst[pos + 1] = @intFromEnum(block_header.CodecType.high);
+            pos += 2;
+            @memcpy(dst[pos..][0..block_src_len], block_src);
+            pos += block_src_len;
+        } else {
+            const raw: u32 = @intCast(chunk_compressed_size - 1);
+            std.mem.writeInt(u32, dst[chunk_hdr_pos..][0..4], raw, .little);
+        }
+
+        src_off += block_src_len;
+    }
+
+    // Frame block fallback: if compressed total didn't beat uncompressed,
+    // rewrite the frame block as one uncompressed frame block.
+    const frame_block_compressed_size = pos - frame_block_start;
+    if (!can_compress or frame_block_compressed_size >= src.len) {
+        pos = frame_block_start;
+        if (pos + src.len > dst.len) return error.DestinationTooSmall;
+        frame.writeBlockHeader(dst[frame_block_hdr_pos..], .{
+            .compressed_size = @intCast(src.len),
+            .decompressed_size = @intCast(src.len),
+            .uncompressed = true,
+        });
+        @memcpy(dst[pos..][0..src.len], src);
+        pos += src.len;
+    } else {
+        frame.writeBlockHeader(dst[frame_block_hdr_pos..], .{
+            .compressed_size = @intCast(frame_block_compressed_size),
+            .decompressed_size = @intCast(src.len),
+            .uncompressed = false,
+        });
+    }
+
+    // End mark.
+    if (pos + 4 > dst.len) return error.DestinationTooSmall;
+    frame.writeEndMark(dst[pos..]);
+    pos += 4;
+    return pos;
+}
+
+// ────────────────────────────────────────────────────────────
 //  Tests
 // ────────────────────────────────────────────────────────────
 
@@ -687,6 +962,20 @@ test "compressFramed L1 roundtrip: tiny input stored uncompressed" {
     const src = "Hello, world!\n";
     try roundtrip(src, 1);
 }
+
+test "compressFramedHigh L6 roundtrip: tiny input (uncompressed fallback)" {
+    // Tiny inputs hit the can_compress=false path and round-trip via the
+    // frame's raw block fallback. This exercises the High dispatch wiring
+    // without invoking the actual High encoder.
+    const src = "Hello, world!\n";
+    try roundtrip(src, 6);
+}
+
+// NOTE: compressed-output roundtrips for L9/L11 are currently broken.
+// The encoder produces bytes that the decoder rejects with an integer
+// overflow in `readDistanceCore` — byte-exactness between the High
+// encoder's `assembleCompressedOutput` offset-stream emission and the
+// decoder's offset reader needs debugging. Tracked as "step 34 part 2".
 
 test "compressFramed L1 roundtrip: 4 KB repeating pattern" {
     var src: [4096]u8 = undefined;

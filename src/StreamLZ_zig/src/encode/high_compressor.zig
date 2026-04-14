@@ -22,6 +22,9 @@
 const std = @import("std");
 const lz_constants = @import("../format/streamlz_constants.zig");
 const high_types = @import("high_types.zig");
+const high_encoder = @import("high_encoder.zig");
+const high_fast_parser = @import("high_fast_parser.zig");
+const high_optimal_parser = @import("high_optimal_parser.zig");
 const match_hasher = @import("match_hasher.zig");
 const mls_mod = @import("managed_match_len_storage.zig");
 const entropy_enc = @import("entropy_encoder.zig");
@@ -189,6 +192,170 @@ fn computeHashBits(
     const lo: u32 = if (level >= 3) min_high_level_bits else min_low_level_bits;
     const hi: u32 = if (level >= 5) max_high_level_bits else if (level >= 3) min_high_level_bits else max_low_level_bits;
     return std.math.clamp(bits, lo, hi);
+}
+
+// ────────────────────────────────────────────────────────────
+//  doCompress — High-codec compression entry point
+// ────────────────────────────────────────────────────────────
+
+const MatchHasher1 = match_hasher.MatchHasher(1, false);
+const MatchHasher2x = match_hasher.MatchHasher(2, false);
+const MatchHasher4 = match_hasher.MatchHasher(4, false);
+const MatchHasher4Dual = match_hasher.MatchHasher(4, true);
+
+/// Tagged union holding an allocated hasher for a specific High level.
+/// Levels 1-4 consume one of these; L5+ uses the shared MLS.
+pub const HighHasher = union(enum) {
+    none: void,
+    h1: MatchHasher1,
+    h2x: MatchHasher2x,
+    h4: MatchHasher4,
+    h4_dual: MatchHasher4Dual,
+
+    pub fn deinit(self: *HighHasher) void {
+        switch (self.*) {
+            .none => {},
+            .h1 => |*h| h.deinit(),
+            .h2x => |*h| h.deinit(),
+            .h4 => |*h| h.deinit(),
+            .h4_dual => |*h| h.deinit(),
+        }
+        self.* = .{ .none = {} };
+    }
+
+    pub fn reset(self: *HighHasher) void {
+        switch (self.*) {
+            .none => {},
+            .h1 => |*h| h.reset(),
+            .h2x => |*h| h.reset(),
+            .h4 => |*h| h.reset(),
+            .h4_dual => |*h| h.reset(),
+        }
+    }
+};
+
+/// Allocates the hasher required by the High codec at the given codec
+/// level. Returns `.none` for levels ≥ 5 (which use pre-computed MLS
+/// instead). Caller owns `out.*` and must call `out.deinit`.
+pub fn allocateHighHasher(
+    allocator: std.mem.Allocator,
+    setup: HighSetup,
+) !HighHasher {
+    if (setup.level >= 5) return .{ .none = {} };
+    const bits: u6 = @intCast(setup.hash_bits);
+    const mml: u32 = @max(setup.min_match_length, 4);
+    return switch (setup.hasher_type) {
+        .hasher1 => .{ .h1 = try MatchHasher1.init(allocator, bits, mml) },
+        .hasher2x => .{ .h2x = try MatchHasher2x.init(allocator, bits, mml) },
+        .hasher4 => .{ .h4 = try MatchHasher4.init(allocator, bits, mml) },
+        .hasher4_dual => .{ .h4_dual = try MatchHasher4Dual.init(allocator, bits, mml) },
+        .none => .{ .none = {} },
+    };
+}
+
+/// Per-level lazy-step count, matching C# `High.Compressor.DoCompress`.
+fn numLazyFor(level: i32) u32 {
+    return switch (level) {
+        1, 2 => 0,
+        3 => 1,
+        4 => 2,
+        else => 0,
+    };
+}
+
+/// Main High compression entry point. Port of C#
+/// `High.Compressor.DoCompress` (`Compressor.cs:21-46`).
+///
+/// `mls` may be `null` for levels ≤ 4 (Fast parser uses the hasher);
+/// levels ≥ 5 expect a pre-populated `ManagedMatchLenStorage`.
+pub fn doCompress(
+    ctx: *const high_encoder.HighEncoderContext,
+    hasher: *HighHasher,
+    mls: ?*const mls_mod.ManagedMatchLenStorage,
+    src: [*]const u8,
+    src_size: i32,
+    dst: [*]u8,
+    dst_end: [*]u8,
+    start_pos: i32,
+    chunk_type_out: *i32,
+    cost_out: *f32,
+) !usize {
+    if (ctx.compression_level >= 5) {
+        return high_optimal_parser.optimal(
+            ctx,
+            .{},
+            mls,
+            src,
+            src_size,
+            dst,
+            dst_end,
+            start_pos,
+            chunk_type_out,
+            cost_out,
+        );
+    }
+
+    const num_lazy = numLazyFor(ctx.compression_level);
+    const opts: high_fast_parser.FastParserOptions = .{};
+    return switch (hasher.*) {
+        .h1 => |*h| try high_fast_parser.compressFast(
+            MatchHasher1,
+            ctx,
+            h,
+            src,
+            src_size,
+            dst,
+            dst_end,
+            start_pos,
+            num_lazy,
+            opts,
+            cost_out,
+            chunk_type_out,
+        ),
+        .h2x => |*h| try high_fast_parser.compressFast(
+            MatchHasher2x,
+            ctx,
+            h,
+            src,
+            src_size,
+            dst,
+            dst_end,
+            start_pos,
+            num_lazy,
+            opts,
+            cost_out,
+            chunk_type_out,
+        ),
+        .h4 => |*h| try high_fast_parser.compressFast(
+            MatchHasher4,
+            ctx,
+            h,
+            src,
+            src_size,
+            dst,
+            dst_end,
+            start_pos,
+            num_lazy,
+            opts,
+            cost_out,
+            chunk_type_out,
+        ),
+        .h4_dual => |*h| try high_fast_parser.compressFast(
+            MatchHasher4Dual,
+            ctx,
+            h,
+            src,
+            src_size,
+            dst,
+            dst_end,
+            start_pos,
+            num_lazy,
+            opts,
+            cost_out,
+            chunk_type_out,
+        ),
+        .none => error.BailOut,
+    };
 }
 
 // ────────────────────────────────────────────────────────────
