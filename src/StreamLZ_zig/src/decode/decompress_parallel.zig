@@ -305,6 +305,7 @@ fn decodeOneChunk(
 /// on success.
 pub fn decompressCoreParallel(
     allocator: std.mem.Allocator,
+    pool_opt: ?*std.Thread.Pool,
     block_src: []const u8,
     dst: []u8,
     dst_off_inout: *usize,
@@ -355,17 +356,26 @@ pub fn decompressCoreParallel(
         .captured_err = std.atomic.Value(u16).init(0),
     };
 
-    // Fast path: single worker. Skip thread spawn entirely.
+    // Fast path: single worker. Skip pool dispatch entirely.
     if (worker_count == 1) {
         workerFn(&shared, scratches[0]);
+    } else if (pool_opt) |pool| {
+        // Pool path: persistent thread pool reused across frame blocks.
+        // Avoids std.Thread.spawn syscall + new OS thread per call.
+        var wg: std.Thread.WaitGroup = .{};
+        for (0..worker_count) |i| {
+            pool.spawnWg(&wg, workerFn, .{ &shared, scratches[i] });
+        }
+        pool.waitAndWork(&wg);
     } else {
+        // Fallback: spawn one-shot threads (used when caller didn't
+        // hand us a pool — currently only the test path).
         const threads = try allocator.alloc(std.Thread, worker_count);
         defer allocator.free(threads);
 
         var spawned: usize = 0;
         while (spawned < worker_count) : (spawned += 1) {
             threads[spawned] = std.Thread.spawn(.{}, workerFn, .{ &shared, scratches[spawned] }) catch |err| {
-                // Spawn failed — join any we did spawn and propagate.
                 for (threads[0..spawned]) |t| t.join();
                 return err;
             };
@@ -568,6 +578,7 @@ fn tpPhase1OneChunk(
 /// back to the serial path.
 pub fn decompressCoreTwoPhase(
     allocator: std.mem.Allocator,
+    pool_opt: ?*std.Thread.Pool,
     block_src: []const u8,
     dst: []u8,
     dst_off_inout: *usize,
@@ -604,6 +615,7 @@ pub fn decompressCoreTwoPhase(
     const phase1_results = try allocator.alloc(high.ChunkPhase1Result, batch_size);
     defer allocator.free(phase1_results);
 
+    // One-shot thread fallback only used when no pool is provided.
     const threads = try allocator.alloc(std.Thread, batch_size);
     defer allocator.free(threads);
 
@@ -632,7 +644,16 @@ pub fn decompressCoreTwoPhase(
         // Phase 2: parallel entropy decode.
         if (batch_count == 1) {
             tpWorkerFn(&shared);
+        } else if (pool_opt) |pool| {
+            // Persistent pool: no thread spawn cost per batch.
+            const worker_count: usize = @min(batch_count, batch_size);
+            var wg: std.Thread.WaitGroup = .{};
+            for (0..worker_count) |_| {
+                pool.spawnWg(&wg, tpWorkerFn, .{&shared});
+            }
+            pool.waitAndWork(&wg);
         } else {
+            // Fallback: one-shot thread spawn per batch (test path).
             const worker_count: usize = @min(batch_count, batch_size);
             var spawned: usize = 0;
             while (spawned < worker_count) : (spawned += 1) {

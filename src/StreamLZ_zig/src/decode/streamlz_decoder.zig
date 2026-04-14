@@ -60,6 +60,25 @@ fn decompressFramedInner(
 ) DecompressError!usize {
     if (src.len == 0) return 0;
 
+    // Init a thread pool ONCE for the whole decompression call. Persists
+    // across multi-piece frames and across all batches inside one frame
+    // block. Without this, the two-phase L9-L11 path was paying a
+    // std.Thread.spawn syscall per batch (~17 batches for 100 MB L9),
+    // which dominated total decode time and blocked scaling.
+    var pool_storage: std.Thread.Pool = undefined;
+    var pool_inited: bool = false;
+    var pool_opt: ?*std.Thread.Pool = null;
+    if (allocator_opt) |alloc| {
+        if (pool_storage.init(.{ .allocator = alloc })) |_| {
+            pool_inited = true;
+            pool_opt = &pool_storage;
+        } else |_| {
+            // Init failure → fall back to one-shot spawn path inside
+            // the parallel cores.
+        }
+    }
+    defer if (pool_inited) pool_storage.deinit();
+
     // Multi-piece support: the encoder's `compressFramed` retry
     // ladder (step 39) emits concatenated SLZ1 frames when the
     // single-shot path OOMs. Loop over pieces, decoding each
@@ -70,7 +89,7 @@ fn decompressFramedInner(
     while (src_pos < src.len) {
         const piece_src = src[src_pos..];
         const piece_dst = dst[dst_off..];
-        const pair = try decompressOneFrame(allocator_opt, piece_src, piece_dst);
+        const pair = try decompressOneFrame(allocator_opt, pool_opt, piece_src, piece_dst);
         src_pos += pair.src_consumed;
         dst_off += pair.dst_written;
         if (pair.src_consumed == 0) break;
@@ -82,6 +101,7 @@ const FrameResult = struct { src_consumed: usize, dst_written: usize };
 
 fn decompressOneFrame(
     allocator_opt: ?std.mem.Allocator,
+    pool_opt: ?*std.Thread.Pool,
     src: []const u8,
     dst: []u8,
 ) DecompressError!FrameResult {
@@ -142,6 +162,7 @@ fn decompressOneFrame(
                     if (ph.self_contained and has_many_chunks) {
                         try parallel.decompressCoreParallel(
                             allocator,
+                            pool_opt,
                             block_src,
                             dst,
                             &dst_off,
@@ -151,6 +172,7 @@ fn decompressOneFrame(
                     } else if (ph.decoder_type == .high and has_many_chunks) {
                         const ok = try parallel.decompressCoreTwoPhase(
                             allocator,
+                            pool_opt,
                             block_src,
                             dst,
                             &dst_off,
