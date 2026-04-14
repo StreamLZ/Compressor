@@ -345,6 +345,167 @@ pub fn readLzTable(
 }
 
 // ────────────────────────────────────────────────────────────
+//  Two-phase decode support — Phase 1 (entropy decode only)
+// ────────────────────────────────────────────────────────────
+
+/// Per-sub-chunk result recorded by `phase1ProcessChunk`. Phase 2
+/// (the caller's serial ProcessLzRuns loop) consumes this to replay
+/// the match stream into the output buffer.
+pub const SubChunkPhase1Result = struct {
+    mode: u32,
+    dst_offset: usize,
+    dst_size: usize,
+    is_lz: bool,
+    /// Pointer to the `HighLzTable` that `readLzTable` populated for
+    /// this sub-chunk. Only valid when `is_lz` is true. The table
+    /// itself lives inside the per-sub-chunk scratch region — the
+    /// caller must keep that scratch alive until phase 2 runs.
+    lz_table: ?*HighLzTable = null,
+    /// Scratch bounds for this sub-chunk so phase 2 can pass them to
+    /// `processLzRuns` with the correct free-region pointer.
+    scratch_free: [*]u8 = undefined,
+    scratch_end: [*]u8 = undefined,
+};
+
+/// Per-chunk result for two-phase decode. Sub-chunks are numbered
+/// 0 and 1 (a 256 KB chunk contains up to two 128 KB sub-chunks).
+pub const ChunkPhase1Result = struct {
+    sub0: SubChunkPhase1Result = .{ .mode = 0, .dst_offset = 0, .dst_size = 0, .is_lz = false },
+    sub1: SubChunkPhase1Result = .{ .mode = 0, .dst_offset = 0, .dst_size = 0, .is_lz = false },
+    sub_chunk_count: u32 = 0,
+    /// Set for uncompressed / memset / whole-match chunks whose output
+    /// is fully written by phase 1 (no phase 2 work needed).
+    is_special: bool = false,
+    is_whole_match: bool = false,
+    whole_match_distance: u32 = 0,
+};
+
+/// Phase 1 of two-phase decompression: walks the sub-chunks inside
+/// a compressed 256 KB chunk and calls `readLzTable` on each LZ
+/// sub-chunk, writing the decoded `HighLzTable` into a per-sub-chunk
+/// scratch region. Mirrors C# `High.LzDecoder.Phase1_ProcessChunk`
+/// (`LzDecoder.TwoPhase.cs:21`).
+///
+/// Scratch layout: `scratch[0..scratch_end-scratch]` is split in half
+/// — the first half holds sub-chunk 0's HighLzTable + streams; the
+/// second half holds sub-chunk 1's. The caller must preserve the
+/// full region until phase 2 runs.
+///
+/// Returns the number of compressed bytes consumed from `src_in`.
+pub fn phase1ProcessChunk(
+    dst_in: [*]u8,
+    dst_end: [*]u8,
+    dst_start: [*]const u8,
+    src_in: [*]const u8,
+    src_end: [*]const u8,
+    scratch: [*]u8,
+    scratch_end: [*]u8,
+    result: *ChunkPhase1Result,
+) DecodeError!usize {
+    var src = src_in;
+    var dst = dst_in;
+    var sub_idx: u32 = 0;
+
+    const total_scratch: usize = @intFromPtr(scratch_end) - @intFromPtr(scratch);
+    const per_sub_scratch: usize = total_scratch / 2;
+
+    while (@intFromPtr(dst_end) - @intFromPtr(dst) != 0) {
+        var dst_count: usize = @intFromPtr(dst_end) - @intFromPtr(dst);
+        if (dst_count > 0x20000) dst_count = 0x20000;
+        if (@intFromPtr(src_end) - @intFromPtr(src) < 4) return error.SourceTruncated;
+
+        // Select per-sub-chunk scratch region.
+        const sub_scratch: [*]u8 = scratch + sub_idx * per_sub_scratch;
+        const sub_scratch_end: [*]u8 = sub_scratch + per_sub_scratch;
+
+        const chunkhdr: u32 = (@as(u32, src[0]) << 16) | (@as(u32, src[1]) << 8) | @as(u32, src[2]);
+        var src_used: usize = undefined;
+
+        if ((chunkhdr & constants.chunk_header_compressed_flag) == 0) {
+            // Entropy-only sub-chunk — decode directly to output. Phase 2
+            // has nothing to do for this sub-chunk.
+            const src_left: usize = @intFromPtr(src_end) - @intFromPtr(src);
+            const res = try entropy.highDecodeBytes(dst, dst_count, src[0..src_left], false, sub_scratch, sub_scratch_end);
+            if (res.decoded_size != dst_count) return error.OutputTruncated;
+            if (@intFromPtr(res.out_ptr) != @intFromPtr(dst)) {
+                @memcpy(dst[0..dst_count], res.out_ptr[0..dst_count]);
+            }
+            src_used = res.bytes_consumed;
+
+            const sub_ptr: *SubChunkPhase1Result = if (sub_idx == 0) &result.sub0 else &result.sub1;
+            sub_ptr.* = .{
+                .mode = 0,
+                .dst_offset = @intFromPtr(dst) - @intFromPtr(dst_start),
+                .dst_size = dst_count,
+                .is_lz = false,
+            };
+        } else {
+            src += 3;
+            src_used = chunkhdr & 0x7FFFF;
+            const mode: u32 = (chunkhdr >> constants.sub_chunk_type_shift) & 0xF;
+            if (@intFromPtr(src_end) - @intFromPtr(src) < src_used) return error.SourceTruncated;
+
+            if (src_used < dst_count) {
+                // LZ sub-chunk — entropy-decode the 4 streams into the
+                // HighLzTable that lives at the start of this sub-chunk's
+                // scratch region.
+                const scratch_usage: usize = @min(
+                    constants.calculateScratchSize(dst_count),
+                    per_sub_scratch,
+                );
+                if (scratch_usage < @sizeOf(HighLzTable)) return error.InvalidChunkHeader;
+
+                const lz_ptr: *HighLzTable = @ptrCast(@alignCast(sub_scratch));
+                const inner_scratch: [*]u8 = sub_scratch + @sizeOf(HighLzTable);
+                const inner_scratch_end: [*]u8 = sub_scratch + scratch_usage;
+
+                try readLzTable(
+                    mode,
+                    src,
+                    src + src_used,
+                    dst,
+                    @intCast(dst_count),
+                    @intCast(@intFromPtr(dst) - @intFromPtr(dst_start)),
+                    inner_scratch,
+                    inner_scratch_end,
+                    lz_ptr,
+                );
+
+                const sub_ptr: *SubChunkPhase1Result = if (sub_idx == 0) &result.sub0 else &result.sub1;
+                sub_ptr.* = .{
+                    .mode = mode,
+                    .dst_offset = @intFromPtr(dst) - @intFromPtr(dst_start),
+                    .dst_size = dst_count,
+                    .is_lz = true,
+                    .lz_table = lz_ptr,
+                    .scratch_free = sub_scratch + scratch_usage,
+                    .scratch_end = sub_scratch_end,
+                };
+            } else if (src_used > dst_count or mode != 0) {
+                return error.InvalidChunkHeader;
+            } else {
+                // Stored raw within a "compressed" flag block — copy directly.
+                @memcpy(dst[0..dst_count], src[0..dst_count]);
+                const sub_ptr: *SubChunkPhase1Result = if (sub_idx == 0) &result.sub0 else &result.sub1;
+                sub_ptr.* = .{
+                    .mode = 0,
+                    .dst_offset = @intFromPtr(dst) - @intFromPtr(dst_start),
+                    .dst_size = dst_count,
+                    .is_lz = false,
+                };
+            }
+        }
+
+        src += src_used;
+        dst += dst_count;
+        sub_idx += 1;
+    }
+
+    result.sub_chunk_count = sub_idx;
+    return @intFromPtr(src) - @intFromPtr(src_in);
+}
+
+// ────────────────────────────────────────────────────────────
 //  DecodeChunk — top-level High chunk decoder
 // ────────────────────────────────────────────────────────────
 

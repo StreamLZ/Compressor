@@ -92,9 +92,13 @@ fn decompressFramedInner(
             continue;
         }
 
-        // Dispatch: if caller provided an allocator AND this block is
-        // SC (L6-L8 serial encoder marker) with more than one chunk,
-        // take the parallel fast path. Otherwise the serial loop.
+        // Dispatch: if caller provided an allocator AND this block
+        // has multiple chunks, try the appropriate parallel path —
+        //   * SC (L6-L8)  → DecompressCoreParallel
+        //   * non-SC High → DecompressCoreTwoPhase (entropy parallel,
+        //                   match resolve serial)
+        // Anything else (single-chunk, Fast, mixed decoder types) falls
+        // through to the existing serial loop.
         const block_src = src[pos .. pos + bh.compressed_size];
         var dispatched_parallel: bool = false;
         if (allocator_opt) |allocator| {
@@ -111,6 +115,15 @@ fn decompressFramedInner(
                             bh.decompressed_size,
                         );
                         dispatched_parallel = true;
+                    } else if (ph.decoder_type == .high and has_many_chunks) {
+                        const ok = try parallel.decompressCoreTwoPhase(
+                            allocator,
+                            block_src,
+                            dst,
+                            &dst_off,
+                            bh.decompressed_size,
+                        );
+                        if (ok) dispatched_parallel = true;
                     }
                 }
             }
