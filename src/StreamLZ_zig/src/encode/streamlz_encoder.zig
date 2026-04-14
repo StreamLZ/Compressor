@@ -971,14 +971,17 @@ test "compressFramedHigh L6 roundtrip: tiny input (uncompressed fallback)" {
     try roundtrip(src, 6);
 }
 
-// NOTE: L9/L11 compressed-output roundtrip tests still hit an integer
-// overflow inside the decoder's bit_reader.readDistanceCore when unpacking
-// offset distance symbols. Root cause is a desync between the High
-// encoder's assembleCompressedOutput stream layout and the decoder's
-// readLzTable consumer — a direct unit test of writeLzOffsetBits →
-// readDistance (see offset_encoder.zig tests) confirms the bit-level
-// pair works in isolation, so the drift is at the multi-stream framing
-// level. Tracked as step-34 part 2.
+test "compressFramedHigh L9 roundtrip: incompressible input (raw fallback)" {
+    // Pseudo-random 4 KB input. The optimal parser cannot beat raw on
+    // this, so the sub-chunk cost check picks the memset/raw branch and
+    // the resulting bytes round-trip cleanly. Exercises the High
+    // dispatch + doCompress call + cost-based rewind path end-to-end,
+    // without triggering the (currently broken) assembled LZ stream.
+    var src: [4096]u8 = undefined;
+    var rng = std.Random.Xoshiro256.init(0xDEADBEEF);
+    rng.random().bytes(&src);
+    try roundtrip(&src, 9);
+}
 
 test "compressFramed L1 roundtrip: 4 KB repeating pattern" {
     var src: [4096]u8 = undefined;
