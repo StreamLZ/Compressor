@@ -729,3 +729,32 @@ test "writeLzOffsetBits round-trips empty offset list" {
     // Empty: just the length-count header (backward), minimal bits.
     try testing.expect(n >= 1 and n <= 16);
 }
+
+test "writeLzOffsetBits legacy path round-trips a single near offset" {
+    // Diagnostic: encode a single near offset via the legacy
+    // (offs_encode_type=0) path and read it back via BitReader.readDistance
+    // — the inverse pair used by the High codec's offset stream.
+    const bit_reader_mod = @import("../io/bit_reader.zig");
+
+    const offset: u32 = 200;
+    const bsr: u32 = std.math.log2_int(u32, offset + lz_constants.offset_bias_constant);
+    try testing.expect(bsr >= 9);
+    const u8_desc: u8 = @intCast(((offset - 8) & 0xF) | (16 * (bsr - 9)));
+
+    // Write the encoded bits directly so we can control framing.
+    var buf: [64]u8 = @splat(0);
+    var f = BitWriter64Forward.init(&buf);
+    const nb: u5 = @intCast(((u8_desc >> 4) & 0xF) + 5);
+    const bits: u32 = ((offset +% lz_constants.offset_bias_constant) >> 4) -% (@as(u32, 1) << nb);
+    f.write(bits, nb);
+    f.flush();
+    const n_bytes: usize = @intFromPtr(f.getFinalPtr()) - @intFromPtr(&buf[0]);
+    const stream_len: usize = @max(n_bytes, 8);
+
+    var br = bit_reader_mod.BitReader.initForward(buf[0..stream_len]);
+    br.refill();
+    const decoded = br.readDistance(u8_desc);
+    try testing.expectEqual(offset, decoded);
+}
+
+const lz_constants = @import("../format/streamlz_constants.zig");

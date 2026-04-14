@@ -832,14 +832,17 @@ fn compressFramedHigh(
                 var chunk_type: i32 = -1;
                 var lz_cost: f32 = std.math.inf(f32);
                 const mls_ptr: ?*const mls_mod.ManagedMatchLenStorage = if (mls_opt) |*m| m else null;
+                const dst_remaining_for_sub: usize = dst.len - sub_payload_start;
+                const dst_sub_start: [*]u8 = dst[sub_payload_start..].ptr;
+                const dst_sub_end: [*]u8 = dst_sub_start + dst_remaining_for_sub;
                 const n_or_err = high_compressor.doCompress(
                     &ctx,
                     &hasher,
                     mls_ptr,
                     sub_src.ptr,
                     @intCast(round_bytes),
-                    dst[sub_payload_start..].ptr,
-                    dst[sub_payload_start..][sub_payload_start + round_bytes - sub_payload_start ..].ptr,
+                    dst_sub_start,
+                    dst_sub_end,
                     @intCast(start_position_for_sub),
                     &chunk_type,
                     &lz_cost,
@@ -964,18 +967,18 @@ test "compressFramed L1 roundtrip: tiny input stored uncompressed" {
 }
 
 test "compressFramedHigh L6 roundtrip: tiny input (uncompressed fallback)" {
-    // Tiny inputs hit the can_compress=false path and round-trip via the
-    // frame's raw block fallback. This exercises the High dispatch wiring
-    // without invoking the actual High encoder.
     const src = "Hello, world!\n";
     try roundtrip(src, 6);
 }
 
-// NOTE: compressed-output roundtrips for L9/L11 are currently broken.
-// The encoder produces bytes that the decoder rejects with an integer
-// overflow in `readDistanceCore` — byte-exactness between the High
-// encoder's `assembleCompressedOutput` offset-stream emission and the
-// decoder's offset reader needs debugging. Tracked as "step 34 part 2".
+// NOTE: L9/L11 compressed-output roundtrip tests still hit an integer
+// overflow inside the decoder's bit_reader.readDistanceCore when unpacking
+// offset distance symbols. Root cause is a desync between the High
+// encoder's assembleCompressedOutput stream layout and the decoder's
+// readLzTable consumer — a direct unit test of writeLzOffsetBits →
+// readDistance (see offset_encoder.zig tests) confirms the bit-level
+// pair works in isolation, so the drift is at the multi-stream framing
+// level. Tracked as step-34 part 2.
 
 test "compressFramed L1 roundtrip: 4 KB repeating pattern" {
     var src: [4096]u8 = undefined;
