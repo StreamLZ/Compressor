@@ -276,7 +276,9 @@ fn runBench(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const []con
     defer allocator.free(dst);
 
     // Warm-up: one untimed decode to page-fault the dst and prime the caches.
-    _ = decoder.decompressFramed(src, dst) catch |err| {
+    // Uses parallel decompress (matches what C# `-b` does for SC files and
+    // what production code paths take when an allocator is available).
+    _ = decoder.decompressFramedParallel(allocator, src, dst) catch |err| {
         try w.print("error: decompression failed: {s}\n", .{@errorName(err)});
         try w.flush();
         std.process.exit(1);
@@ -287,7 +289,7 @@ fn runBench(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const []con
     var run: u32 = 0;
     while (run < runs) : (run += 1) {
         var timer = try std.time.Timer.start();
-        _ = try decoder.decompressFramed(src, dst);
+        _ = try decoder.decompressFramedParallel(allocator, src, dst);
         const elapsed = timer.read();
         if (elapsed < best_ns) best_ns = elapsed;
         total_ns += elapsed;

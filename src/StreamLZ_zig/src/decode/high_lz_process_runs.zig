@@ -44,9 +44,11 @@ pub fn processLzRuns(
 }
 
 /// Fallback allocator for the Type 1 token array when the scratch buffer
-/// is exhausted. We use the page allocator to avoid pulling a `Allocator`
-/// parameter through every decoder entry point.
-const fallback_allocator = std.heap.page_allocator;
+/// is exhausted. Uses libc malloc/free via Zig's c_allocator — matches C#'s
+/// `NativeMemory.Alloc` and avoids the ~5µs syscall cost of page_allocator
+/// (VirtualAlloc/VirtualFree). For a 100 MB L9 decode we hit the fallback
+/// ~12,000 times; VTune Hotspots showed page_allocator at 13.8% of CPU.
+const fallback_allocator = std.heap.c_allocator;
 
 // ────────────────────────────────────────────────────────────
 //  Type 0 — delta-coded literals, single-pass
