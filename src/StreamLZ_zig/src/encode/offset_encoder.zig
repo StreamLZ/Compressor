@@ -17,6 +17,7 @@ const hist_mod = @import("byte_histogram.zig");
 const entropy_enc = @import("entropy_encoder.zig");
 const cost_coeffs = @import("cost_coefficients.zig");
 const bw_mod = @import("../io/bit_writer_64.zig");
+const lz_constants = @import("../format/streamlz_constants.zig");
 
 const ByteHistogram = hist_mod.ByteHistogram;
 const BitWriter64Forward = bw_mod.BitWriter64Forward;
@@ -286,13 +287,15 @@ pub const EncodeNewOffsetsResult = struct {
     bits_type1: i32,
 };
 
-/// Constants used by the legacy (type-0) offset encoder. Ported from
-/// `StreamLzConstants.HighOffsetMarker` and friends. These govern the
-/// variable-length encoding of the single-byte offset descriptors.
-const high_offset_marker: u32 = 8 * 22; // 176
-const high_offset_cost_adjust: u32 = high_offset_marker - 22;
-const offset_bias_constant: u32 = 8;
-const low_offset_encoding_limit: u32 = 0x100000;
+/// Constants used by the legacy (type-0) offset encoder. Pulled from
+/// `streamlz_constants` so the encoder and decoder always agree —
+/// previously a stale copy here used `high_offset_marker = 176` and
+/// `offset_bias_constant = 8` (both wrong), which desynced the legacy
+/// offset bit stream from the decoder's `readDistance`.
+const high_offset_marker: u32 = lz_constants.high_offset_marker;
+const high_offset_cost_adjust: u32 = high_offset_marker - 16;
+const offset_bias_constant: u32 = lz_constants.offset_bias_constant;
+const low_offset_encoding_limit: u32 = lz_constants.low_offset_encoding_limit;
 
 /// Port of C# `OffsetEncoder.EncodeNewOffsets` (`OffsetEncoder.cs:339-381`).
 /// Splits each 32-bit offset into `hi = off / divisor` + `lo = off % divisor`
@@ -400,11 +403,6 @@ pub fn writeLzOffsetBits(
 
             var nb: u5 = undefined;
             var bits: u32 = u32_offs[i];
-            // C# `uint` silently wraps on underflow in these formulas;
-            // Zig's default signed/unsigned ops would panic on underflow
-            // so use `+%` / `-%` to match C# semantics. The final value
-            // is masked to `nb` bits anyway when written by the bit
-            // writer so any wrapping above that width is harmless.
             if (u8_offs[i] < high_offset_marker) {
                 nb = @intCast((u8_offs[i] >> 4) + 5);
                 bits = ((bits +% offset_bias_constant) >> 4) -% (@as(u32, 1) << nb);
@@ -730,10 +728,11 @@ test "writeLzOffsetBits round-trips empty offset list" {
     try testing.expect(n >= 1 and n <= 16);
 }
 
-test "writeLzOffsetBits legacy path round-trips a single near offset" {
-    // Diagnostic: encode a single near offset via the legacy
-    // (offs_encode_type=0) path and read it back via BitReader.readDistance
-    // — the inverse pair used by the High codec's offset stream.
+test "writeLzOffsetBits legacy path: direct BitWriter roundtrip" {
+    // Ground truth — bypass writeLzOffsetBits and verify the inverse
+    // pair (BitWriter64Forward + BitReader.readDistance) works for the
+    // legacy offset formula. Passes when the bit-level encode/decode
+    // pair is correct.
     const bit_reader_mod = @import("../io/bit_reader.zig");
 
     const offset: u32 = 200;
@@ -741,7 +740,6 @@ test "writeLzOffsetBits legacy path round-trips a single near offset" {
     try testing.expect(bsr >= 9);
     const u8_desc: u8 = @intCast(((offset - 8) & 0xF) | (16 * (bsr - 9)));
 
-    // Write the encoded bits directly so we can control framing.
     var buf: [64]u8 = @splat(0);
     var f = BitWriter64Forward.init(&buf);
     const nb: u5 = @intCast(((u8_desc >> 4) & 0xF) + 5);
@@ -757,4 +755,33 @@ test "writeLzOffsetBits legacy path round-trips a single near offset" {
     try testing.expectEqual(offset, decoded);
 }
 
-const lz_constants = @import("../format/streamlz_constants.zig");
+test "writeLzOffsetBits legacy path: full function roundtrip" {
+    const bit_reader_mod = @import("../io/bit_reader.zig");
+
+    const offset: u32 = 200;
+    const bsr: u32 = std.math.log2_int(u32, offset + lz_constants.offset_bias_constant);
+    const u8_desc: u8 = @intCast(((offset - 8) & 0xF) | (16 * (bsr - 9)));
+
+    var u8_offs: [1]u8 = .{u8_desc};
+    var u32_offs: [1]u32 = .{offset};
+    const u32_len: [0]u32 = .{};
+    var dst: [256]u8 = @splat(0);
+
+    const n = try writeLzOffsetBits(
+        &dst,
+        dst[dst.len..].ptr,
+        &u8_offs,
+        &u32_offs,
+        1,
+        0, // legacy path
+        &u32_len,
+        0,
+        true, // flag_ignore_u32_length
+    );
+    try testing.expect(n >= 1);
+
+    var br = bit_reader_mod.BitReader.initForward(dst[0..]);
+    br.refill();
+    const decoded = br.readDistance(u8_desc);
+    try testing.expectEqual(offset, decoded);
+}

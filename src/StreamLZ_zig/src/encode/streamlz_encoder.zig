@@ -972,16 +972,17 @@ test "compressFramedHigh L6 roundtrip: tiny input (uncompressed fallback)" {
 }
 
 test "compressFramedHigh L9 roundtrip: incompressible input (raw fallback)" {
-    // Pseudo-random 4 KB input. The optimal parser cannot beat raw on
-    // this, so the sub-chunk cost check picks the memset/raw branch and
-    // the resulting bytes round-trip cleanly. Exercises the High
-    // dispatch + doCompress call + cost-based rewind path end-to-end,
-    // without triggering the (currently broken) assembled LZ stream.
     var src: [4096]u8 = undefined;
     var rng = std.Random.Xoshiro256.init(0xDEADBEEF);
     rng.random().bytes(&src);
     try roundtrip(&src, 9);
 }
+
+// NOTE: compressed-output roundtrips at L9/L11 on repetitive input hit a
+// second-order bug AFTER the offset_encoder constants fix — the decoder
+// reaches the match-length stream reader (`readLengthBackward`) but
+// receives a StreamMismatch. The desync has moved deeper into the
+// length stream framing. Tracked as step-34 part 3.
 
 test "compressFramed L1 roundtrip: 4 KB repeating pattern" {
     var src: [4096]u8 = undefined;
