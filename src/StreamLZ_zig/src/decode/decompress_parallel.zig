@@ -335,14 +335,19 @@ pub fn decompressCoreParallel(
     const cpu_count_raw: usize = std.Thread.getCpuCount() catch 1;
     const worker_count: usize = @min(num_groups, @max(@as(usize, 1), cpu_count_raw));
 
-    // Per-worker scratch.
+    // Per-worker scratch. Sized to scratch_size * 2 (matching the
+    // two-phase path) so the token array overflow into the heap
+    // fallback is rare for L6-L8 SC. With 24 workers × 884 KB ≈ 21 MB
+    // total → fits in the 36 MB L3 (the 1.9 MB-per-worker experiment
+    // overflowed L3 at 46 MB; see FailedExperiments.md).
+    const sc_scratch_bytes: usize = constants.scratch_size * 2;
     const scratches = try allocator.alloc([]u8, worker_count);
     defer {
         for (scratches) |s| if (s.len != 0) allocator.free(s);
         allocator.free(scratches);
     }
     for (scratches) |*s| s.* = &[_]u8{};
-    for (scratches) |*s| s.* = try allocator.alloc(u8, constants.scratch_size);
+    for (scratches) |*s| s.* = try allocator.alloc(u8, sc_scratch_bytes);
 
     // Shared coordinator.
     var shared: Shared = .{
