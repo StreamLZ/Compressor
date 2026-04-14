@@ -481,6 +481,30 @@ vector unit end-to-end.
 - Inline assembly to emit `PSHUFB` directly (escapes Zig's type system,
   unclear if the integer↔XMM transit can be avoided)
 
+### ❌ 16-byte SIMD copies for Fast medium-match path (L5)
+
+**Context:** After fixing L1 (lazy pool, +10%) and L6-L8 (SC scratch
+bump, +185%), L5 was the only remaining level still slightly slower
+than C# (-2%, ~4860 vs 4978 MB/s).
+
+**Hypothesis:** L5 spends ~11% of CPU in the medium match branch
+(`cmd > 2 && cmd < 24`) which uses 4× `copy64` (32 bytes via 4 8-byte
+copies). Far offsets (from `off32_stream`) are always large → no
+overlap concerns → safe to use 2× `copy16` (16-byte SIMD).
+
+**Result:** L5 slightly **slower** (~4770 vs 4860 baseline). Even
+though the medium-match copy itself was halved in instruction count,
+the surrounding code (bounds checks, register allocation in the hot
+loop) reorganized in a way that hurt the SHORT TOKEN path which is
+~80% of CPU.
+
+**Lesson:** Optimizing a cold path (11% of CPU) can hurt the hot path
+through unintended register-allocation interactions. Profile after every
+change — don't trust that "less code in branch X = faster overall."
+
+**Disposition:** Reverted. L5 stays ~2% slower than C# (essentially
+noise). All other levels (L1, L6-L11) match or beat C#.
+
 ### ❌ Pack `ro4` || `ro5` into a single `u64`
 
 **Change:**
