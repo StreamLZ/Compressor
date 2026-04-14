@@ -232,7 +232,7 @@ unsafe
 
             long compSize = StreamLzFrameCompressor.Compress(progressStream, outStream,
                 cMapped.Codec, cMapped.CodecLevel, contentSize: inputSize,
-                selfContained: cMapped.SelfContained);
+                selfContained: cMapped.SelfContained, maxThreads: threads);
             sw.Stop();
             double mbps = (double)inputSize / sw.Elapsed.TotalSeconds / (1024 * 1024);
             Console.WriteLine($"\rCompressed: {compSize:N0} bytes ({(double)compSize / inputSize * 100:F1}%), {sw.ElapsedMilliseconds / 1000.0:F1}s, {mbps:F1} MB/s   ");
