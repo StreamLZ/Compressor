@@ -13,6 +13,13 @@ pub const chunk_type_shift: u6 = chunk_size_bits;
 pub const chunk_type_memset: u32 = 1 << chunk_type_shift;
 
 pub const bt4_max_read_size: usize = 8 * 1024 * 1024;
+
+/// Default sliding-window size for the SLZ1 frame compressor. Matches
+/// C# `FrameConstants.DefaultWindowSize = 128 * 1024 * 1024`. Each frame
+/// block can reference up to this many bytes of previously-compressed
+/// data for match finding.
+pub const default_window_size: usize = 128 * 1024 * 1024;
+
 pub const compress_buffer_padding: usize = 16;
 
 pub const sub_chunk_type_shift: u6 = 19;

@@ -892,11 +892,6 @@ fn compressFramedHigh(
         return pos + 4;
     }
 
-    // ── Frame block header placeholder ─────────────────────────────────
-    const frame_block_hdr_pos: usize = pos;
-    pos += 8;
-    const frame_block_start: usize = pos;
-
     const can_compress = src.len > fast_constants.min_source_length;
     const self_contained: bool = mapping.self_contained or opts.self_contained or opts.two_phase;
     const sc_flag_bit: u8 = if (self_contained) 0x10 else 0;
@@ -946,25 +941,6 @@ fn compressFramedHigh(
         num_blocks > 1 and
         resolved_threads > 1;
 
-    // ── Allocate MLS + run match finder on the whole source ───────────
-    // For SC parallel we skip this — each worker computes a per-group
-    // MLS on its own subset of the source (see compressInternalParallelSc).
-    // The global MLS is only used for: (a) non-SC High optimal parse
-    // (serial or parallel), (b) SC serial, and (c) SC with num_threads=1.
-    var mls_opt: ?mls_mod.ManagedMatchLenStorage = null;
-    defer if (mls_opt) |*m| m.deinit();
-    if (can_compress and mapping.codec_level >= 5 and !can_parallel_sc) {
-        var mls = try mls_mod.ManagedMatchLenStorage.init(allocator, src.len + 1, 8.0);
-        mls.window_base_offset = 0;
-        mls.round_start_pos = 0;
-        if (mapping.use_bt4) {
-            try match_finder_bt4.findMatchesBT4(allocator, src, &mls, 4, 0, 128);
-        } else {
-            try match_finder.findMatchesHashBased(allocator, src, &mls, 4, 0);
-        }
-        mls_opt = mls;
-    }
-
     // Optional hasher for L1-L4. None for L5+.
     const setup = high_compressor.setupEncoder(
         mapping.codec_level,
@@ -976,15 +952,20 @@ fn compressFramedHigh(
     var hasher = try high_compressor.allocateHighHasher(allocator, setup);
     defer hasher.deinit();
 
-    // Non-SC parallel: requires the global MLS to be present.
+    // Parallel gating: non-SC parallel uses a global MLS (pre-computed
+    // once). That path doesn't get the sliding-window treatment — it's
+    // a separate step to make parallel byte-exact with C#'s Parallel.For.
     const can_parallel_blocks: bool =
         can_compress and
         num_blocks > 1 and
         resolved_threads > 1 and
-        mls_opt != null and
-        !self_contained;
+        !self_contained and
+        mapping.codec_level >= 5;
 
     if (can_parallel_sc) {
+        const frame_block_hdr_pos: usize = pos;
+        pos += 8;
+        const frame_block_start: usize = pos;
         const written = try compressInternalParallelSc(
             allocator,
             src,
@@ -995,19 +976,141 @@ fn compressFramedHigh(
             resolved_threads,
         );
         pos += written;
+        try emitScPrefixTable(src, dst, &pos);
+        try finalizeSingleFrameBlock(
+            src,
+            dst,
+            &pos,
+            frame_block_hdr_pos,
+            frame_block_start,
+            can_compress,
+        );
     } else if (can_parallel_blocks) {
+        // Parallel non-SC High: build one global MLS covering all of
+        // `src`, then hand blocks out to worker threads. Not byte-exact
+        // with C# `Parallel.For` (range partitioner assigns blocks in a
+        // different order), but reproducible across Zig runs.
+        var global_mls = try mls_mod.ManagedMatchLenStorage.init(allocator, src.len + 1, 8.0);
+        defer global_mls.deinit();
+        global_mls.window_base_offset = 0;
+        global_mls.round_start_pos = 0;
+        if (mapping.use_bt4) {
+            try match_finder_bt4.findMatchesBT4(allocator, src, &global_mls, 4, 0, 128);
+        } else {
+            try match_finder.findMatchesHashBased(allocator, src, &global_mls, 4, 0);
+        }
+        const frame_block_hdr_pos: usize = pos;
+        pos += 8;
+        const frame_block_start: usize = pos;
         const written = try compressBlocksParallel(
             allocator,
             src,
             dst[pos..],
             &ctx,
-            &(mls_opt.?),
+            &global_mls,
             sc_flag_bit,
             self_contained,
             resolved_threads,
         );
         pos += written;
+        try finalizeSingleFrameBlock(
+            src,
+            dst,
+            &pos,
+            frame_block_hdr_pos,
+            frame_block_start,
+            can_compress,
+        );
+    } else if (can_compress and mapping.codec_level >= 5 and !self_contained) {
+        // ── Serial non-SC High: sliding-window frame-block loop ──────
+        // Port of the serial path in
+        // `StreamLzFrameCompressor.Compress` (StreamLzFrameCompressor.cs:182).
+        // Splits `src` into `frame_block_size`-sized reads and carries
+        // the tail of each read forward as a dictionary for the next
+        // read (bounded by `window_size`). Byte-exact against C# at
+        // any input size.
+        //
+        // C# semantics note: each iteration of C#'s serial loop calls
+        // `StreamLZCompressor.CompressBlock`, which instantiates a fresh
+        // `LzCoder { LastChunkType = -1 }` per call. That means the
+        // cross-block cost-model stats DO NOT carry between frame
+        // blocks — only within the 256 KB internal blocks of a single
+        // frame block. We mirror that by resetting `cross_block_state`
+        // at the start of every frame-block iteration.
+        const frame_block_size: usize = if (mapping.codec_level >= 9)
+            lz_constants.bt4_max_read_size // 8 MB for L11
+        else
+            lz_constants.default_window_size; // 128 MB for L9/L10
+        const window_size: usize = lz_constants.default_window_size;
+
+        // C# `StreamLzCompressor.CompressInternal` caps the effective
+        // dictionary passed to the match finder at
+        //   `localDictSize - srcSize`
+        // where `localDictSize = max(opts.MaxLocalDictionarySize, 64 MB)`
+        // and the default `MaxLocalDictionarySize` is 4 MB, so the
+        // effective cap is `64 MB - block_bytes`. For L11 with 8 MB
+        // blocks this is 56 MB; for L9/L10 with 128 MB blocks this
+        // clamps to 0 (no cross-block reference). Without this cap,
+        // blocks beyond the cap see a larger preload than C# does and
+        // the match finder picks up matches C# would have missed.
+        const local_dict_size: usize = 64 * 1024 * 1024;
+
+        var src_off: usize = 0;
+        while (src_off < src.len) {
+            const block_bytes: usize = @min(src.len - src_off, frame_block_size);
+            const raw_dict_bytes: usize = @min(src_off, window_size);
+            const dict_cap: usize = if (local_dict_size > block_bytes) local_dict_size - block_bytes else 0;
+            const dict_bytes: usize = @min(raw_dict_bytes, dict_cap);
+            const window_start: usize = src_off - dict_bytes;
+            const window_len: usize = dict_bytes + block_bytes;
+            const window_slice: []const u8 = src[window_start..][0..window_len];
+
+            // Fresh cost-model state per frame block (matches C#'s
+            // per-`CompressBlock` LzCoder instantiation).
+            cross_block_state = .{};
+
+            try compressOneFrameBlockWindowed(
+                allocator,
+                &ctx,
+                &hasher,
+                mapping,
+                window_slice,
+                dict_bytes,
+                block_bytes,
+                dst,
+                &pos,
+                src,
+                src_off,
+            );
+
+            src_off += block_bytes;
+        }
     } else {
+        // Fallback serial path for the remaining cases:
+        //   - `!can_compress` (src too short) → single uncompressed frame block
+        //   - SC serial / SC single-thread → existing single-frame-block behaviour
+        //   - High L1-L4 (no optimal parser) → same as above
+        // All of these fit in one frame block.
+        const frame_block_hdr_pos: usize = pos;
+        pos += 8;
+        const frame_block_start: usize = pos;
+
+        // For SC and other paths, we still need a whole-source MLS for
+        // L5+ optimal parsing.
+        var mls_opt: ?mls_mod.ManagedMatchLenStorage = null;
+        defer if (mls_opt) |*m| m.deinit();
+        if (can_compress and mapping.codec_level >= 5) {
+            var mls = try mls_mod.ManagedMatchLenStorage.init(allocator, src.len + 1, 8.0);
+            mls.window_base_offset = 0;
+            mls.round_start_pos = 0;
+            if (mapping.use_bt4) {
+                try match_finder_bt4.findMatchesBT4(allocator, src, &mls, 4, 0, 128);
+            } else {
+                try match_finder.findMatchesHashBased(allocator, src, &mls, 4, 0);
+            }
+            mls_opt = mls;
+        }
+
         var src_off: usize = 0;
         while (can_compress and src_off < src.len) {
             const block_src_len: usize = @min(src.len - src_off, lz_constants.chunk_size);
@@ -1028,27 +1131,172 @@ fn compressFramedHigh(
             pos += written;
             src_off += block_src_len;
         }
+
+        try emitScPrefixTable(if (self_contained) src else src[0..0], dst, &pos);
+        try finalizeSingleFrameBlock(
+            src,
+            dst,
+            &pos,
+            frame_block_hdr_pos,
+            frame_block_start,
+            can_compress,
+        );
     }
 
-    // SC mode: append the per-chunk first-8-bytes prefix table at the
-    // end of the frame block. Matches the Fast path in `compressFramed`
-    // and `StreamLzCompressor.AppendSelfContainedPrefixTable`.
-    if (self_contained and can_compress) {
-        const num_chunks: usize = (src.len + lz_constants.chunk_size - 1) / lz_constants.chunk_size;
-        var i: usize = 1;
-        while (i < num_chunks) : (i += 1) {
-            const chunk_start = i * lz_constants.chunk_size;
-            if (chunk_start >= src.len) break;
-            const copy_size: usize = @min(@as(usize, 8), src.len - chunk_start);
-            if (pos + 8 > dst.len) return error.DestinationTooSmall;
-            @memset(dst[pos..][0..8], 0);
-            @memcpy(dst[pos..][0..copy_size], src[chunk_start..][0..copy_size]);
-            pos += 8;
-        }
+    // End mark.
+    if (pos + 4 > dst.len) return error.DestinationTooSmall;
+    frame.writeEndMark(dst[pos..]);
+    pos += 4;
+    return pos;
+}
+
+/// Compresses one frame-sized block with dict carry-over into `dst[pos..]`.
+/// Ports the body of the serial loop in `StreamLzFrameCompressor.Compress`
+/// (StreamLzFrameCompressor.cs:203-256): allocate per-block MLS, run match
+/// finder on `window_slice` with `preload_size = dict_bytes`, iterate the
+/// 256 KB internal blocks, write the 8-byte frame block header, and fall
+/// back to an uncompressed frame block if the compressed payload didn't
+/// beat raw. Updates `*pos_ptr` to the end of the written frame block.
+fn compressOneFrameBlockWindowed(
+    allocator: std.mem.Allocator,
+    ctx: *const high_encoder.HighEncoderContext,
+    hasher: *high_compressor.HighHasher,
+    mapping: HighMapping,
+    window_slice: []const u8,
+    dict_bytes: usize,
+    block_bytes: usize,
+    dst: []u8,
+    pos_ptr: *usize,
+    src: []const u8,
+    src_off_abs: usize,
+) CompressError!void {
+    var pos = pos_ptr.*;
+    if (pos + 8 > dst.len) return error.DestinationTooSmall;
+    const fbh_pos: usize = pos;
+    pos += 8;
+    const fb_start: usize = pos;
+
+    // Per-frame-block MLS. Size is `block_bytes + 1` because the MLS
+    // stores matches for the NEW bytes only (preload positions are
+    // inserted into the match finder's hash/tree but no matches are
+    // recorded for them). C# `CompressInternal` does exactly the same
+    // at StreamLzCompressor.cs:481-495.
+    //
+    // `round_start_pos` is the UNCAPPED `srcIn - srcWindowBase` from
+    // C# (StreamLzCompressor.cs:483) — i.e., the absolute offset of
+    // the new bytes from the start of the stream, NOT the post-cap
+    // dict size. The optimal parser uses
+    //   `mls_start = start_pos - round_start_pos`
+    // and `start_pos == 0` is also the trigger for the 8-byte initial
+    // raw-literal copy at the very start of the stream. Using the
+    // capped `dict_bytes` here would (a) make every multi-block stream
+    // re-emit the 8-byte raw prefix at every block boundary, and
+    // (b) make the cost model treat each block as a cold start.
+    var mls = try mls_mod.ManagedMatchLenStorage.init(allocator, block_bytes + 1, 8.0);
+    defer mls.deinit();
+    mls.window_base_offset = @intCast(dict_bytes);
+    mls.round_start_pos = @intCast(src_off_abs);
+
+    if (mapping.use_bt4) {
+        try match_finder_bt4.findMatchesBT4(allocator, window_slice, &mls, 4, dict_bytes, 128);
+    } else {
+        try match_finder.findMatchesHashBased(allocator, window_slice, &mls, 4, dict_bytes);
     }
 
-    // Frame block fallback: if compressed total didn't beat uncompressed,
-    // rewrite the frame block as one uncompressed frame block.
+    // Iterate the 256 KB internal blocks of this frame block's NEW bytes.
+    // Pass the FULL `src` (not `window_slice`) so the optimal parser's
+    // `start_pos = src_off + sub_off` is the absolute stream offset that
+    // matches C# `offset + (src - sourceStart)` from CompressChunk:899.
+    // With `mls.round_start_pos = src_off_abs`, this still gives the
+    // block-relative MLS index: `start_pos - round_start_pos = inner_off
+    // + sub_off`.
+    // Keyframe rule mirrors C# `CompressOneBlock` (StreamLzCompressor.cs:707):
+    //   `bool keyframe = sc || (blockSrc == dictBase)`
+    // where `dictBase = srcIn - dictSize_capped`. The first inner 256 KB
+    // block has `blockSrc == srcIn`, so the keyframe flag fires whenever
+    // the post-cap `dict_bytes == 0` (frame block 0 always; every L9/L10
+    // frame block since their cap is `64 MB - 128 MB block = 0`; every
+    // L11 frame block where the cap clamped dict to 0). Subsequent inner
+    // blocks (`inner_off > 0`) are never keyframes.
+    var inner_off: usize = 0;
+    while (inner_off < block_bytes) {
+        const inner_len: usize = @min(block_bytes - inner_off, lz_constants.chunk_size);
+        const keyframe = (inner_off == 0 and dict_bytes == 0);
+        const written = try compressOneHighBlock(
+            ctx,
+            hasher,
+            &mls,
+            src,
+            src_off_abs + inner_off,
+            inner_len,
+            dst[pos..],
+            false, // self_contained
+            0, // sc_flag_bit
+            keyframe,
+        );
+        pos += written;
+        inner_off += inner_len;
+    }
+
+    // Frame-block fallback: rewrite as uncompressed if the LZ payload
+    // didn't beat raw. Mirrors C# `if (compressedSize > 0 && compressedSize
+    // < blockBytes)` at StreamLzFrameCompressor.cs:226.
+    const fb_compressed_size = pos - fb_start;
+    if (fb_compressed_size >= block_bytes) {
+        pos = fb_start;
+        if (pos + block_bytes > dst.len) return error.DestinationTooSmall;
+        frame.writeBlockHeader(dst[fbh_pos..], .{
+            .compressed_size = @intCast(block_bytes),
+            .decompressed_size = @intCast(block_bytes),
+            .uncompressed = true,
+        });
+        @memcpy(dst[pos..][0..block_bytes], src[src_off_abs..][0..block_bytes]);
+        pos += block_bytes;
+    } else {
+        frame.writeBlockHeader(dst[fbh_pos..], .{
+            .compressed_size = @intCast(fb_compressed_size),
+            .decompressed_size = @intCast(block_bytes),
+            .uncompressed = false,
+        });
+    }
+
+    pos_ptr.* = pos;
+}
+
+/// Appends the SC per-chunk first-8-bytes prefix table. Matches
+/// `StreamLzCompressor.AppendSelfContainedPrefixTable`. `src` should be
+/// empty (zero-length slice) in non-SC paths to no-op.
+fn emitScPrefixTable(src: []const u8, dst: []u8, pos_ptr: *usize) CompressError!void {
+    if (src.len == 0) return;
+    const num_chunks: usize = (src.len + lz_constants.chunk_size - 1) / lz_constants.chunk_size;
+    var i: usize = 1;
+    var pos = pos_ptr.*;
+    while (i < num_chunks) : (i += 1) {
+        const chunk_start = i * lz_constants.chunk_size;
+        if (chunk_start >= src.len) break;
+        const copy_size: usize = @min(@as(usize, 8), src.len - chunk_start);
+        if (pos + 8 > dst.len) return error.DestinationTooSmall;
+        @memset(dst[pos..][0..8], 0);
+        @memcpy(dst[pos..][0..copy_size], src[chunk_start..][0..copy_size]);
+        pos += 8;
+    }
+    pos_ptr.* = pos;
+}
+
+/// Fallback for the legacy single-frame-block paths (parallel SC/non-SC
+/// and short-source). Writes the frame block header and, if the codec's
+/// output didn't beat raw, rewrites the frame block as one uncompressed
+/// block. Used only for code paths that haven't been ported to the
+/// sliding-window frame-block loop.
+fn finalizeSingleFrameBlock(
+    src: []const u8,
+    dst: []u8,
+    pos_ptr: *usize,
+    frame_block_hdr_pos: usize,
+    frame_block_start: usize,
+    can_compress: bool,
+) CompressError!void {
+    var pos = pos_ptr.*;
     const frame_block_compressed_size = pos - frame_block_start;
     if (!can_compress or frame_block_compressed_size >= src.len) {
         pos = frame_block_start;
@@ -1067,12 +1315,7 @@ fn compressFramedHigh(
             .uncompressed = false,
         });
     }
-
-    // End mark.
-    if (pos + 4 > dst.len) return error.DestinationTooSmall;
-    frame.writeEndMark(dst[pos..]);
-    pos += 4;
-    return pos;
+    pos_ptr.* = pos;
 }
 
 // ────────────────────────────────────────────────────────────
