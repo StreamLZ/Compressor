@@ -146,9 +146,37 @@ test "BitWriter64Backward writes at position-8 and retreats" {
     w.write(0xEF, 8);
     w.write(0x12, 8);
     w.flush();
-    // After writing 4 bytes, position retreated by 4.
     const end_offset: usize = @intFromPtr(w.position) - @intFromPtr(&buf[0]);
     try testing.expectEqual(@as(usize, 12), end_offset);
+}
+
+test "BitWriter64Backward + BitReader.initBackward roundtrip" {
+    // Write a known sequence via the backward writer and read it back
+    // via the backward reader. Verifies the writer/reader pair is
+    // self-consistent.
+    const bit_reader_mod = @import("bit_reader.zig");
+
+    var buf: [64]u8 = @splat(0);
+    const dst_end: [*]u8 = buf[0..].ptr + buf.len;
+    var w = BitWriter64Backward.init(dst_end);
+    // First write: value 1 at 3 bits  ("001")
+    w.write(1, 3);
+    // Second write: value 2 at 2 bits  ("10")
+    w.write(2, 2);
+    w.flush();
+    const bp = w.getFinalPtr();
+    const written_bytes: usize = @intFromPtr(dst_end) - @intFromPtr(bp);
+    try testing.expect(written_bytes >= 1);
+
+    // Read back via BitReader backward.
+    var r = bit_reader_mod.BitReader.initBackward(buf[buf.len - written_bytes ..]);
+    r.refillBackwards();
+    // First read 3 bits → expect 1
+    const v1 = r.readBitsNoRefill(3);
+    try testing.expectEqual(@as(u32, 1), v1);
+    // Then 2 bits → expect 2
+    const v2 = r.readBitsNoRefill(2);
+    try testing.expectEqual(@as(u32, 2), v2);
 }
 
 test "BitWriter64Forward total_bits tracks across writes" {
