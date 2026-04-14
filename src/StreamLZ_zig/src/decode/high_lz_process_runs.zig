@@ -452,10 +452,7 @@ fn executeTokensType1(
 
     var i: u32 = 0;
     while (i < token_count) : (i += 1) {
-        // Match-source prefetch for a token ~128 steps ahead. The LzToken is
-        // 16 bytes so 4 per cache line; one prefetch also warms tokens[i+N+1..+3].
-        // We prefetch two 64-byte lines because many matches span a line
-        // boundary and long matches (>64) benefit from the second line too.
+        // Match-source prefetch for a token ~prefetch_ahead steps ahead.
         const prefetch_index: u32 = i + prefetch_ahead;
         if (prefetch_index < token_count) {
             const pt = tokens[prefetch_index];
@@ -496,23 +493,25 @@ fn executeTokensType1(
             continue;
         }
 
-        // Fast path: cascading wide copies, matching the C# reference.
+        // Fast path: 16-byte SIMD literal copies. Halves the instruction
+        // count vs the original 8-byte cascade — the inner loop body
+        // shrinks enough to stay in the DSB (decoded uop cache) which
+        // delivers 6 uops/cycle vs the legacy decoder's 5 inst/cycle.
+        // Safe-space padding allows the 16-byte overshoot for short
+        // literals (we advance d/lit_stream by lit_len, not by 16).
         var d = dst_token_start;
-        copy.copy64(d, lit_stream);
-        if (lit_len > 8) {
-            copy.copy64(d + 8, lit_stream + 8);
-            if (lit_len > 16) {
-                copy.copy64(d + 16, lit_stream + 16);
-                if (lit_len > 24) {
-                    var remaining = lit_len;
-                    var dd = d;
-                    var ss = lit_stream;
-                    while (remaining > 24) {
-                        copy.copy64(dd + 24, ss + 24);
-                        remaining -= 8;
-                        dd += 8;
-                        ss += 8;
-                    }
+        copy.copy16(d, lit_stream);
+        if (lit_len > 16) {
+            copy.copy16(d + 16, lit_stream + 16);
+            if (lit_len > 32) {
+                var remaining = lit_len;
+                var dd = d + 32;
+                var ss = lit_stream + 32;
+                while (remaining > 32) {
+                    copy.copy16(dd, ss);
+                    remaining -= 16;
+                    dd += 16;
+                    ss += 16;
                 }
             }
         }

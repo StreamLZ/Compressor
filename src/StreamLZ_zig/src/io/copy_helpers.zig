@@ -50,6 +50,14 @@ pub inline fn copy64(dst: [*]u8, src: [*]const u8) void {
     std.mem.writeInt(u64, dst[0..8], v, .little);
 }
 
+/// Unaligned 16-byte copy. Maps to a single MOVDQU pair on x86_64.
+/// Halves the instruction count vs two `copy64` calls — used by the
+/// literal cascade in the High decoder hot loop to keep the inner
+/// body small enough to live in the DSB (decoded uop cache).
+pub inline fn copy16(dst: [*]u8, src: [*]const u8) void {
+    storeV16(dst, loadV16(src));
+}
+
 /// Copies 64 bytes via 4× 16-byte vector loads and stores.
 pub inline fn copy64Bytes(dst: [*]u8, src: [*]const u8) void {
     const v0 = loadV16(src);
