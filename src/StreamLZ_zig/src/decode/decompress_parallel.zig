@@ -20,6 +20,7 @@
 const std = @import("std");
 const block_header = @import("../format/block_header.zig");
 const constants = @import("../format/streamlz_constants.zig");
+const pdm = @import("../format/parallel_decode_metadata.zig");
 const fast = @import("fast_lz_decoder.zig");
 const high = @import("high_lz_decoder.zig");
 const high_runs = @import("high_lz_process_runs.zig");
@@ -729,6 +730,192 @@ pub fn decompressCoreTwoPhase(
 
     dst_off_inout.* += decompressed_size;
     return true;
+}
+
+// ────────────────────────────────────────────────────────────
+//  v2 Fast L1-L4 parallel decode (sidecar-driven phase 1 + phase 2)
+// ────────────────────────────────────────────────────────────
+//
+// For files compressed by a v2 Fast L1-L4 encoder, the frame carries a
+// parallel-decode sidecar block containing the pre-computed phase-1
+// state: a list of cross-sub-chunk match ops + literal byte leaves the
+// decoder must populate in `dst` before spawning per-chunk workers.
+//
+// The workflow:
+//   1. Parse the sidecar body into `pdm.ParsedSidecar`.
+//   2. Run phase 1 on `dst[dst_start_off..][0..decompressed_size]`:
+//      write literal byte leaves, then execute match ops in
+//      cmd-stream order with byte-wise forward copy.
+//   3. Pre-scan the compressed block to discover sub-chunk boundaries.
+//   4. Dispatch worker threads via `fastL14WorkerFn` to decode chunks
+//      in parallel via `decodeOneChunk` + `fast.decodeChunk`. Every
+//      chunk's cross-sub-chunk reads now hit phase-1-populated bytes.
+//   5. Return after all workers join.
+//
+// Unlike the SC (L6-L8) path, there are no groups — every chunk runs
+// independently. The closure sidecar makes cross-chunk reads safe.
+
+const FastL14Shared = struct {
+    chunks: []const ChunkScanInfo,
+    block_src: []const u8,
+    dst: []u8,
+    dst_start_off: usize,
+    next_chunk: std.atomic.Value(usize),
+    error_flag: std.atomic.Value(u32),
+    captured_err: std.atomic.Value(u16),
+};
+
+fn fastL14WorkerFn(shared: *FastL14Shared, scratch: []u8) void {
+    while (true) {
+        const chunk_idx = shared.next_chunk.fetchAdd(1, .monotonic);
+        if (chunk_idx >= shared.chunks.len) return;
+        if (shared.error_flag.load(.monotonic) != 0) return;
+
+        const q = shared.chunks[chunk_idx];
+        const chunk_dst_off = shared.dst_start_off + q.dst_offset;
+        decodeOneChunk(
+            shared.block_src[q.src_offset .. q.src_offset + q.src_size],
+            shared.dst,
+            chunk_dst_off,
+            q.dst_size,
+            // group_dst_start_off is irrelevant for Fast (only used by
+            // the High codec's SC group handling); pass anything
+            // valid. Using dst_start_off keeps the semantics well-defined.
+            shared.dst_start_off,
+            scratch,
+        ) catch |err| {
+            const code: u16 = @intFromError(err);
+            _ = shared.captured_err.cmpxchgStrong(0, code, .monotonic, .monotonic);
+            _ = shared.error_flag.store(1, .monotonic);
+            return;
+        };
+    }
+}
+
+/// Apply the phase-1 sidecar ops to `dst[dst_off..][0..region_len]`.
+///
+/// Positions in the sidecar are relative to the FRAME's output start.
+/// When called for a single-piece frame with `dst_off == 0`, those
+/// positions are direct indices into `dst`. For multi-piece framed
+/// streams (each piece its own frame with its own sidecar), the
+/// caller supplies the running dst offset so positions land in the
+/// correct piece region.
+fn runPhaseOne(
+    dst: []u8,
+    dst_off: usize,
+    region_len: usize,
+    sidecar: *const pdm.ParsedSidecar,
+) void {
+    // Literal byte leaves first, so subsequent match copies that read
+    // those positions pick up the correct bytes.
+    for (sidecar.literal_bytes) |lit| {
+        if (lit.position >= region_len) continue;
+        dst[dst_off + @as(usize, @intCast(lit.position))] = lit.byte_value;
+    }
+    // Match ops in cmd-stream (= file-position) order: byte-wise
+    // forward copy handles self-referential matches (offset < length)
+    // correctly, which is the common LZ case.
+    for (sidecar.match_ops) |op| {
+        if (op.src_start < 0) continue;
+        const length: usize = op.length;
+        const src_rel: usize = @intCast(op.src_start);
+        const tgt_rel: usize = @intCast(op.target_start);
+        if (src_rel + length > region_len) continue;
+        if (tgt_rel + length > region_len) continue;
+        const src_abs = dst_off + src_rel;
+        const tgt_abs = dst_off + tgt_rel;
+        var i: usize = 0;
+        while (i < length) : (i += 1) {
+            dst[tgt_abs + i] = dst[src_abs + i];
+        }
+    }
+}
+
+/// Decompress a v2 Fast L1-L4 compressed frame block in parallel,
+/// using a pre-computed parallel-decode sidecar for phase 1.
+///
+/// On entry `dst_off_inout.*` points at the first byte this block's
+/// output should occupy. On successful return it has been advanced by
+/// `decompressed_size`.
+pub fn decompressFastL14Parallel(
+    allocator: std.mem.Allocator,
+    pool_opt: ?*std.Thread.Pool,
+    block_src: []const u8,
+    sidecar_body: []const u8,
+    dst: []u8,
+    dst_off_inout: *usize,
+    decompressed_size: usize,
+) DecodeError!void {
+    // ── Pre-scan chunks in the compressed frame block ────────────────
+    var scan = try preScanBlock(allocator, block_src, decompressed_size);
+    defer scan.deinit();
+
+    const num_chunks = scan.chunks.len;
+    if (num_chunks == 0) return;
+
+    const dst_start_off = dst_off_inout.*;
+    if (dst_start_off + decompressed_size + 64 > dst.len) return error.OutputTooSmall;
+
+    // ── Phase 1: parse sidecar and apply to dst ──────────────────────
+    var sidecar = pdm.parseBlockBody(sidecar_body, allocator) catch return error.InvalidInternalHeader;
+    defer sidecar.deinit();
+    runPhaseOne(dst, dst_start_off, decompressed_size, &sidecar);
+
+    // ── Phase 2: dispatch workers to decode sub-chunks in parallel ──
+    const cpu_count_raw: usize = std.Thread.getCpuCount() catch 1;
+    const worker_count: usize = @min(num_chunks, @max(@as(usize, 1), cpu_count_raw));
+
+    const sc_scratch_bytes: usize = constants.scratch_size * 2;
+    const scratches = try allocator.alloc([]u8, worker_count);
+    defer {
+        for (scratches) |s| if (s.len != 0) allocator.free(s);
+        allocator.free(scratches);
+    }
+    for (scratches) |*s| s.* = &[_]u8{};
+    for (scratches) |*s| s.* = try allocator.alloc(u8, sc_scratch_bytes);
+
+    var shared: FastL14Shared = .{
+        .chunks = scan.chunks,
+        .block_src = block_src,
+        .dst = dst,
+        .dst_start_off = dst_start_off,
+        .next_chunk = std.atomic.Value(usize).init(0),
+        .error_flag = std.atomic.Value(u32).init(0),
+        .captured_err = std.atomic.Value(u16).init(0),
+    };
+
+    if (worker_count == 1) {
+        fastL14WorkerFn(&shared, scratches[0]);
+    } else if (pool_opt) |pool| {
+        var wg: std.Thread.WaitGroup = .{};
+        for (0..worker_count) |i| {
+            pool.spawnWg(&wg, fastL14WorkerFn, .{ &shared, scratches[i] });
+        }
+        pool.waitAndWork(&wg);
+    } else {
+        const threads = try allocator.alloc(std.Thread, worker_count);
+        defer allocator.free(threads);
+        var spawned: usize = 0;
+        while (spawned < worker_count) : (spawned += 1) {
+            threads[spawned] = std.Thread.spawn(.{}, fastL14WorkerFn, .{ &shared, scratches[spawned] }) catch |err| {
+                for (threads[0..spawned]) |t| t.join();
+                return err;
+            };
+        }
+        for (threads) |t| t.join();
+    }
+
+    if (shared.error_flag.load(.monotonic) != 0) {
+        const code = shared.captured_err.load(.monotonic);
+        if (code != 0) {
+            const any_err: anyerror = @errorFromInt(code);
+            const narrow: DecodeError = @errorCast(any_err);
+            return narrow;
+        }
+        return error.Truncated;
+    }
+
+    dst_off_inout.* += decompressed_size;
 }
 
 // ────────────────────────────────────────────────────────────

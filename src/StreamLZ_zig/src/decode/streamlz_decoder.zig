@@ -136,6 +136,40 @@ fn decompressOneFrame(
     // Scratch buffer for Fast decoder tables and stream storage.
     var scratch: [constants.scratch_size]u8 = undefined;
 
+    // v2: if the frame advertises a parallel-decode sidecar AND the
+    // caller provided an allocator, pre-scan the frame blocks to
+    // locate the sidecar body. The sidecar is emitted AFTER the
+    // compressed blocks it applies to, so we can't discover it lazily
+    // during the main iteration; we have to find it up front.
+    //
+    // For this initial cut we only use the sidecar if there's exactly
+    // one sidecar block in the frame. Multi-sidecar frames fall
+    // through to the serial path.
+    var sidecar_body: ?[]const u8 = null;
+    if (hdr.flags.parallel_decode_metadata_present and allocator_opt != null) {
+        var scan_pos: usize = pos;
+        var sidecar_count: usize = 0;
+        while (scan_pos + 4 <= src.len) {
+            const w = std.mem.readInt(u32, src[scan_pos..][0..4], .little);
+            if (w == frame.end_mark) break;
+            const bh_peek = frame.parseBlockHeader(src[scan_pos..]) catch break;
+            if (bh_peek.isEndMark()) break;
+            scan_pos += 8;
+            if (bh_peek.parallel_decode_metadata) {
+                if (scan_pos + bh_peek.compressed_size > src.len) break;
+                sidecar_count += 1;
+                if (sidecar_count == 1) {
+                    sidecar_body = src[scan_pos..][0..bh_peek.compressed_size];
+                } else {
+                    // More than one sidecar — unsupported for now.
+                    sidecar_body = null;
+                    break;
+                }
+            }
+            scan_pos += bh_peek.compressed_size;
+        }
+    }
+
     while (pos + 4 <= src.len) {
         const first_word = std.mem.readInt(u32, src[pos..][0..4], .little);
         if (first_word == frame.end_mark) {
@@ -174,11 +208,12 @@ fn decompressOneFrame(
 
         // Dispatch: if caller provided an allocator AND this block
         // has multiple chunks, try the appropriate parallel path —
+        //   * Fast L1-L4 with sidecar (v2) → decompressFastL14Parallel
         //   * SC (L6-L8)  → DecompressCoreParallel
         //   * non-SC High → DecompressCoreTwoPhase (entropy parallel,
         //                   match resolve serial)
-        // Anything else (single-chunk, Fast, mixed decoder types) falls
-        // through to the existing serial loop.
+        // Anything else (single-chunk, Fast without sidecar, mixed
+        // decoder types) falls through to the existing serial loop.
         const block_src = src[pos .. pos + bh.compressed_size];
         var dispatched_parallel: bool = false;
         if (allocator_opt) |allocator| {
@@ -186,7 +221,23 @@ fn decompressOneFrame(
                 const peek = block_header.parseBlockHeader(block_src) catch null;
                 if (peek) |ph| {
                     const has_many_chunks = bh.decompressed_size > constants.chunk_size;
-                    if (ph.self_contained and has_many_chunks) {
+                    const is_fast_like = ph.decoder_type == .fast or ph.decoder_type == .turbo;
+                    if (is_fast_like and !ph.self_contained and sidecar_body != null and has_many_chunks) {
+                        // v2 Fast L1-L4 parallel path: uses the pre-
+                        // located sidecar to resolve cross-sub-chunk
+                        // matches, then dispatches sub-chunks across
+                        // worker threads.
+                        try parallel.decompressFastL14Parallel(
+                            allocator,
+                            lazy_pool.get(),
+                            block_src,
+                            sidecar_body.?,
+                            dst,
+                            &dst_off,
+                            bh.decompressed_size,
+                        );
+                        dispatched_parallel = true;
+                    } else if (ph.self_contained and has_many_chunks) {
                         try parallel.decompressCoreParallel(
                             allocator,
                             lazy_pool.get(),
