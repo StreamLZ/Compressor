@@ -120,6 +120,7 @@ pub fn calculateMaxThreads(src_len: usize, level: u8) u32 {
 pub const CompressError = error{
     BadLevel,
     BadBlockSize,
+    BadScGroupSize,
     DestinationTooSmall,
     HashBitsOutOfRange,
 } || std.mem.Allocator.Error || fast_enc.EncodeError || std.Thread.SpawnError;
@@ -773,7 +774,16 @@ fn compressFramedOne(
             @memcpy(dst[pos..][0..block_src_len], block_src);
             pos += block_src_len;
         } else {
-            const raw: u32 = @intCast(chunk_compressed_size - 1);
+            // v2 chunk header: bits [17:0] = compressed_size - 1,
+            // bits [19:18] = type (0 = normal), bit [20] = has_cross_chunk_match.
+            // We conservatively write the bit as 0 ("may have cross-chunk refs")
+            // for now — a true-value computation would require tracking
+            // min_match_src across the Fast parser variants and plumbing it up
+            // into EncodeResult. Decoders treat 0 as "check the sidecar"; a
+            // future encoder can set the bit to 1 when it knows the chunk is
+            // cross-chunk-free, enabling a fast dispatch path.
+            const has_cross_chunk_match_bit: u32 = 0;
+            const raw: u32 = @as(u32, @intCast(chunk_compressed_size - 1)) | has_cross_chunk_match_bit;
             std.mem.writeInt(u32, dst[chunk_hdr_pos..][0..4], raw, .little);
         }
 
@@ -1466,7 +1476,13 @@ fn compressOneHighBlock(
         @memcpy(dst_block[local_pos..][0..block_src_len], block_src);
         local_pos += block_src_len;
     } else {
-        const raw: u32 = @intCast(chunk_compressed_size - 1);
+        // v2 chunk header: conservative 0 for has_cross_chunk_match (see
+        // comment at the Fast encoder's write site). High codec chunks
+        // always get 0 for now — the High parallel decode path uses
+        // SC-group semantics rather than the Fast phase-1 sidecar, so
+        // the bit has no effect on High decode correctness.
+        const has_cross_chunk_match_bit: u32 = 0;
+        const raw: u32 = @as(u32, @intCast(chunk_compressed_size - 1)) | has_cross_chunk_match_bit;
         std.mem.writeInt(u32, dst_block[chunk_hdr_pos..][0..4], raw, .little);
     }
 

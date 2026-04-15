@@ -310,6 +310,7 @@ pub fn decompressCoreParallel(
     dst: []u8,
     dst_off_inout: *usize,
     decompressed_size: usize,
+    sc_group_size: u8,
 ) DecodeError!void {
     // Pre-scan to count chunks and compute prefix size. The pre-scan
     // walks headers only and doesn't read into the tail prefix region.
@@ -330,7 +331,11 @@ pub fn decompressCoreParallel(
     if (dst_start_off + decompressed_size + 64 > dst.len) return error.OutputTooSmall;
 
     // Worker count: min(num_groups, cpu_count).
-    const group_size = constants.sc_group_size;
+    //
+    // v2: `group_size` is now taken from the frame header rather than
+    // the compile-time `constants.sc_group_size` constant. Encoders may
+    // eventually pick different sizes without a format bump.
+    const group_size: usize = sc_group_size;
     const num_groups = (num_chunks + group_size - 1) / group_size;
     const cpu_count_raw: usize = std.Thread.getCpuCount() catch 1;
     const worker_count: usize = @min(num_groups, @max(@as(usize, 1), cpu_count_raw));

@@ -14,11 +14,17 @@
 //!     [6:0]  decoder_type (0=High, 1=Fast, 2=Turbo)
 //!     [7]    use_checksums
 //!
-//! Layout of the 4-byte LE chunk header:
+//! Layout of the 4-byte LE chunk header (v2):
 //!   bits [17:0]  compressed_size - 1
 //!   bits [19:18] type (0=normal, 1=memset, 2+ reserved)
-//!   bits [23:20] reserved (0)
-//!   (high byte) reserved / padding
+//!   bit  [20]    has_cross_chunk_match — set iff at least one LZ match
+//!                in this chunk reads bytes produced BEFORE the chunk's
+//!                own dst start. Decoders use this bit to short-circuit
+//!                parallel decode: a chunk with has_cross_chunk_match == 0
+//!                is independently decodable and needs no phase 1 state;
+//!                one with == 1 requires the frame-level parallel-decode
+//!                sidecar to be applied first.
+//!   bits [31:21] reserved (must be 0 on write)
 //!
 //! When `use_checksums` is set, 3 extra bytes follow the 4-byte chunk header
 //! (big-endian CRC24). The decoder currently parses but does not verify them.
@@ -57,6 +63,12 @@ pub const ChunkHeader = struct {
     is_memset: bool,
     /// For memset chunks, the fill byte (or first byte after the header in the C# code).
     memset_fill: u8,
+    /// v2: set iff at least one LZ match in this chunk reads bytes that
+    /// live before the chunk's own dst start. Decoders that support
+    /// parallel decode use this flag to identify chunks that can be
+    /// decoded independently (has_cross_chunk_match == false) vs those
+    /// that need phase-1 sidecar bytes in place (== true).
+    has_cross_chunk_match: bool,
 };
 
 pub const ParseError = error{
@@ -96,6 +108,7 @@ pub fn parseChunkHeader(src: []const u8, use_checksum: bool) ParseError!ChunkHea
     const v = std.mem.readInt(u32, src[0..4], .little);
     const size = v & constants.chunk_size_mask;
     const chunk_type = (v >> constants.chunk_type_shift) & 3;
+    const has_cross_chunk_match = (v & constants.chunk_has_cross_chunk_match_mask) != 0;
 
     switch (chunk_type) {
         0 => {
@@ -109,6 +122,7 @@ pub fn parseChunkHeader(src: []const u8, use_checksum: bool) ParseError!ChunkHea
                     .bytes_consumed = 7,
                     .is_memset = false,
                     .memset_fill = 0,
+                    .has_cross_chunk_match = has_cross_chunk_match,
                 };
             }
             return .{
@@ -118,10 +132,14 @@ pub fn parseChunkHeader(src: []const u8, use_checksum: bool) ParseError!ChunkHea
                 .bytes_consumed = 4,
                 .is_memset = false,
                 .memset_fill = 0,
+                .has_cross_chunk_match = has_cross_chunk_match,
             };
         },
         1 => {
             // Memset chunk: 1 extra byte for fill value (no checksum path).
+            // The cross-chunk-match bit is meaningless for a memset
+            // (no LZ data) but we still surface it so the caller can
+            // validate the encoder zeroed it.
             if (src.len < 5) return error.TooShort;
             return .{
                 .compressed_size = 0,
@@ -130,6 +148,7 @@ pub fn parseChunkHeader(src: []const u8, use_checksum: bool) ParseError!ChunkHea
                 .bytes_consumed = 5,
                 .is_memset = true,
                 .memset_fill = src[4],
+                .has_cross_chunk_match = has_cross_chunk_match,
             };
         },
         else => return error.BadChunkType,
@@ -183,6 +202,16 @@ test "parseChunkHeader parses normal chunk, no checksum" {
     try testing.expectEqual(@as(u32, 1024), ch.compressed_size);
     try testing.expect(!ch.is_memset);
     try testing.expectEqual(@as(usize, 4), ch.bytes_consumed);
+    try testing.expect(!ch.has_cross_chunk_match);
+}
+
+test "parseChunkHeader reads has_cross_chunk_match bit" {
+    const value: u32 = 1023 | constants.chunk_has_cross_chunk_match_mask;
+    var buf: [4]u8 = undefined;
+    std.mem.writeInt(u32, &buf, value, .little);
+    const ch = try parseChunkHeader(&buf, false);
+    try testing.expectEqual(@as(u32, 1024), ch.compressed_size);
+    try testing.expect(ch.has_cross_chunk_match);
 }
 
 test "parseChunkHeader parses normal chunk with checksum" {

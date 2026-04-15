@@ -10,7 +10,15 @@ pub const chunk_size_bits: u6 = 18;
 pub const chunk_header_size: usize = 4;
 pub const chunk_size_mask: u32 = chunk_size - 1; // 0x3FFFF
 pub const chunk_type_shift: u6 = chunk_size_bits;
+pub const chunk_type_mask: u32 = 0b11 << chunk_type_shift; // bits 18..19
 pub const chunk_type_memset: u32 = 1 << chunk_type_shift;
+
+/// v2 chunk-header flag: bit 20 of the 4-byte chunk header, set when
+/// at least one LZ match in the chunk reads bytes produced before the
+/// chunk's own dst start (cross-chunk back-reference). Parallel decode
+/// uses this bit to gate phase-1 state requirements per chunk.
+pub const chunk_has_cross_chunk_match_shift: u6 = 20;
+pub const chunk_has_cross_chunk_match_mask: u32 = 1 << chunk_has_cross_chunk_match_shift;
 
 pub const bt4_max_read_size: usize = 8 * 1024 * 1024;
 
@@ -112,7 +120,17 @@ pub const fibonacci_hash_multiplier: u64 = 0x9E3779B97F4A7C15;
 //  Threading
 // ────────────────────────────────────────────────────────────
 
+/// Legacy hardcoded SC group size (= 4 chunks = 1 MB). Kept for
+/// encoder-side use where the group-size choice is made at compress
+/// time. Decoders should prefer `FrameHeader.sc_group_size` (v2+)
+/// rather than this constant so future encoders can pick different
+/// values without a format bump.
 pub const sc_group_size: usize = 4;
+
+/// Canonical default for the v2 frame-header `sc_group_size` byte.
+/// Alias of `sc_group_size` for API clarity at header-write sites.
+pub const default_sc_group_size: u8 = 4;
+
 pub const per_thread_memory_estimate: usize = 40 * 1024 * 1024;
 
 // ────────────────────────────────────────────────────────────

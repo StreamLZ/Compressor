@@ -184,6 +184,7 @@ fn decompressOneFrame(
                             dst,
                             &dst_off,
                             bh.decompressed_size,
+                            hdr.sc_group_size,
                         );
                         dispatched_parallel = true;
                     } else if (ph.decoder_type == .high and has_many_chunks) {
@@ -209,6 +210,7 @@ fn decompressOneFrame(
                 &dst_off,
                 bh.decompressed_size,
                 &scratch,
+                hdr.sc_group_size,
             );
         }
         pos += bh.compressed_size;
@@ -425,7 +427,11 @@ pub fn decompressBlockWithDict(
 
     var scratch: [constants.scratch_size]u8 = undefined;
     var dst_off: usize = dst_offset;
-    try decompressCompressedBlock(src, dst, &dst_off, decompressed_size, &scratch);
+    // Block-level APIs have no frame-header context, so we use the
+    // v2 default sc_group_size. Streaming / framed callers should
+    // instead use `decompressFramed` / `decompressStream` so the
+    // header-declared sc_group_size flows through.
+    try decompressCompressedBlock(src, dst, &dst_off, decompressed_size, &scratch, constants.default_sc_group_size);
     return dst_off - dst_offset;
 }
 
@@ -448,6 +454,7 @@ fn decompressCompressedBlock(
     dst_off_inout: *usize,
     decompressed_size: usize,
     scratch: []u8,
+    sc_group_size: u8,
 ) DecompressError!void {
     // Peek the first 2-byte internal block header to detect SC mode up-front.
     const is_sc = blk: {
@@ -573,7 +580,8 @@ fn decompressCompressedBlock(
                 // and the initial 8-byte Copy64 fires at each group start.
                 // For non-SC, use the whole-buffer start (sliding window).
                 const dst_start_ptr: [*]const u8 = if (is_sc) blk: {
-                    const group_start_chunk = (chunk_idx_in_block / constants.sc_group_size) * constants.sc_group_size;
+                    const gs: usize = sc_group_size;
+                    const group_start_chunk = (chunk_idx_in_block / gs) * gs;
                     const group_start_offset = sc_start_dst_off + group_start_chunk * constants.chunk_size;
                     break :blk dst[group_start_offset..].ptr;
                 } else dst.ptr;
