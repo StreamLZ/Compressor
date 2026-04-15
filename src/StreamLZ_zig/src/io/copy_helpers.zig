@@ -103,6 +103,16 @@ pub inline fn copy64Add(dst: [*]u8, src: [*]const u8, delta: [*]const u8) void {
     storeV8(dst, vs +% vd);
 }
 
+/// Byte-wise add of 16 bytes from `src` and `delta`, storing to `dst`.
+/// SSE2 PADDB variant of `copy64Add`. Used by the short-token delta
+/// literal path where copying 16 bytes instead of 8 halves the store
+/// uops per token (caller guarantees 16 bytes of overshoot space).
+pub inline fn copy16Add(dst: [*]u8, src: [*]const u8, delta: [*]const u8) void {
+    const vs = loadV16(src);
+    const vd = loadV16(delta);
+    storeV16(dst, vs +% vd);
+}
+
 /// Fills `count` bytes starting at `dst` with `byte`.
 pub inline fn memset(dst: [*]u8, byte: u8, count: usize) void {
     @memset(dst[0..count], byte);

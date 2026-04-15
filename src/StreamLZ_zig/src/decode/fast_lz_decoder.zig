@@ -403,8 +403,8 @@ fn processModeImpl(
                 if (@intFromPtr(dst) >= @intFromPtr(dst_end)) return error.OutputTruncated;
             }
             const new_dist: i64 = off16_stream[0];
-            const use_distance: u32 = (cmd >> 7) -% 1;
             const literal_length: usize = cmd & 7;
+            const use_new_dist: bool = (cmd & 0x80) == 0;
 
             if (is_delta) {
                 const delta_src_addr: usize = @intFromPtr(dst) +% @as(usize, @bitCast(@as(isize, @intCast(recent_offs))));
@@ -416,12 +416,15 @@ fn processModeImpl(
             dst += literal_length;
             lit_stream += literal_length;
 
-            // Branchless recent-offset swap: XOR with (use_distance & (recent_offs ^ -new_dist))
-            const swap_mask: i64 = @as(i64, @bitCast(@as(u64, use_distance))) & (recent_offs ^ (-new_dist));
-            recent_offs ^= swap_mask;
+            // CMOV select: pick -new_dist if use_new_dist, else keep recent_offs.
+            // Shorter critical path than the 4-op XOR-mask swap: the match
+            // load can issue as soon as this select and `dst += literal_length`
+            // are both ready.
+            const candidate_offs: i64 = -new_dist;
+            recent_offs = if (use_new_dist) candidate_offs else recent_offs;
 
-            // Advance off16 stream by (use_distance & 2) bytes (0 or 2).
-            off16_stream = @ptrFromInt(@intFromPtr(off16_stream) + (use_distance & 2));
+            // Advance off16 stream by 2 bytes if we consumed new_dist.
+            off16_stream = @ptrFromInt(@intFromPtr(off16_stream) + (@as(usize, @intFromBool(use_new_dist)) * 2));
 
             // Bounds: match source must be within dst_start.
             const match_addr_usize: usize = @intFromPtr(dst) +% @as(usize, @bitCast(@as(isize, @intCast(recent_offs))));
