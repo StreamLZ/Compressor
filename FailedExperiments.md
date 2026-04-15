@@ -694,3 +694,38 @@ For future scratch-sizing / data-layout decisions:
 ≤ L3 / 2` (leaving room for other working sets). For 24 workers and 36 MB
 L3, that's ~750 KB per worker max. The current 884 KB is right at the
 edge; the bumped 1.9 MB blew through it.
+
+---
+
+## Encoder: thread-local cached MatchHasher16Dual (High-codec L9-L11)
+
+**Hypothesis**: `findMatchesHashBased` allocates a fresh 64 MB hash table
+(`MatchHasher16Dual`) on every call via `alignedAlloc` + the hasher
+resets via `@memset` on init. VTune showed ~150 ms/call in page-fault /
+zeroing paths. Reusing the table across calls via a `threadlocal var`
+with lazy init should cut that out entirely.
+
+**What we tried**:
+1. `threadlocal var cached_hasher: ?MatchHasher16Dual = null` + lazy init
+   on first call, reset bit-width on reuse, `@memset` the table to 0.
+   Result: **7.2 MB/s vs 7.5 MB/s baseline** (-4%).
+2. Skip the `@memset` on reuse (the hasher's internal generation counter
+   was supposed to invalidate stale entries — it doesn't, stale positions
+   leak through). Result: **7.1 MB/s** AND corrupted output.
+
+**Root cause**: On Windows, `VirtualAlloc` for a large buffer returns
+demand-zero pages. The OS zeroes pages lazily on first touch, spreading
+the cost across the compress loop's natural cache-miss latency. An
+explicit `@memset` of a reused 64 MB buffer must traverse every cache
+line up-front, stalling on DRAM writes, and it pollutes L3 before the
+compress loop needs it. The "free" alloc was already cheaper than any
+reuse strategy that needs to clear.
+
+**Takeaway**: Don't reuse large scratch buffers on Windows without
+benchmarking. `VirtualAlloc` + demand-zero is already an optimized
+"amortized zeroing" path the OS provides for free. On Linux/glibc this
+might look different (malloc pools reuse dirty memory), but on Win32 the
+allocator's default behavior beats manual pooling for buffers > L3.
+
+Reverted to `var hasher = try MatchHasher16Dual.init(allocator, bits, 0);
+defer hasher.deinit();` on every call.
