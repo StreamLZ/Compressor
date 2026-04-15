@@ -36,6 +36,14 @@ pub const end_mark: u32 = 0;
 
 pub const block_uncompressed_flag: u32 = 0x80000000;
 
+/// v2: bit 30 of the block header's `compressed_size` field marks the
+/// block as a parallel-decode metadata (sidecar) block. The block's
+/// body is a `parallel_decode_metadata` payload (see format/parallel_decode_metadata.zig).
+/// Sidecar blocks contribute zero decompressed output — decoders that
+/// don't use the sidecar must skip the `compressed_size` bytes and
+/// move on without advancing `dst_off`.
+pub const block_parallel_decode_metadata_flag: u32 = 0x40000000;
+
 // v2 header is 14 bytes fixed (up from 10 in v1): magic(4) + version(1) +
 // flags(1) + codec(1) + level(1) + block_size_log2(1) + sc_group_size(1)
 // + reserved(4). With optional content_size(8) + dictionary_id(4) the
@@ -238,10 +246,14 @@ pub const BlockHeader = struct {
     compressed_size: u32,
     decompressed_size: u32,
     uncompressed: bool,
+    /// v2: this block carries parallel-decode sidecar metadata, not
+    /// decompressible data. Its compressed_size bytes are the sidecar
+    /// payload; its decompressed_size is 0. Serial decoders skip it.
+    parallel_decode_metadata: bool,
 
     /// True when this is the end-of-stream sentinel (compressed_size == 0).
     pub fn isEndMark(self: BlockHeader) bool {
-        return self.compressed_size == 0;
+        return self.compressed_size == 0 and !self.parallel_decode_metadata;
     }
 };
 
@@ -250,20 +262,28 @@ pub fn parseBlockHeader(src: []const u8) ParseError!BlockHeader {
     if (src.len < 4) return error.Truncated;
     const raw = std.mem.readInt(u32, src[0..4], .little);
     if (raw == end_mark) {
-        return .{ .compressed_size = 0, .decompressed_size = 0, .uncompressed = false };
+        return .{
+            .compressed_size = 0,
+            .decompressed_size = 0,
+            .uncompressed = false,
+            .parallel_decode_metadata = false,
+        };
     }
     if (src.len < 8) return error.Truncated;
     const decompressed = std.mem.readInt(u32, src[4..8], .little);
+    const size_mask: u32 = ~(block_uncompressed_flag | block_parallel_decode_metadata_flag);
     return .{
-        .compressed_size = raw & ~block_uncompressed_flag,
+        .compressed_size = raw & size_mask,
         .decompressed_size = decompressed,
         .uncompressed = (raw & block_uncompressed_flag) != 0,
+        .parallel_decode_metadata = (raw & block_parallel_decode_metadata_flag) != 0,
     };
 }
 
 pub fn writeBlockHeader(dst: []u8, hdr: BlockHeader) void {
     var raw: u32 = hdr.compressed_size;
     if (hdr.uncompressed) raw |= block_uncompressed_flag;
+    if (hdr.parallel_decode_metadata) raw |= block_parallel_decode_metadata_flag;
     std.mem.writeInt(u32, dst[0..4], raw, .little);
     std.mem.writeInt(u32, dst[4..8], hdr.decompressed_size, .little);
 }
@@ -379,9 +399,27 @@ test "block header uncompressed flag roundtrip" {
         .compressed_size = 41,
         .decompressed_size = 41,
         .uncompressed = true,
+        .parallel_decode_metadata = false,
     });
     const bh = try parseBlockHeader(&buf);
     try testing.expect(bh.uncompressed);
+    try testing.expect(!bh.parallel_decode_metadata);
     try testing.expectEqual(@as(u32, 41), bh.compressed_size);
     try testing.expectEqual(@as(u32, 41), bh.decompressed_size);
+}
+
+test "block header parallel_decode_metadata flag roundtrip" {
+    var buf: [8]u8 = undefined;
+    writeBlockHeader(&buf, .{
+        .compressed_size = 123,
+        .decompressed_size = 0,
+        .uncompressed = false,
+        .parallel_decode_metadata = true,
+    });
+    const bh = try parseBlockHeader(&buf);
+    try testing.expect(bh.parallel_decode_metadata);
+    try testing.expect(!bh.uncompressed);
+    try testing.expectEqual(@as(u32, 123), bh.compressed_size);
+    try testing.expectEqual(@as(u32, 0), bh.decompressed_size);
+    try testing.expect(!bh.isEndMark());
 }

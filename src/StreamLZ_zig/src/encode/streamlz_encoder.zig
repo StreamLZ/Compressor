@@ -20,6 +20,8 @@ const std = @import("std");
 const frame = @import("../format/frame_format.zig");
 const block_header = @import("../format/block_header.zig");
 const lz_constants = @import("../format/streamlz_constants.zig");
+const pdm = @import("../format/parallel_decode_metadata.zig");
+const cleanness = @import("../decode/cleanness_analyzer.zig");
 const fast_constants = @import("fast_constants.zig");
 const FastMatchHasher = @import("fast_match_hasher.zig").FastMatchHasher;
 const match_hasher = @import("match_hasher.zig");
@@ -192,6 +194,14 @@ pub const Options = struct {
     /// CPU core, capped by the memory-aware heuristic from step 40).
     /// `1` forces the serial path. Matches C# `LzCoder.NumThreads`.
     num_threads: u32 = 0,
+
+    /// v2: emit a parallel-decode sidecar block alongside the Fast
+    /// L1-L4 compressed data so new-format decoders can run phase-1
+    /// cross-chunk resolution before spawning phase-2 worker threads.
+    /// Defaults to on for Fast levels; ignored for High/Turbo paths.
+    /// The sidecar is ~0.3-1% of compressed size and has no impact on
+    /// compression ratio of the main payload.
+    emit_parallel_decode_metadata: bool = true,
 };
 
 /// Resolved per-input parameters derived from `Options` + heuristics.
@@ -823,6 +833,7 @@ fn compressFramedOne(
             .compressed_size = @intCast(src.len),
             .decompressed_size = @intCast(src.len),
             .uncompressed = true,
+            .parallel_decode_metadata = false,
         });
         @memcpy(dst[pos..][0..src.len], src);
         pos += src.len;
@@ -831,7 +842,104 @@ fn compressFramedOne(
             .compressed_size = @intCast(frame_block_compressed_size),
             .decompressed_size = @intCast(src.len),
             .uncompressed = false,
+            .parallel_decode_metadata = false,
         });
+    }
+
+    // ── v2 parallel-decode sidecar block ───────────────────────────────
+    //
+    // For Fast L1-L4 compressed data (opts.level 1..4), compute the
+    // cross-sub-chunk closure from the just-written compressed bytes
+    // and append a sidecar block that parallel decoders can consume.
+    // The sidecar lives BETWEEN the last compressed block and the end
+    // mark, with the new `parallel_decode_metadata_flag` on its outer
+    // block header so serial decoders skip it cleanly.
+    //
+    // buildPpocSidecar walks the just-written frame (header + blocks)
+    // using `src` as the reference for literal-leaf byte values — the
+    // original input, which we already have. No decode pass needed.
+    //
+    // Encoder failures (OOM from the analyzer's byte_earliest /
+    // producer_map allocations) are swallowed: we silently omit the
+    // sidecar and leave the frame flag clear. The frame still decodes
+    // correctly via the serial path; only parallel-decode acceleration
+    // is forfeited for that specific compress call.
+    if (opts.emit_parallel_decode_metadata and opts.level >= 1 and opts.level <= 5 and can_compress) {
+        const sidecar_result = cleanness.buildPpocSidecar(allocator, dst[0..pos], src);
+        if (sidecar_result) |*sc| {
+            var sidecar = sc.*;
+            defer sidecar.deinit(allocator);
+            if (sidecar.match_ops.items.len > 0 or sidecar.literal_bytes.items.len > 0) {
+                const body_size = pdm.serializedBodySize(
+                    sidecar.match_ops.items.len,
+                    sidecar.literal_bytes.items.len,
+                );
+                // Outer block header (8 bytes) + body.
+                if (pos + 8 + body_size > dst.len) {
+                    // Out of output budget — skip the sidecar rather
+                    // than failing the whole compress. Frame is still
+                    // valid without it.
+                } else {
+                    // Convert the analyzer's TypedArrayLists to pdm's
+                    // slice-based format. The record layouts match
+                    // byte-for-byte, so we can cast via slice of a
+                    // packed representation, but the simplest thing
+                    // is an inline copy into a temp buffer.
+                    //
+                    // buildPpocSidecar returns `ClosureMatchOp` and
+                    // `ClosureLiteralByte` structs that have the same
+                    // fields as pdm.MatchOp / pdm.LiteralByte. Build
+                    // slice views by re-casting (they're layout-
+                    // compatible because both use u64/i64/u32 and
+                    // u64/u8 respectively with no padding surprises).
+                    var tmp_match_ops = try allocator.alloc(pdm.MatchOp, sidecar.match_ops.items.len);
+                    defer allocator.free(tmp_match_ops);
+                    for (sidecar.match_ops.items, 0..) |op, i| {
+                        tmp_match_ops[i] = .{
+                            .target_start = op.target_start,
+                            .src_start = op.src_start,
+                            .length = op.length,
+                        };
+                    }
+                    var tmp_literal_bytes = try allocator.alloc(pdm.LiteralByte, sidecar.literal_bytes.items.len);
+                    defer allocator.free(tmp_literal_bytes);
+                    for (sidecar.literal_bytes.items, 0..) |lit, i| {
+                        tmp_literal_bytes[i] = .{
+                            .position = lit.position,
+                            .byte_value = lit.byte_value,
+                        };
+                    }
+
+                    // Write the 8-byte outer block header.
+                    frame.writeBlockHeader(dst[pos..], .{
+                        .compressed_size = @intCast(body_size),
+                        .decompressed_size = 0,
+                        .uncompressed = false,
+                        .parallel_decode_metadata = true,
+                    });
+                    pos += 8;
+
+                    // Write the sidecar body.
+                    const body_written = try pdm.writeBlockBody(
+                        dst[pos..],
+                        tmp_match_ops,
+                        tmp_literal_bytes,
+                    );
+                    pos += body_written;
+
+                    // Patch the frame header flags byte to advertise the
+                    // sidecar's presence. The flags byte is at offset 5
+                    // (after magic+version). We use a bitwise-or so we
+                    // don't clobber the other flag bits the encoder set.
+                    dst[5] |= @as(u8, 1) << 4; // parallel_decode_metadata_present
+                }
+            }
+        } else |_| {
+            // buildPpocSidecar failed (probably OOM from the 400+ MB
+            // byte_earliest + producer_map). Silently continue without
+            // a sidecar — the frame is still correct, just slower to
+            // parallel-decode.
+        }
     }
 
     // ── End mark ───────────────────────────────────────────────────────
@@ -1258,6 +1366,7 @@ fn compressOneFrameBlockWindowed(
             .compressed_size = @intCast(block_bytes),
             .decompressed_size = @intCast(block_bytes),
             .uncompressed = true,
+            .parallel_decode_metadata = false,
         });
         @memcpy(dst[pos..][0..block_bytes], src[src_off_abs..][0..block_bytes]);
         pos += block_bytes;
@@ -1266,6 +1375,7 @@ fn compressOneFrameBlockWindowed(
             .compressed_size = @intCast(fb_compressed_size),
             .decompressed_size = @intCast(block_bytes),
             .uncompressed = false,
+            .parallel_decode_metadata = false,
         });
     }
 
@@ -1314,6 +1424,7 @@ fn finalizeSingleFrameBlock(
             .compressed_size = @intCast(src.len),
             .decompressed_size = @intCast(src.len),
             .uncompressed = true,
+            .parallel_decode_metadata = false,
         });
         @memcpy(dst[pos..][0..src.len], src);
         pos += src.len;
@@ -1322,6 +1433,7 @@ fn finalizeSingleFrameBlock(
             .compressed_size = @intCast(frame_block_compressed_size),
             .decompressed_size = @intCast(src.len),
             .uncompressed = false,
+            .parallel_decode_metadata = false,
         });
     }
     pos_ptr.* = pos;

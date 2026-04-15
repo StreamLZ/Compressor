@@ -683,6 +683,11 @@ pub fn analyzeFilePartition(
         const bh = try frame.parseBlockHeader(src[src_pos..]);
         if (bh.isEndMark()) break;
         src_pos += 8;
+        // v2: sidecar blocks carry no decompressable data — skip them.
+        if (bh.parallel_decode_metadata) {
+            src_pos += bh.compressed_size;
+            continue;
+        }
         if (bh.uncompressed) {
             const base_pos: u64 = file_pos_running;
             var i: u64 = 0;
@@ -964,6 +969,12 @@ pub fn buildPpocSidecar(
         const bh = try frame.parseBlockHeader(src[src_pos..]);
         if (bh.isEndMark()) break;
         src_pos += 8;
+        // v2: parallel-decode-metadata blocks carry no decompressable
+        // bytes — skip them when walking the frame for sidecar building.
+        if (bh.parallel_decode_metadata) {
+            src_pos += bh.compressed_size;
+            continue;
+        }
         if (bh.uncompressed) {
             src_pos += bh.compressed_size;
             file_pos_running += bh.decompressed_size;

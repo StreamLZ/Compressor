@@ -150,6 +150,16 @@ fn decompressOneFrame(
         }
         pos += 8;
 
+        // v2: parallel-decode-metadata (sidecar) block. Serial decoders
+        // skip it — the sidecar is optional metadata for parallel decode
+        // paths, and contributes zero bytes to dst. The compressed_size
+        // bytes carry the sidecar payload, which we advance past here.
+        if (bh.parallel_decode_metadata) {
+            if (pos + bh.compressed_size > src.len) return error.BlockDataTruncated;
+            pos += bh.compressed_size;
+            continue;
+        }
+
         if (bh.uncompressed) {
             if (pos + bh.decompressed_size > src.len) return error.BlockDataTruncated;
             if (dst_off + bh.decompressed_size > dst.len) return error.OutputTooSmall;
@@ -327,6 +337,13 @@ pub fn decompressStream(
         // Sanity caps matching C# `StreamLzFrameDecompressor.cs:96-99`.
         if (bh.decompressed_size > frame.max_decompressed_block_size) return error.BadFrame;
         if (bh.compressed_size > frame.max_decompressed_block_size) return error.BadFrame;
+
+        // v2: skip parallel-decode-metadata (sidecar) blocks.
+        if (bh.parallel_decode_metadata) {
+            if (pos + bh.compressed_size > src.len) return error.BlockDataTruncated;
+            pos += bh.compressed_size;
+            continue;
+        }
 
         // Grow the output budget check before decoding.
         if (dict_bytes + bh.decompressed_size + safe_space > window_buf.len) return error.OutputTooSmall;
@@ -650,6 +667,7 @@ test "decompressFramed roundtrips a tiny uncompressed L1 fixture (synthesized)" 
         .compressed_size = payload.len,
         .decompressed_size = payload.len,
         .uncompressed = true,
+        .parallel_decode_metadata = false,
     });
     @memcpy(buf[hdr_len + 8 ..][0..payload.len], payload);
     frame.writeEndMark(buf[hdr_len + 8 + payload.len ..]);
