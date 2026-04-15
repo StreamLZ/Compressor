@@ -442,12 +442,12 @@ fn processModeImpl(
             const match_ptr: [*]const u8 = dst_begin - far;
             recent_offs = @as(i64, @intCast(@intFromPtr(match_ptr))) - @as(i64, @intCast(@intFromPtr(dst)));
             if (@intFromPtr(dst_end) - @intFromPtr(dst) < length) return error.OutputTruncated;
-            copy.copy64(dst, match_ptr);
-            copy.copy64(dst + 8, match_ptr + 8);
-            copy.copy64(dst + 16, match_ptr + 16);
-            copy.copy64(dst + 24, match_ptr + 24);
+            // 32 bytes via 2× SSE MOVDQU (was 4× scalar copy64). Medium
+            // match is always far-offset (32-bit), so there's no overlap
+            // concern and the 16-byte-wide vector load is safe.
+            copy.copy16(dst, match_ptr);
+            copy.copy16(dst + 16, match_ptr + 16);
             dst += length;
-            // (Prefetch hint skipped — safe without it for correctness.)
         } else if (cmd == 0) {
             // ── Long literal run ──
             if (@intFromPtr(lz.src_end) - @intFromPtr(length_stream) == 0) return error.SourceTruncated;
@@ -471,17 +471,14 @@ fn processModeImpl(
                 while (remaining > 0) {
                     const off_usize: usize = @bitCast(@as(isize, @intCast(recent_offs)));
                     const delta_src: [*]const u8 = @ptrFromInt(@intFromPtr(dst) +% off_usize);
-                    copy.copy64Add(dst, lit_stream, delta_src);
-                    const delta_src2: [*]const u8 = @ptrFromInt(@intFromPtr(dst + 8) +% off_usize);
-                    copy.copy64Add(dst + 8, lit_stream + 8, delta_src2);
+                    copy.copy16Add(dst, lit_stream, delta_src);
                     dst += 16;
                     lit_stream += 16;
                     remaining -= 16;
                 }
             } else {
                 while (remaining > 0) {
-                    copy.copy64(dst, lit_stream);
-                    copy.copy64(dst + 8, lit_stream + 8);
+                    copy.copy16(dst, lit_stream);
                     dst += 16;
                     lit_stream += 16;
                     remaining -= 16;
@@ -510,6 +507,10 @@ fn processModeImpl(
             recent_offs = @as(i64, @intCast(@intFromPtr(match_ptr))) - @as(i64, @intCast(@intFromPtr(dst)));
             if (@intFromPtr(dst_end) - @intFromPtr(dst) < length) return error.OutputTruncated;
 
+            // Long match with 16-bit offset: offset can be as small as
+            // the encoder's minimum (8), so we must preserve the 2×
+            // copy64 cascade — the second 8-byte read picks up the
+            // first 8-byte store, propagating any repeating pattern.
             var m = match_ptr;
             var d = dst;
             var remaining: isize = @intCast(length);
@@ -539,12 +540,13 @@ fn processModeImpl(
             recent_offs = @as(i64, @intCast(@intFromPtr(match_ptr))) - @as(i64, @intCast(@intFromPtr(dst)));
             if (@intFromPtr(dst_end) - @intFromPtr(dst) < length) return error.OutputTruncated;
 
+            // Long match with 32-bit far offset — always safe to use
+            // a single MOVDQU pair per iteration.
             var m = match_ptr;
             var d = dst;
             var remaining: isize = @intCast(length);
             while (remaining > 0) {
-                copy.copy64(d, m);
-                copy.copy64(d + 8, m + 8);
+                copy.copy16(d, m);
                 d += 16;
                 m += 16;
                 remaining -= 16;
