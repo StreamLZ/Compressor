@@ -864,52 +864,67 @@ fn compressFramedOne(
     // sidecar and leave the frame flag clear. The frame still decodes
     // correctly via the serial path; only parallel-decode acceleration
     // is forfeited for that specific compress call.
-    if (opts.emit_parallel_decode_metadata and opts.level >= 1 and opts.level <= 5 and can_compress) {
+    // Sidecar emission is scoped to Fast L1-L4 (the levels the PoC
+    // closure analysis and parallel-decode path were designed for).
+    // L5 uses the lazy chain parser with a very different token
+    // distribution — the closure frequently exceeds millions of
+    // entries on text input, the sidecar grows to 40%+ of the main
+    // payload, and the walker's overcopy heuristics are unreliable
+    // on its token layout. L5 decompresses correctly via the serial
+    // path; extending parallel-decode support to it is a separate
+    // task (probably needs a distinct codepath).
+    if (opts.emit_parallel_decode_metadata and opts.level >= 1 and opts.level <= 4 and can_compress) {
         const sidecar_result = cleanness.buildPpocSidecar(allocator, dst[0..pos], src);
         if (sidecar_result) |*sc| {
             var sidecar = sc.*;
             defer sidecar.deinit(allocator);
             if (sidecar.match_ops.items.len > 0 or sidecar.literal_bytes.items.len > 0) {
-                const body_size = pdm.serializedBodySize(
-                    sidecar.match_ops.items.len,
-                    sidecar.literal_bytes.items.len,
-                );
+                // Convert the analyzer's ArrayLists to pdm's
+                // slice-based view. The analyzer's MatchOp and
+                // LiteralByte structs have the same layout as pdm's,
+                // so we copy via field names (no bitcast).
+                //
+                // Match ops are already emitted by the analyzer in
+                // cmd_stream order (= file position order, which is
+                // monotonically increasing in target_start). That's
+                // exactly what the v2 sidecar writer wants, so no
+                // re-sort needed.
+                var tmp_match_ops = try allocator.alloc(pdm.MatchOp, sidecar.match_ops.items.len);
+                defer allocator.free(tmp_match_ops);
+                for (sidecar.match_ops.items, 0..) |op, i| {
+                    tmp_match_ops[i] = .{
+                        .target_start = op.target_start,
+                        .src_start = op.src_start,
+                        .length = op.length,
+                    };
+                }
+
+                // Literal bytes come from two unrelated sources in
+                // the analyzer (the closure BFS's literal leaves and
+                // the walker's overcopy leaves), so they're NOT in
+                // sorted order. The v2 writer assumes sorted input
+                // (for run detection), so we sort before emitting.
+                var tmp_literal_bytes = try allocator.alloc(pdm.LiteralByte, sidecar.literal_bytes.items.len);
+                defer allocator.free(tmp_literal_bytes);
+                for (sidecar.literal_bytes.items, 0..) |lit, i| {
+                    tmp_literal_bytes[i] = .{
+                        .position = lit.position,
+                        .byte_value = lit.byte_value,
+                    };
+                }
+                std.mem.sort(pdm.LiteralByte, tmp_literal_bytes, {}, struct {
+                    fn lessThan(_: void, a: pdm.LiteralByte, b: pdm.LiteralByte) bool {
+                        return a.position < b.position;
+                    }
+                }.lessThan);
+
+                const body_size = pdm.serializedBodySize(tmp_match_ops, tmp_literal_bytes);
                 // Outer block header (8 bytes) + body.
                 if (pos + 8 + body_size > dst.len) {
                     // Out of output budget — skip the sidecar rather
                     // than failing the whole compress. Frame is still
                     // valid without it.
                 } else {
-                    // Convert the analyzer's TypedArrayLists to pdm's
-                    // slice-based format. The record layouts match
-                    // byte-for-byte, so we can cast via slice of a
-                    // packed representation, but the simplest thing
-                    // is an inline copy into a temp buffer.
-                    //
-                    // buildPpocSidecar returns `ClosureMatchOp` and
-                    // `ClosureLiteralByte` structs that have the same
-                    // fields as pdm.MatchOp / pdm.LiteralByte. Build
-                    // slice views by re-casting (they're layout-
-                    // compatible because both use u64/i64/u32 and
-                    // u64/u8 respectively with no padding surprises).
-                    var tmp_match_ops = try allocator.alloc(pdm.MatchOp, sidecar.match_ops.items.len);
-                    defer allocator.free(tmp_match_ops);
-                    for (sidecar.match_ops.items, 0..) |op, i| {
-                        tmp_match_ops[i] = .{
-                            .target_start = op.target_start,
-                            .src_start = op.src_start,
-                            .length = op.length,
-                        };
-                    }
-                    var tmp_literal_bytes = try allocator.alloc(pdm.LiteralByte, sidecar.literal_bytes.items.len);
-                    defer allocator.free(tmp_literal_bytes);
-                    for (sidecar.literal_bytes.items, 0..) |lit, i| {
-                        tmp_literal_bytes[i] = .{
-                            .position = lit.position,
-                            .byte_value = lit.byte_value,
-                        };
-                    }
-
                     // Write the 8-byte outer block header.
                     frame.writeBlockHeader(dst[pos..], .{
                         .compressed_size = @intCast(body_size),
