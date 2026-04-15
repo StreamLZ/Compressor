@@ -263,11 +263,28 @@ fn partitionFastSubChunk(
     producer_map: []u32,
     file_capacity: u64,
     tokens: *std.ArrayList(TokenInfo),
+    overcopy_leaves: *std.ArrayList(u64),
 ) !void {
     _ = mode;
-    _ = dst_size;
     var dst_off: usize = start_off;
     var recent_offs: i64 = saved_dist.*;
+
+    // Track the maximum dst position any token in this block actually
+    // writes to. The Fast decoder uses vectorised `copy64` / `copy16`
+    // patterns that write more bytes than the token's logical length
+    // (for performance), advancing dst only by the logical length.
+    // Within a block, subsequent tokens overwrite the overshoot
+    // harmlessly. But at block boundaries — especially the outer
+    // chunk boundary where parallel workers split the work — that
+    // overshoot can corrupt the next chunk's output if the next
+    // chunk's worker has already written there.
+    //
+    // We track `max_write_end` so that, at the end of the block, we
+    // can emit guard leaves for any bytes in [dst_size, max_write_end)
+    // that phase 1 will populate from the reference buffer. Phase 1
+    // re-run after phase 2 workers complete then restores any
+    // overshoot-corrupted bytes to their correct values.
+    var max_write_end: usize = start_off;
 
     var cmd_stream = lz.cmd_start;
     const cmd_stream_end = lz.cmd_end;
@@ -292,6 +309,12 @@ fn partitionFastSubChunk(
                     if (p < file_capacity) byte_earliest[@intCast(p)] = @intCast(p);
                 }
             }
+            // Short-token write extent: the literal copy writes 8
+            // bytes at dst_off (dst then advances by lit_len), then
+            // the match copy writes 16 bytes at dst_off + lit_len.
+            // The match copy dominates since lit_len <= 7.
+            const short_write_end = dst_off + literal_length + 16;
+            if (short_write_end > max_write_end) max_write_end = short_write_end;
             dst_off += literal_length;
 
             if (use_new_dist) {
@@ -308,6 +331,10 @@ fn partitionFastSubChunk(
             off32_stream += 1;
             const dist_match: i64 = -(@as(i64, @intCast(dst_off)) + @as(i64, @intCast(far)));
             try partitionCollectMatch(allocator, byte_earliest, producer_map, sub_chunk_start_abs, file_pos_base + dst_off, dist_match, length, file_capacity, tokens);
+            // Medium match write extent: decoder does two copy16 calls
+            // = 32 bytes starting at dst_off.
+            const mm_write_end = dst_off + 32;
+            if (mm_write_end > max_write_end) max_write_end = mm_write_end;
             dst_off += length;
             // Match the real decoder: recent_offs = match_ptr - dst, which
             // equals dist_match (the computed negative distance). Earlier
@@ -329,6 +356,10 @@ fn partitionFastSubChunk(
                 const p = base_pos + i;
                 if (p < file_capacity) byte_earliest[@intCast(p)] = @intCast(p);
             }
+            // Long literal run decoder loop does ceil(length/16) * 16
+            // bytes of copy16 writes before the overshoot correction.
+            const llr_write_end = dst_off + ((length + 15) / 16) * 16;
+            if (llr_write_end > max_write_end) max_write_end = llr_write_end;
             dst_off += length;
         } else if (cmd == 1) {
             var length: usize = length_stream[0];
@@ -343,6 +374,11 @@ fn partitionFastSubChunk(
             off16_stream += 1;
             recent_offs = -@as(i64, off16);
             try partitionCollectMatch(allocator, byte_earliest, producer_map, sub_chunk_start_abs, file_pos_base + dst_off, recent_offs, length, file_capacity, tokens);
+            // Long match (cmd==1) decoder uses `while (remaining > 0)
+            // { copy64; copy64; d += 16; remaining -= 16; }`, writing
+            // ceil(length/16) * 16 bytes before dst advances by length.
+            const lm1_write_end = dst_off + ((length + 15) / 16) * 16;
+            if (lm1_write_end > max_write_end) max_write_end = lm1_write_end;
             dst_off += length;
         } else {
             var length: usize = length_stream[0];
@@ -357,12 +393,47 @@ fn partitionFastSubChunk(
             off32_stream += 1;
             const dist_match: i64 = -(@as(i64, @intCast(dst_off)) + @as(i64, @intCast(far)));
             try partitionCollectMatch(allocator, byte_earliest, producer_map, sub_chunk_start_abs, file_pos_base + dst_off, dist_match, length, file_capacity, tokens);
+            // Long match (cmd==2) decoder same pattern: ceil(length/16) * 16
+            // bytes via a copy16 loop.
+            const lm2_write_end = dst_off + ((length + 15) / 16) * 16;
+            if (lm2_write_end > max_write_end) max_write_end = lm2_write_end;
             dst_off += length;
             // Match the real decoder: recent_offs = match_ptr - dst, which
             // equals dist_match.
             recent_offs = dist_match;
         }
     }
+
+    // Trailing literals: bytes between dst_off and dst_size that come
+    // AFTER the last cmd-stream token. The real decoder's trailing-
+    // literal loop copies `dst_end - dst` bytes from lit_stream —
+    // exactly, no overcopy (the 8-byte copy64 loop has a `>= 8`
+    // guard and the byte-by-byte tail is exact). So trailing literals
+    // don't contribute to max_write_end.
+    if (dst_off < dst_size) {
+        const trailing_start: u64 = file_pos_base + dst_off;
+        const trailing_end: u64 = file_pos_base + dst_size;
+        var p = trailing_start;
+        while (p < trailing_end) : (p += 1) {
+            if (p < file_capacity) byte_earliest[@intCast(p)] = @intCast(p);
+        }
+    }
+
+    // If the block's write operations extended past dst_size, emit
+    // guard positions for [dst_size, max_write_end). Phase 1 will
+    // populate them from the reference buffer so that a post-phase-2
+    // re-run can restore any overcopy corruption.
+    if (max_write_end > dst_size) {
+        const overcopy: usize = max_write_end - dst_size;
+        var d: usize = 0;
+        while (d < overcopy) : (d += 1) {
+            const p: u64 = file_pos_base + dst_size + d;
+            if (p < file_capacity) {
+                try overcopy_leaves.append(allocator, p);
+            }
+        }
+    }
+
     saved_dist.* = @intCast(recent_offs);
     lz.length_stream = length_stream;
     lz.off16_start = off16_stream;
@@ -383,6 +454,7 @@ fn partitionFastChunkPayload(
     producer_map: []u32,
     file_capacity: u64,
     tokens: *std.ArrayList(TokenInfo),
+    overcopy_leaves: *std.ArrayList(u64),
 ) !void {
     var src_pos: usize = 0;
     var dst_remaining: usize = chunk_dst_size;
@@ -494,9 +566,9 @@ fn partitionFastChunkPayload(
             }
 
             if (mode == 0) {
-                try partitionFastSubChunk(.delta, allocator, lz_ptr, dst_size_cur, &saved_dist, s_off, sub_chunk_file_pos, sub_chunk_start_abs, byte_earliest, producer_map, file_capacity, tokens);
+                try partitionFastSubChunk(.delta, allocator, lz_ptr, dst_size_cur, &saved_dist, s_off, sub_chunk_file_pos, sub_chunk_start_abs, byte_earliest, producer_map, file_capacity, tokens, overcopy_leaves);
             } else {
-                try partitionFastSubChunk(.raw, allocator, lz_ptr, dst_size_cur, &saved_dist, s_off, sub_chunk_file_pos, sub_chunk_start_abs, byte_earliest, producer_map, file_capacity, tokens);
+                try partitionFastSubChunk(.raw, allocator, lz_ptr, dst_size_cur, &saved_dist, s_off, sub_chunk_file_pos, sub_chunk_start_abs, byte_earliest, producer_map, file_capacity, tokens, overcopy_leaves);
             }
             dst_size_left -= dst_size_cur;
             if (dst_size_left == 0) break;
@@ -517,6 +589,7 @@ fn partitionFastBlock(
     producer_map: []u32,
     file_capacity: u64,
     tokens: *std.ArrayList(TokenInfo),
+    overcopy_leaves: *std.ArrayList(u64),
 ) !void {
     const max_chunk: usize = 0x20000;
     const scratch_bytes: usize = constants.scratch_size;
@@ -614,6 +687,7 @@ fn partitionFastBlock(
             producer_map,
             file_capacity,
             tokens,
+            overcopy_leaves,
         );
         src_pos += comp_size;
         dst_remaining -= dst_this_chunk;
@@ -674,6 +748,14 @@ pub fn analyzeFilePartition(
     var tokens: std.ArrayList(TokenInfo) = .{};
     defer tokens.deinit(allocator);
 
+    // Overcopy leaves. The walker appends positions past each block's
+    // intended dst_size that the Fast decoder's vectorised copies can
+    // overshoot into. `analyzeFilePartition` doesn't use these for
+    // its partition stats, but the walker signature requires the
+    // ArrayList; we let it grow and deinit it at function exit.
+    var overcopy_leaves: std.ArrayList(u64) = .{};
+    defer overcopy_leaves.deinit(allocator);
+
     var file_pos_running: u64 = 0;
     var src_pos: usize = hdr.header_size;
     while (src_pos < src.len) {
@@ -700,7 +782,7 @@ pub fn analyzeFilePartition(
             continue;
         }
         const block_payload = src[src_pos..][0..bh.compressed_size];
-        try partitionFastBlock(allocator, block_payload, bh.decompressed_size, file_pos_running, byte_earliest, producer_map, total_decomp, &tokens);
+        try partitionFastBlock(allocator, block_payload, bh.decompressed_size, file_pos_running, byte_earliest, producer_map, total_decomp, &tokens, &overcopy_leaves);
         src_pos += bh.compressed_size;
         file_pos_running += bh.decompressed_size;
     }
@@ -960,6 +1042,15 @@ pub fn buildPpocSidecar(
     var tokens: std.ArrayList(TokenInfo) = .{};
     defer tokens.deinit(allocator);
 
+    // Overcopy leaves. Each entry is a byte position past some block's
+    // intended dst_size that the Fast decoder's `copy64`/`copy16`
+    // patterns can touch during phase 2. Drained into the sidecar's
+    // literal_bytes after the closure BFS so phase 1's post-phase-2
+    // re-run can restore those positions to reference values if a
+    // neighbouring worker's overshoot stomped them.
+    var overcopy_leaves: std.ArrayList(u64) = .{};
+    defer overcopy_leaves.deinit(allocator);
+
     var file_pos_running: u64 = 0;
     var src_pos: usize = hdr.header_size;
     while (src_pos < src.len) {
@@ -981,7 +1072,7 @@ pub fn buildPpocSidecar(
             continue;
         }
         const block_payload = src[src_pos..][0..bh.compressed_size];
-        try partitionFastBlock(allocator, block_payload, bh.decompressed_size, file_pos_running, byte_earliest, producer_map, total_decomp, &tokens);
+        try partitionFastBlock(allocator, block_payload, bh.decompressed_size, file_pos_running, byte_earliest, producer_map, total_decomp, &tokens, &overcopy_leaves);
         src_pos += bh.compressed_size;
         file_pos_running += bh.decompressed_size;
     }
@@ -1062,38 +1153,23 @@ pub fn buildPpocSidecar(
         total_pos += t.length;
     }
 
-    // Delta-mode literal dependency: in delta-mode sub-chunks, each
-    // inline literal at position p depends on dst[p + recent_offs].
-    // At the start of each sub-chunk the decoder initializes
-    // recent_offs = -8, so the very first inline literals reference
-    // dst[p - 8], which lives in the PREVIOUS sub-chunk. For
-    // reverse-order / parallel decode those 8 bytes must already
-    // exist in dst before the current sub-chunk's decode runs.
-    //
-    // We conservatively add the 8 bytes BEFORE every 128 KB sub-chunk
-    // boundary (except position 0) to the literal-leaves set. For
-    // raw-mode files these are unused but harmless; for delta-mode
-    // files they cover the initial-recent-offset delta dependencies.
-    //
-    // Note: this doesn't fully cover delta deps for later tokens
-    // inside the sub-chunk whose recent_offs has been updated by a
-    // prior new_dist token. Those deps typically land inside the
-    // sub-chunk or in positions already in the closure. A complete
-    // walker-level fix would track recent_offs and record each
-    // literal's delta source explicitly.
-    const sub_chunk_size: u64 = 0x20000; // 128 KB — block granularity
-    var b: u64 = sub_chunk_size;
-    while (b < total_decomp) : (b += sub_chunk_size) {
-        var d: u64 = 0;
-        while (d < 8) : (d += 1) {
-            const p = b - 8 + d;
-            if (lit_seen[@intCast(p)] != 0) continue;
-            lit_seen[@intCast(p)] = 1;
-            try sidecar.literal_bytes.append(allocator, .{
-                .position = p,
-                .byte_value = dst_ref[@intCast(p)],
-            });
-        }
+    // Overcopy leaves: the walker recorded every byte position past
+    // a block's intended `dst_size` that the Fast decoder's vectorised
+    // copy64/copy16 patterns can touch. In serial decode this
+    // overshoot is harmlessly overwritten by the next chunk's token
+    // writes; in parallel decode at outer-chunk boundaries, a later
+    // chunk can finish first and an earlier chunk's overshoot then
+    // stomps its correct output. Adding those positions as literal
+    // leaves lets phase 1 (re-run AFTER phase 2 workers) restore them
+    // to the reference bytes.
+    for (overcopy_leaves.items) |p| {
+        if (p >= total_decomp) continue;
+        if (lit_seen[@intCast(p)] != 0) continue;
+        lit_seen[@intCast(p)] = 1;
+        try sidecar.literal_bytes.append(allocator, .{
+            .position = p,
+            .byte_value = dst_ref[@intCast(p)],
+        });
     }
 
     sidecar.total_positions = total_pos;

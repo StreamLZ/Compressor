@@ -778,9 +778,9 @@ fn fastL14WorkerFn(shared: *FastL14Shared, scratch: []u8) void {
             shared.dst,
             chunk_dst_off,
             q.dst_size,
-            // group_dst_start_off is irrelevant for Fast (only used by
-            // the High codec's SC group handling); pass anything
-            // valid. Using dst_start_off keeps the semantics well-defined.
+            // group_dst_start_off is irrelevant for Fast (only used
+            // by the High codec's SC group handling); passing
+            // dst_start_off keeps the parameter well-defined.
             shared.dst_start_off,
             scratch,
         ) catch |err| {
@@ -914,6 +914,16 @@ pub fn decompressFastL14Parallel(
         }
         return error.Truncated;
     }
+
+    // Phase 2 workers' fast.decodeChunk pattern overcopies past each
+    // chunk's dst_end due to the vectorised `copy64`/`copy16` loops.
+    // In serial decode this is harmless because the next chunk
+    // overwrites the overshoot; in parallel decode, a later chunk can
+    // finish FIRST and then an earlier chunk's overshoot stomps its
+    // correct bytes. The walker records these overshoot positions as
+    // "overcopy_leaves" in the sidecar's literal_bytes, so re-running
+    // phase 1 here restores them to the correct values.
+    runPhaseOne(dst, dst_start_off, decompressed_size, &sidecar);
 
     dst_off_inout.* += decompressed_size;
 }
