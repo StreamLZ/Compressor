@@ -60,111 +60,124 @@ set `STREAMLZ_FIXTURES_DIR=./fixtures` before `zig build test` to enable it.
 
 ## Benchmarks
 
-Single host: Intel Core Ultra 9 285K (Arrow Lake-S), 24 cores, Windows 11. Both
-implementations built with their respective release/optimize modes
-(`-Doptimize=ReleaseFast` for Zig, `-c Release` for C#). Decompression runs use
-each implementation's full parallel dispatch (24-thread pool); compress runs use
-the same. C# decompress measured with `slz -db -r 30 <file>`; Zig decompress
-with `streamlz bench <file> 30`. Compress measured with `slz -b -l N -r {3..5}`
-and `streamlz benchc -l N -r {3..5}`. All numbers are MB/s referencing
+Single host: Intel Core Ultra 9 285K (Arrow Lake-S), 24 cores, Windows 11.
+Built with `-Doptimize=ReleaseFast`. Decompression uses the full parallel
+dispatch (24-thread pool); compress uses the same. Decompress measured with
+`streamlz bench <file> 30`; compress measured with
+`streamlz benchc -l N -r {3..5}`. All numbers are MB/s referencing
 **decompressed** byte size.
 
-### Decompress (parallel, 24 cores)
+### Decompress (parallel, 24 cores) — v1 frames
+
+These numbers are from v1 `.slz` frames, where Fast L1-L5 falls through to the
+serial decoder. For fresh v2 frames at L1-L4, see
+[v2 parallel Fast L1-L4 decompress](#v2-parallel-fast-l1-l4-decompress) below —
+throughput is 3-4× higher.
 
 #### enwik8 (100 MB English text)
 
-| Level | Zig best | Zig mean | C# median | Zig mean / C# |
-|-------|---------:|---------:|----------:|--------------:|
-| L1    |    6,258 |    6,139 |     5,942 |       **+3%** |
-| L3    |    6,003 |    5,899 |     5,822 |       **+1%** |
-| L5    |    4,833 |    4,725 |     4,851 |           −3% |
-| L9    |    2,121 |    2,084 |     1,810 |      **+15%** |
-| L11   |    1,970 |    1,902 |     1,702 |      **+12%** |
+| Level | Zig best | Zig mean |
+|-------|---------:|---------:|
+| L1    |    6,258 |    6,139 |
+| L3    |    6,003 |    5,899 |
+| L5    |    4,833 |    4,725 |
+| L9    |    2,121 |    2,084 |
+| L11   |    1,970 |    1,902 |
 
 #### silesia (200 MB mixed binary)
 
-| Level | Zig best | Zig mean | C# median | Zig mean / C# |
-|-------|---------:|---------:|----------:|--------------:|
-| L1    |    6,947 |    6,693 |     6,471 |       **+3%** |
-| L3    |    6,690 |    6,567 |     6,260 |       **+5%** |
-| L5    |    5,704 |    5,615 |     5,593 |             0 |
-| L9    |    2,306 |    2,230 |     2,225 |             0 |
-| L11   |    2,267 |    2,215 |     2,231 |             0 |
+| Level | Zig best | Zig mean |
+|-------|---------:|---------:|
+| L1    |    6,947 |    6,693 |
+| L3    |    6,690 |    6,567 |
+| L5    |    5,704 |    5,615 |
+| L9    |    2,306 |    2,230 |
+| L11   |    2,267 |    2,215 |
 
-**Read:** Fast (L1-L5) is at parity with C# and slightly ahead on text. High
-(L9-L11) is at parity on silesia and noticeably ahead on text — Fast decoder
-optimizations (CMOV LIFO swap, far-offset MOVDQU widening) directly transferred
-to the High decoder's match-copy paths. Both Fast and High already use parallel
-dispatch (`decompressCoreParallel` for L6-L8 SC, `decompressCoreTwoPhase` for
-L9-L11). The tables above are from v1 `.slz` frames, where Fast L1-L5 fell
-through to the serial path. **Fast L1-L4 now has its own parallel path** behind
-a v2 frame-format change — see
-[v2 parallel Fast L1-L4 decompress](#v2-parallel-fast-l1-l4-decompress--b1_json-large_100mbjson-926-mb)
-below and [L1-L5 parallel decompress](#1-l1-l5-parallel-decompress).
+**Read:** Fast and High both use parallel dispatch
+(`decompressCoreParallel` for L6-L8 SC, `decompressCoreTwoPhase` for L9-L11).
+v1 Fast L1-L5 has no parallel path and runs single-thread on the decoder hot
+loop — the L1 number is already within ~5% of the per-core DRAM ceiling on
+Arrow Lake, so there is no remaining single-core headroom.
 
 ### Compress (parallel, 24 cores)
 
 #### enwik8 (100 MB English text)
 
-| Level | Zig MB/s | C# MB/s | Zig / C# | Zig size  | C# size   |
-|-------|---------:|--------:|---------:|----------:|----------:|
-| L1    |     18.8 |    34.9 |  **−46%**| 58,632,393 | 58,632,393 |
-| L3    |     17.3 |    38.7 |  **−55%**| 56,522,874 | 56,522,874 |
-| L5    |     65.6 |    57.5 |  **+14%**| 42,178,862 | 42,178,862 |
-| L9    |      7.7 |     6.1 |  **+26%**| 27,430,876 | 27,399,196 |
-| L11   |      1.2 |     0.3 |   **4×** | 25,550,456 | 25,641,137 |
+| Level | Zig MB/s | Zig size   |
+|-------|---------:|-----------:|
+| L1    |     18.8 | 58,632,393 |
+| L3    |     17.3 | 56,522,874 |
+| L5    |     65.6 | 42,178,862 |
+| L9    |      7.7 | 27,430,876 |
+| L11   |      1.2 | 25,550,456 |
 
 #### silesia (200 MB mixed binary)
 
-| Level | Zig MB/s | C# MB/s | Zig / C# | Zig size   | C# size    |
-|-------|---------:|--------:|---------:|-----------:|-----------:|
-| L1    |     24.8 |    58.2 |  **−57%**| 100,270,195 | 100,270,195 |
-| L3    |     23.5 |    53.5 |  **−56%**|  98,109,897 |  98,109,897 |
-| L5    |     89.5 |    78.5 |  **+14%**|  77,477,582 |  77,477,582 |
-| L9    |     11.9 |     9.8 |  **+21%**|  52,915,947 |  53,006,319 |
-| L11   |      2.7 |     0.5 |  **5.4×**|  51,331,016 |  51,386,675 |
+| Level | Zig MB/s | Zig size    |
+|-------|---------:|------------:|
+| L1    |     24.8 | 100,270,195 |
+| L3    |     23.5 |  98,109,897 |
+| L5    |     89.5 |  77,477,582 |
+| L9    |     11.9 |  52,915,947 |
+| L11   |      2.7 |  51,331,016 |
 
 **Read:**
-- L1/L3 compress is significantly slower than C# — the Zig Fast greedy parser
-  (engine levels −2/−1/1/2) has not been hot-pathed yet. Both implementations
-  produce **byte-exact identical output** at L1-L5; the throughput delta is
-  pure encoder hot-loop work that hasn't been done.
-- L5 onward (Fast greedy chain + High) is **faster than C#** — the Zig
-  encoder's L5 chain parser was tuned alongside the decoder, and the High
-  encoder benefits from the SIMD hash probe + dual-bucket prefetch landed in
-  commit `1423ac0`.
-- L9 +20-26%, L11 4-5× faster — these wins are driven by the same SIMD probe
-  + 64-byte-aligned hash table optimization. L11 in particular: C# uses BT4
-  but doesn't vectorize its candidate probe.
-- L9-L11 size differences (~0.1-0.4%) are because **C# StreamLZ's High encoder
-  is non-deterministic** between runs, so byte-exact parity isn't a reachable
-  goal. Compressed sizes are equivalent in practice (sometimes Zig is smaller,
-  sometimes C#).
+- L1/L3 compress — Fast greedy parser (engine levels −2/−1/1/2) hasn't been
+  hot-pathed yet; the hot loop is the obvious next target.
+- L5 is the Fast greedy-chain parser and was tuned alongside the decoder.
+- L9/L11 — the `findMatchesHashBased` inner loop was vectorized with
+  `@Vector(4, i32)` + 64-byte hash-table alignment + dual-bucket prefetch
+  in commit `1423ac0`, which also made L9 4.4 → 7.7 MB/s (+70%).
 
-### v2 parallel Fast L1-L4 decompress — B1_json `large_100mb.json` (92.6 MB)
+### v2 parallel Fast L1-L4 decompress
 
 The v2 frame format (commits `abe348c..37d6263`) emits a per-block closure
 sidecar — match ops + literal bytes covering cross-sub-chunk references —
 so the decoder can dispatch each sub-chunk independently across cores for
 Fast L1-L4. Sidecar payload is delta+varint+literal-run-RLE compressed
-(~5× smaller than the naive form). `streamlz benchc -l N -r 5` on
-`large_100mb.json`:
+(~5× smaller than the naive form). All numbers below are
+`streamlz benchc -l N -r 5` medians.
+
+#### enwik8 (95.37 MB English text)
 
 | Level | Ratio | Zig compress | Zig parallel decompress | Round-trip |
 |-------|------:|-------------:|------------------------:|:----------:|
-| L1    | 51.5% |    18.9 MB/s |    16,088 MB/s (6 ms)   |   PASS     |
-| L2    | 47.2% |    20.0 MB/s |    10,528 MB/s (9 ms)   |   PASS     |
-| L3    | 47.1% |    19.6 MB/s |    10,900 MB/s (8 ms)   |   PASS     |
+| L1    | 58.6% |    16.3 MB/s |    19,263 MB/s ( 5 ms)  |   PASS     |
+| L2    | 56.9% |    15.4 MB/s |    20,715 MB/s ( 5 ms)  |   PASS     |
+| L3    | 56.5% |    15.1 MB/s |    21,647 MB/s ( 4 ms)  |   PASS     |
+| L4    | 54.0% |    14.1 MB/s |    17,974 MB/s ( 5 ms)  |   PASS     |
+
+#### silesia (202.94 MB mixed binary)
+
+| Level | Ratio | Zig compress | Zig parallel decompress | Round-trip |
+|-------|------:|-------------:|------------------------:|:----------:|
+| L1    | 47.2% |    21.2 MB/s |    23,075 MB/s ( 9 ms)  |   PASS     |
+| L2    | 46.3% |    20.6 MB/s |    24,897 MB/s ( 8 ms)  |   PASS     |
+| L3    | 46.1% |    20.2 MB/s |    25,062 MB/s ( 8 ms)  |   PASS     |
+| L4    | 44.6% |    18.5 MB/s |    24,200 MB/s ( 8 ms)  |   PASS     |
+
+#### B1_json `large_100mb.json` (92.60 MB structured JSON)
+
+| Level | Ratio | Zig compress | Zig parallel decompress | Round-trip |
+|-------|------:|-------------:|------------------------:|:----------:|
+| L1    | 51.5% |    18.9 MB/s |    16,088 MB/s ( 6 ms)  |   PASS     |
+| L2    | 47.2% |    20.0 MB/s |    10,528 MB/s ( 9 ms)  |   PASS     |
+| L3    | 47.1% |    19.6 MB/s |    10,900 MB/s ( 8 ms)  |   PASS     |
 | L4    | 46.0% |    18.5 MB/s |     8,312 MB/s (11 ms)  |   PASS     |
 
-**Read:** parallel Fast L1-L4 on 92.6 MB JSON runs at 8-16 GB/s end-to-end.
-L1 is essentially DRAM-bandwidth-bound at 16 GB/s; later levels spend more
-time in per-sub-chunk LZ resolve (denser match graphs) and drop back toward
-the 8-10 GB/s band. Ratio climbs monotonically L1→L4 as expected for JSON.
-Round-trip passes at every level. **L5 is still serial** — its lazy chain
-parser produces ~10× more closure tokens per block than L1-L4, so emitting
-a sidecar for every L5 block would dominate the compressed size; a
-per-block trigger is the likely path forward.
+**Read:** v2 parallel Fast decompress runs at **17-25 GB/s on enwik8 and
+silesia** and **8-16 GB/s on JSON** — a 3-4× speedup over the serial L1/L3
+numbers in the v1 table above (6,258 / 6,003 MB/s enwik8; 6,947 / 6,690 MB/s
+silesia). Silesia is fastest because its sub-chunks are densely populated
+with long matches, so the per-thread decoder hot loop runs efficient
+straight-line work. JSON drops back toward 8 GB/s at L4 where the match
+graph is denser per KB. Compress-side v2 overhead is small (~10-15% over v1
+for the closure walker + sidecar emit). Round-trip passes at every level on
+every input. **L5 is still serial** — its lazy chain parser produces ~10×
+more closure tokens per block than greedy L1-L4, so an always-on sidecar
+would dominate compressed size; a per-block trigger is the likely path
+forward.
 
 ---
 
@@ -266,12 +279,11 @@ the sidecar cost — not yet implemented.
 
 **Historical rationale** (still true for L5 and any future v1 content):
 serial Fast decompress is already at the per-core ceiling — Arrow Lake
-decodes L1 enwik8 at ~6.1 GB/s on a single thread, which is within ~3% of
-C#'s parallel result. Parallelizing without a sidecar would require a
-phase-1 analysis pass that costs more than the serial decode itself. See
-`FailedExperiments.md` "Fast decoder: lookahead prefetch for next match"
-and "Fast decoder: branched copy16 for short-token match copy" for cheap
-optimizations that were ruled out.
+decodes L1 enwik8 at ~6.1 GB/s on a single thread. Parallelizing without a
+sidecar would require a phase-1 analysis pass that costs more than the
+serial decode itself. See `FailedExperiments.md` "Fast decoder: lookahead
+prefetch for next match" and "Fast decoder: branched copy16 for short-token
+match copy" for cheap optimizations that were ruled out.
 
 **Status: L1-L4 landed; L5 open.**
 
@@ -384,8 +396,8 @@ A few highlights worth knowing as a future reader:
 - **Encoder L9-L11 SIMD hash probe + dual-bucket prefetch.** The
   `findMatchesHashBased` inner loop was scalar; vectorizing the 16-entry probe
   with `@Vector(4, i32)` + adding 64-byte hash-table alignment + dual-bucket
-  prefetch hints turned L9 enwik8 compress from 4.4 → 7.7 MB/s (+70%, beats C#
-  by ~25%). L11 is now 4-5× faster than C#. See commit `1423ac0`.
+  prefetch hints turned L9 enwik8 compress from 4.4 → 7.7 MB/s (+70%). See
+  commit `1423ac0`.
 - **Decoder 24-core parallelism for L6-L11.** Two separate paths — SC parallel
   for L6-L8 (each chunk fully independent by encoder construction) and two-phase
   parallel for L9-L11 (parallel entropy decode + serial LZ resolve). Both share
