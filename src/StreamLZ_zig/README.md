@@ -96,8 +96,11 @@ and `streamlz benchc -l N -r {3..5}`. All numbers are MB/s referencing
 optimizations (CMOV LIFO swap, far-offset MOVDQU widening) directly transferred
 to the High decoder's match-copy paths. Both Fast and High already use parallel
 dispatch (`decompressCoreParallel` for L6-L8 SC, `decompressCoreTwoPhase` for
-L9-L11). Fast L1-L5 falls through to the serial path — see
-[L1-L5 parallel decompress](#1-l1-l5-parallel-decompress) for why and what's planned.
+L9-L11). The tables above are from v1 `.slz` frames, where Fast L1-L5 fell
+through to the serial path. **Fast L1-L4 now has its own parallel path** behind
+a v2 frame-format change — see
+[v2 parallel Fast L1-L4 decompress](#v2-parallel-fast-l1-l4-decompress--b1_json-large_100mbjson-926-mb)
+below and [L1-L5 parallel decompress](#1-l1-l5-parallel-decompress).
 
 ### Compress (parallel, 24 cores)
 
@@ -137,6 +140,31 @@ L9-L11). Fast L1-L5 falls through to the serial path — see
   is non-deterministic** between runs, so byte-exact parity isn't a reachable
   goal. Compressed sizes are equivalent in practice (sometimes Zig is smaller,
   sometimes C#).
+
+### v2 parallel Fast L1-L4 decompress — B1_json `large_100mb.json` (92.6 MB)
+
+The v2 frame format (commits `abe348c..37d6263`) emits a per-block closure
+sidecar — match ops + literal bytes covering cross-sub-chunk references —
+so the decoder can dispatch each sub-chunk independently across cores for
+Fast L1-L4. Sidecar payload is delta+varint+literal-run-RLE compressed
+(~5× smaller than the naive form). `streamlz benchc -l N -r 5` on
+`large_100mb.json`:
+
+| Level | Ratio | Zig compress | Zig parallel decompress | Round-trip |
+|-------|------:|-------------:|------------------------:|:----------:|
+| L1    | 51.5% |    18.9 MB/s |    16,088 MB/s (6 ms)   |   PASS     |
+| L2    | 47.2% |    20.0 MB/s |    10,528 MB/s (9 ms)   |   PASS     |
+| L3    | 47.1% |    19.6 MB/s |    10,900 MB/s (8 ms)   |   PASS     |
+| L4    | 46.0% |    18.5 MB/s |     8,312 MB/s (11 ms)  |   PASS     |
+
+**Read:** parallel Fast L1-L4 on 92.6 MB JSON runs at 8-16 GB/s end-to-end.
+L1 is essentially DRAM-bandwidth-bound at 16 GB/s; later levels spend more
+time in per-sub-chunk LZ resolve (denser match graphs) and drop back toward
+the 8-10 GB/s band. Ratio climbs monotonically L1→L4 as expected for JSON.
+Round-trip passes at every level. **L5 is still serial** — its lazy chain
+parser produces ~10× more closure tokens per block than L1-L4, so emitting
+a sidecar for every L5 block would dominate the compressed size; a
+per-block trigger is the likely path forward.
 
 ---
 
@@ -216,22 +244,36 @@ parity tweak, and one thread-dispatch gap.
 
 ### 1. L1-L5 parallel decompress
 
-Fast codec decompress falls through to the serial path. The dispatch in
-`streamlz_decoder.zig` only routes to parallel paths when the block is SC
-(`decompressCoreParallel`, fires for L6-L8 in practice) or when the codec is
-High (`decompressCoreTwoPhase`, fires for L9-L11). Fast (L1-L5) hits neither
-gate.
+**L1-L4: landed** via a v2 frame-format change (commits `abe348c..37d6263`).
+The encoder walks each frame block's LZ-token closure at compress time and
+emits a sidecar listing every match op and literal byte whose effect crosses
+a sub-chunk boundary (plus guard bytes for `copy64`/`copy16` overcopy at
+chunk tails). The decoder reads the sidecar, applies it into `dst` in a
+fast phase-1 pass, then dispatches each sub-chunk's Fast decoder on its own
+thread in phase 2. Overcopy-corrupted positions are repaired by a second
+phase-1 pass after phase-2 workers join.
 
-That said: serial Fast decompress is already at the per-core ceiling — Arrow
-Lake decodes L1 enwik8 at ~6.1 GB/s on a single thread, which is within ~3% of
-C#'s parallel result. The headroom from adding parallel L1-L5 is bounded by
-DRAM bandwidth (~30-50 GB/s on consumer DDR5) and would need a phase-1
-analysis pass that costs more than the serial decode itself unless wire-format
-metadata is added. See `FailedExperiments.md` "Fast decoder: lookahead prefetch
-for next match" and "Fast decoder: branched copy16 for short-token match copy"
-for the experiments that ruled out cheap wins.
+Sidecar payload uses delta-encoded targets, LEB128 varints, and literal-run
+RLE — roughly 5× smaller than the straight record-per-op form. See the
+[B1_json benchmark](#v2-parallel-fast-l1-l4-decompress--b1_json-large_100mbjson-926-mb)
+above for throughput + correctness.
 
-**Status: open. Likely requires a wire-format change to be worth doing.**
+**L5: still serial.** The lazy chain parser produces ~10× more closure
+tokens per block than greedy L1-L4, so an always-on sidecar for L5 would
+dominate file size. The likely path is a per-block opt-in trigger that
+emits only when sub-chunk cross-references are dense enough to amortize
+the sidecar cost — not yet implemented.
+
+**Historical rationale** (still true for L5 and any future v1 content):
+serial Fast decompress is already at the per-core ceiling — Arrow Lake
+decodes L1 enwik8 at ~6.1 GB/s on a single thread, which is within ~3% of
+C#'s parallel result. Parallelizing without a sidecar would require a
+phase-1 analysis pass that costs more than the serial decode itself. See
+`FailedExperiments.md` "Fast decoder: lookahead prefetch for next match"
+and "Fast decoder: branched copy16 for short-token match copy" for cheap
+optimizations that were ruled out.
+
+**Status: L1-L4 landed; L5 open.**
 
 ### 2. C1 — Fast decoder `@prefetch` hints in cmd==2 / medium paths
 
