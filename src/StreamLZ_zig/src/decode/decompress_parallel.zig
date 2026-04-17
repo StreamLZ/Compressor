@@ -854,7 +854,11 @@ pub fn decompressFastL14Parallel(
 
     // ── Worker setup ─────────────────────────────────────────────────
     // Slice size aligned to 16 chunks (matching sidecar boundaries).
-    const cpu_count_raw: usize = std.Thread.getCpuCount() catch 1;
+    var cpu_count_raw: usize = std.Thread.getCpuCount() catch 1;
+    if (std.process.getEnvVarOwned(allocator, "SLZ_CORES") catch null) |val| {
+        defer allocator.free(val);
+        cpu_count_raw = std.fmt.parseInt(usize, val, 10) catch cpu_count_raw;
+    }
     const max_workers: usize = @min(24, @min(num_chunks, cpu_count_raw));
     const aligned_slice: usize = blk: {
         if (max_workers <= 1) break :blk num_chunks;
