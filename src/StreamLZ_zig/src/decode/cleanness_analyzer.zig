@@ -1013,6 +1013,49 @@ pub fn buildPpocSidecar(
     src: []const u8,
     dst_ref: []const u8,
 ) !PpocSidecar {
+    return buildPpocSidecarInner(allocator, src, dst_ref);
+}
+
+fn computeTransitiveDepth(
+    pos: usize,
+    cross_depth: []u8,
+    producer_map_: []const u32,
+    tokens_items: []const TokenInfo,
+    chunk_size: u64,
+    total_decomp_: usize,
+) u8 {
+    if (cross_depth[pos] != 255) return cross_depth[pos];
+    const prod = producer_map_[pos];
+    if (prod == std.math.maxInt(u32)) {
+        cross_depth[pos] = 0;
+        return 0;
+    }
+    const t = tokens_items[prod];
+    if (t.src_start < 0 or t.length == 0) {
+        cross_depth[pos] = 0;
+        return 0;
+    }
+    const offset_in_match: u64 = pos - @as(usize, @intCast(t.target_start));
+    const src_pos_i: i64 = t.src_start + @as(i64, @intCast(offset_in_match));
+    if (src_pos_i < 0 or @as(u64, @intCast(src_pos_i)) >= total_decomp_) {
+        cross_depth[pos] = 0;
+        return 0;
+    }
+    const src_pos: usize = @intCast(src_pos_i);
+    // Prevent infinite recursion for self-referential matches.
+    cross_depth[pos] = 0;
+    const src_d = computeTransitiveDepth(src_pos, cross_depth, producer_map_, tokens_items, chunk_size, total_decomp_);
+    const is_cross_chunk = t.src_start < @as(i64, @intCast(t.chunk_start));
+    const d: u8 = if (is_cross_chunk) (if (src_d < 254) src_d + 1 else 254) else src_d;
+    cross_depth[pos] = d;
+    return d;
+}
+
+fn buildPpocSidecarInner(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+    dst_ref: []const u8,
+) !PpocSidecar {
     var sidecar: PpocSidecar = .{
         .match_ops = .{},
         .literal_bytes = .{},
@@ -1073,134 +1116,160 @@ pub fn buildPpocSidecar(
         file_pos_running += bh.decompressed_size;
     }
 
-    // Identify seeds: tokens whose src_start is before their own sub_chunk_start.
-    var in_closure = try allocator.alloc(u8, tokens.items.len);
-    defer allocator.free(in_closure);
-    @memset(in_closure, 0);
+    // Two-pass parallel decode sidecar: only store literal bytes at
+    // depth≥2 cross-chunk positions. Pass 1 handles depth-0 (literals +
+    // within-chunk matches). Pass 2 handles depth-1 (cross-chunk matches
+    // whose sources are all depth-0). Phase 1.5 between passes patches
+    // the depth≥2 positions so pass 2 can resolve everything.
+    const cs: u64 = @intCast(constants.chunk_size);
 
-    // Literal-leaf tracking: positions already recorded, so we don't
-    // emit duplicate ClosureLiteralByte entries when multiple closure
-    // members' src ranges overlap the same literal byte.
+    // Transitive depth via producer_map (recursive, memoized).
+    // depth(P) = 0 if literal
+    // depth(P) = depth(src_byte) if within-chunk match
+    // depth(P) = depth(src_byte) + 1 if cross-chunk match
+    const cross_depth = try allocator.alloc(u8, @intCast(total_decomp));
+    defer allocator.free(cross_depth);
+    const DEPTH_UNSET: u8 = 255;
+    @memset(cross_depth, DEPTH_UNSET);
+    const td: usize = @intCast(total_decomp);
+    for (0..td) |pos| {
+        _ = computeTransitiveDepth(@intCast(pos), cross_depth, producer_map, tokens.items, cs, td);
+    }
+
+    // Store cross-chunk source bytes at depth ≥ 1 that cross a
+    // 16-chunk slice boundary. Decoder picks worker count so
+    // slice_size is a multiple of 16, guaranteeing alignment.
     const lit_seen = try allocator.alloc(u8, @intCast(total_decomp));
     defer allocator.free(lit_seen);
     @memset(lit_seen, 0);
-
-    var seed_queue: std.ArrayList(u32) = .{};
-    defer seed_queue.deinit(allocator);
-
-    for (tokens.items, 0..) |t, idx| {
+    // Minimum parallel slice size. The sidecar stores cross-chunk
+    // source bytes at every slice_align-chunk boundary. The decoder
+    // constrains its slice_size to multiples of this value, so
+    // inter-slice boundaries always align with sidecar coverage.
+    // 16 chunks = 4 MB per slice, supporting up to ~24 workers on
+    // a 100 MB file while keeping the sidecar small (~1 MB for L5).
+    const slice_align: u64 = 16;
+    for (tokens.items) |t| {
+        if (t.src_start < 0 or t.length == 0) continue;
         const chunk_start_signed: i64 = @intCast(t.chunk_start);
-        if (t.src_start < chunk_start_signed) {
-            if (in_closure[idx] == 0) {
-                in_closure[idx] = 1;
-                try seed_queue.append(allocator, @intCast(idx));
+        if (t.src_start >= chunk_start_signed) continue;
+        const src_u: u64 = @intCast(t.src_start);
+        const tgt_chunk: u64 = t.target_start / cs;
+        const src_chunk: u64 = src_u / cs;
+        if (tgt_chunk / slice_align == src_chunk / slice_align) continue;
+        const src_lo: u64 = src_u;
+        const src_hi: u64 = @min(src_lo + t.length, total_decomp);
+        var p: u64 = src_lo;
+        while (p < src_hi) : (p += 1) {
+            if (p / cs == tgt_chunk) continue;
+            // Include ALL depths — depth-0 sources at inter-slice
+            // boundaries may not be decoded yet when another worker reads.
+            if (lit_seen[@intCast(p)] != 0) continue;
+            lit_seen[@intCast(p)] = 1;
+            try sidecar.literal_bytes.append(allocator, .{
+                .position = p,
+                .byte_value = dst_ref[@intCast(p)],
+            });
+        }
+    }
+
+    // Measure: what would the sidecar bytes compress to via LZ?
+    if (std.process.hasEnvVar(allocator, "SLZ_MEASURE_COMPRESS") catch false) {
+        // Collect all literal byte values in position order.
+        const sorted_lits = try allocator.alloc(ClosureLiteralByte, sidecar.literal_bytes.items.len);
+        defer allocator.free(sorted_lits);
+        @memcpy(sorted_lits, sidecar.literal_bytes.items);
+        std.mem.sort(ClosureLiteralByte, sorted_lits, {}, struct {
+            fn lt(_: void, a: ClosureLiteralByte, b: ClosureLiteralByte) bool {
+                return a.position < b.position;
+            }
+        }.lt);
+        const values_buf = try allocator.alloc(u8, sorted_lits.len);
+        defer allocator.free(values_buf);
+        for (sorted_lits, 0..) |lit, i| {
+            values_buf[i] = lit.byte_value;
+        }
+        // Compress with the existing encoder.
+        const enc = @import("../encode/streamlz_encoder.zig");
+        const bound = enc.compressBound(values_buf.len);
+        const comp_buf = try allocator.alloc(u8, bound);
+        defer allocator.free(comp_buf);
+        const comp_size = enc.compressFramed(allocator, values_buf, comp_buf, .{ .level = 11 }) catch 0;
+        // Decompress and time it.
+        const dec = @import("streamlz_decoder.zig");
+        const decomp_buf = try allocator.alloc(u8, values_buf.len + dec.safe_space);
+        defer allocator.free(decomp_buf);
+        var best_ns: u64 = std.math.maxInt(u64);
+        var run_i: u32 = 0;
+        while (run_i < 100) : (run_i += 1) {
+            var timer = try std.time.Timer.start();
+            _ = dec.decompressFramed(comp_buf[0..comp_size], decomp_buf) catch 0;
+            const elapsed = timer.read();
+            if (elapsed < best_ns) best_ns = elapsed;
+        }
+        const us = @as(f64, @floatFromInt(best_ns)) / 1000.0;
+        std.debug.print("[MEASURE] entries={d} raw={d} lz11={d} decomp_us={d:.0}\n", .{
+            sorted_lits.len, values_buf.len, comp_size, us,
+        });
+    }
+
+    // Overcopy leaves and boundary guard are NOT stored in the sidecar.
+    // The parallel decoder handles overcopy repair internally: each
+    // worker saves/restores the first 64 bytes of its slice's first
+    // chunk before/after decode.
+
+    sidecar.total_positions = sidecar.match_ops.items.len + sidecar.literal_bytes.items.len;
+
+    // Trace a specific position's LZ dependency chain.
+    if (std.process.getEnvVarOwned(allocator, "SLZ_TRACE_POS") catch null) |pos_str| {
+        defer allocator.free(pos_str);
+        const trace_pos: u64 = std.fmt.parseInt(u64, pos_str, 10) catch 0;
+        if (trace_pos < total_decomp) {
+            std.debug.print("[TRACE] Position {d}: depth={d} byte=0x{x:0>2}\n", .{
+                trace_pos, cross_depth[@intCast(trace_pos)], dst_ref[@intCast(trace_pos)],
+            });
+            var pos = trace_pos;
+            var hop: u32 = 0;
+            while (hop < 20) : (hop += 1) {
+                const prod = producer_map[@intCast(pos)];
+                if (prod == std.math.maxInt(u32)) {
+                    std.debug.print("[TRACE]   hop {d}: pos={d} → LITERAL chunk={d}\n", .{ hop, pos, pos / cs });
+                    break;
+                }
+                const t = tokens.items[prod];
+                const t_chunk = t.target_start / cs;
+                const s_chunk: u64 = if (t.src_start >= 0) @as(u64, @intCast(t.src_start)) / cs else 0;
+                const cross = t.src_start < @as(i64, @intCast(t.chunk_start));
+                std.debug.print("[TRACE]   hop {d}: pos={d} ← token[{d}] tgt={d}(chunk {d}) src={d}(chunk {d}) len={d} depth={d} cross={}\n", .{
+                    hop, pos, prod, t.target_start, t_chunk, t.src_start, s_chunk, t.length, cross_depth[@intCast(pos)], cross,
+                });
+                if (t.src_start < 0) break;
+                const offset_in_match: u64 = pos - t.target_start;
+                pos = @intCast(t.src_start + @as(i64, @intCast(offset_in_match)));
+                if (pos >= total_decomp) break;
             }
         }
     }
 
     if (std.process.hasEnvVar(allocator, "SLZ_CLOSURE_STATS") catch false) {
-        std.debug.print("[CLOSURE-STATS] seeds={d} total_tokens={d}\n", .{ seed_queue.items.len, tokens.items.len });
-    }
-
-    // BFS backward from seeds. Record literal leaves along the way.
-    var head: usize = 0;
-    while (head < seed_queue.items.len) : (head += 1) {
-        const idx = seed_queue.items[head];
-        const t = tokens.items[idx];
-        const src_lo_s = t.src_start;
-        const src_hi_s = t.src_start + @as(i64, @intCast(t.length));
-        if (src_hi_s <= 0) continue;
-        const src_lo: u64 = if (src_lo_s < 0) 0 else @intCast(src_lo_s);
-        const src_hi: u64 = if (src_hi_s > @as(i64, @intCast(total_decomp)))
-            total_decomp
-        else
-            @intCast(src_hi_s);
-        if (src_lo >= src_hi) continue;
-
-        var p: u64 = src_lo;
-        while (p < src_hi) : (p += 1) {
-            const producer = producer_map[@intCast(p)];
-            if (producer == std.math.maxInt(u32)) {
-                // Literal leaf — record it (once).
-                if (lit_seen[@intCast(p)] == 0) {
-                    lit_seen[@intCast(p)] = 1;
-                    try sidecar.literal_bytes.append(allocator, .{
-                        .position = p,
-                        .byte_value = dst_ref[@intCast(p)],
-                    });
-                }
-                continue;
-            }
-            if (in_closure[producer] != 0) continue;
-            in_closure[producer] = 1;
-            try seed_queue.append(allocator, producer);
+        var max_depth: u8 = 0;
+        var p_stat: u64 = 0;
+        while (p_stat < total_decomp) : (p_stat += 1) {
+            if (cross_depth[@intCast(p_stat)] > max_depth) max_depth = cross_depth[@intCast(p_stat)];
         }
-    }
-
-    // Emit match ops for every closure member, in cmd_stream order.
-    // cmd_stream order = dependency-correct order for phase 1 execution
-    // (producers always precede consumers in file order).
-    var total_pos: u64 = @as(u64, sidecar.literal_bytes.items.len);
-    for (tokens.items, 0..) |t, idx| {
-        if (in_closure[idx] == 0) continue;
-        if (t.length == 0) continue;
-        if (t.src_start < 0) continue;
-        try sidecar.match_ops.append(allocator, .{
-            .target_start = t.target_start,
-            .src_start = t.src_start,
-            .length = t.length,
-        });
-        total_pos += t.length;
-    }
-
-    // Overcopy leaves: the walker recorded every byte position past
-    // a block's intended `dst_size` that the Fast decoder's vectorised
-    // copy64/copy16 patterns can touch. In serial decode this
-    // overshoot is harmlessly overwritten by the next chunk's token
-    // writes; in parallel decode at outer-chunk boundaries, a later
-    // chunk can finish first and an earlier chunk's overshoot then
-    // stomps its correct output. Adding those positions as literal
-    // leaves lets phase 1 (re-run AFTER phase 2 workers) restore them
-    // to the reference bytes.
-    for (overcopy_leaves.items) |p| {
-        if (p >= total_decomp) continue;
-        if (lit_seen[@intCast(p)] != 0) continue;
-        lit_seen[@intCast(p)] = 1;
-        try sidecar.literal_bytes.append(allocator, .{
-            .position = p,
-            .byte_value = dst_ref[@intCast(p)],
+        std.debug.print("[CLOSURE-STATS] depth2+_lits={d} max_cross_depth={d} overcopy_leaves={d}\n", .{
+            sidecar.literal_bytes.items.len, max_depth, sidecar.literal_bytes.items.len,
         });
     }
-
-    sidecar.total_positions = total_pos;
 
     // Closure completeness check: for every walker-seen token T, every
     // byte position in T's src range that lives in a DIFFERENT chunk
-    // than T's target chunk must appear in the sidecar (either as a
-    // literal_byte or within a match_op's target range). Otherwise a
-    // parallel worker that decodes T's chunk before T's src chunk
-    // would read an un-populated position (allocator garbage), and the
-    // decode silently corrupts. This is the check that ACTUALLY
-    // validates the closure, as opposed to the walker-reconstruct
-    // check above which only validates the walker's full token stream.
+    // than T's target chunk must appear in the sidecar as a
+    // literal_byte. Otherwise a parallel worker that decodes T's chunk
+    // before T's src chunk would read an un-populated position.
     if (std.process.hasEnvVar(allocator, "SLZ_CLOSURE_CHECK") catch false) {
-        // Build "covered" bitmap: true for positions populated by phase 1.
-        const covered = try allocator.alloc(u8, @intCast(total_decomp));
-        defer allocator.free(covered);
-        @memset(covered, 0);
-        for (sidecar.literal_bytes.items) |lit| {
-            if (lit.position < total_decomp) covered[@intCast(lit.position)] = 1;
-        }
-        for (sidecar.match_ops.items) |op| {
-            if (op.src_start < 0) continue;
-            const tgt: u64 = op.target_start;
-            const len: u64 = op.length;
-            const hi: u64 = @min(tgt + len, total_decomp);
-            var q: u64 = tgt;
-            while (q < hi) : (q += 1) {
-                covered[@intCast(q)] = 1;
-            }
-        }
+        // The "covered" bitmap is just lit_seen — already built above.
+        const covered = lit_seen;
 
         const chunk_size_u64: u64 = @intCast(constants.chunk_size);
         var gap_count: u64 = 0;

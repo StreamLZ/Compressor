@@ -873,7 +873,7 @@ fn compressFramedOne(
     // on its token layout. L5 decompresses correctly via the serial
     // path; extending parallel-decode support to it is a separate
     // task (probably needs a distinct codepath).
-    if (opts.emit_parallel_decode_metadata and opts.level >= 1 and opts.level <= 4 and can_compress) {
+    if (opts.emit_parallel_decode_metadata and opts.level >= 1 and opts.level <= 5 and can_compress) {
         const sidecar_result = cleanness.buildPpocSidecar(allocator, dst[0..pos], src);
         if (sidecar_result) |*sc| {
             var sidecar = sc.*;

@@ -1034,7 +1034,17 @@ fn runBenchCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []con
     if (std.mem.eql(u8, src, decompressed[0..src.len])) {
         try w.writeAll("Round-trip: PASS\n");
     } else {
-        try w.writeAll("Round-trip: FAIL\n");
+        var first_fail: usize = 0;
+        var fail_count: usize = 0;
+        for (0..src.len) |bi| {
+            if (src[bi] != decompressed[bi]) {
+                if (fail_count == 0) first_fail = bi;
+                fail_count += 1;
+            }
+        }
+        try w.print("Round-trip: FAIL  first_diff={d} total_diffs={d} chunk={d} rel={d}\n", .{
+            first_fail, fail_count, first_fail / 262144, first_fail % 262144,
+        });
         try w.flush();
         std.process.exit(1);
     }

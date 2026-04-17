@@ -760,27 +760,24 @@ const FastL14Shared = struct {
     block_src: []const u8,
     dst: []u8,
     dst_start_off: usize,
-    next_chunk: std.atomic.Value(usize),
     error_flag: std.atomic.Value(u32),
     captured_err: std.atomic.Value(u16),
 };
 
-fn fastL14WorkerFn(shared: *FastL14Shared, scratch: []u8) void {
-    while (true) {
-        const chunk_idx = shared.next_chunk.fetchAdd(1, .monotonic);
-        if (chunk_idx >= shared.chunks.len) return;
-        if (shared.error_flag.load(.monotonic) != 0) return;
+fn fastL14WorkerFn(shared: *FastL14Shared, scratch: []u8, start: usize, end: usize) void {
+    var guard: [64]u8 = undefined;
+    var guard_pos: usize = 0;
+    var guard_len: usize = 0;
 
+    var chunk_idx: usize = start;
+    while (chunk_idx < end) : (chunk_idx += 1) {
+        if (shared.error_flag.load(.monotonic) != 0) return;
         const q = shared.chunks[chunk_idx];
-        const chunk_dst_off = shared.dst_start_off + q.dst_offset;
         decodeOneChunk(
             shared.block_src[q.src_offset .. q.src_offset + q.src_size],
             shared.dst,
-            chunk_dst_off,
+            shared.dst_start_off + q.dst_offset,
             q.dst_size,
-            // group_dst_start_off is irrelevant for Fast (only used
-            // by the High codec's SC group handling); passing
-            // dst_start_off keeps the parameter well-defined.
             shared.dst_start_off,
             scratch,
         ) catch |err| {
@@ -789,6 +786,20 @@ fn fastL14WorkerFn(shared: *FastL14Shared, scratch: []u8) void {
             _ = shared.error_flag.store(1, .monotonic);
             return;
         };
+
+        // After decoding the FIRST chunk in this slice, save its
+        // first 64 bytes. The previous slice's last chunk will
+        // eventually overcopy and stomp them. We restore after
+        // the decode loop finishes.
+        if (chunk_idx == start and start > 0) {
+            guard_pos = shared.dst_start_off + q.dst_offset;
+            guard_len = @min(64, shared.dst.len - guard_pos);
+            @memcpy(guard[0..guard_len], shared.dst[guard_pos..][0..guard_len]);
+        }
+    }
+
+    if (guard_len > 0) {
+        @memcpy(shared.dst[guard_pos..][0..guard_len], guard[0..guard_len]);
     }
 }
 
@@ -800,34 +811,15 @@ fn fastL14WorkerFn(shared: *FastL14Shared, scratch: []u8) void {
 /// streams (each piece its own frame with its own sidecar), the
 /// caller supplies the running dst offset so positions land in the
 /// correct piece region.
-fn runPhaseOne(
+fn applySidecar(
     dst: []u8,
     dst_off: usize,
     region_len: usize,
     sidecar: *const pdm.ParsedSidecar,
 ) void {
-    // Literal byte leaves first, so subsequent match copies that read
-    // those positions pick up the correct bytes.
     for (sidecar.literal_bytes) |lit| {
         if (lit.position >= region_len) continue;
         dst[dst_off + @as(usize, @intCast(lit.position))] = lit.byte_value;
-    }
-    // Match ops in cmd-stream (= file-position) order: byte-wise
-    // forward copy handles self-referential matches (offset < length)
-    // correctly, which is the common LZ case.
-    for (sidecar.match_ops) |op| {
-        if (op.src_start < 0) continue;
-        const length: usize = op.length;
-        const src_rel: usize = @intCast(op.src_start);
-        const tgt_rel: usize = @intCast(op.target_start);
-        if (src_rel + length > region_len) continue;
-        if (tgt_rel + length > region_len) continue;
-        const src_abs = dst_off + src_rel;
-        const tgt_abs = dst_off + tgt_rel;
-        var i: usize = 0;
-        while (i < length) : (i += 1) {
-            dst[tgt_abs + i] = dst[src_abs + i];
-        }
     }
 }
 
@@ -846,7 +838,7 @@ pub fn decompressFastL14Parallel(
     dst_off_inout: *usize,
     decompressed_size: usize,
 ) DecodeError!void {
-    // ── Pre-scan chunks in the compressed frame block ────────────────
+    // ── Pre-scan chunks ──────────────────────────────────────────────
     var scan = try preScanBlock(allocator, block_src, decompressed_size);
     defer scan.deinit();
 
@@ -856,14 +848,20 @@ pub fn decompressFastL14Parallel(
     const dst_start_off = dst_off_inout.*;
     if (dst_start_off + decompressed_size + 64 > dst.len) return error.OutputTooSmall;
 
-    // ── Phase 1: parse sidecar and apply to dst ──────────────────────
+    // ── Parse sidecar ──────────────────────────────────────────────────
     var sidecar = pdm.parseBlockBody(sidecar_body, allocator) catch return error.InvalidInternalHeader;
     defer sidecar.deinit();
-    runPhaseOne(dst, dst_start_off, decompressed_size, &sidecar);
 
-    // ── Phase 2: dispatch workers to decode sub-chunks in parallel ──
+    // ── Worker setup ─────────────────────────────────────────────────
+    // Slice size aligned to 16 chunks (matching sidecar boundaries).
     const cpu_count_raw: usize = std.Thread.getCpuCount() catch 1;
-    const worker_count: usize = @min(num_chunks, @max(@as(usize, 1), cpu_count_raw));
+    const max_workers: usize = @min(24, @min(num_chunks, cpu_count_raw));
+    const aligned_slice: usize = blk: {
+        if (max_workers <= 1) break :blk num_chunks;
+        const ideal = (num_chunks + max_workers - 1) / max_workers;
+        break :blk ((ideal + 15) / 16) * 16;
+    };
+    const worker_count: usize = if (aligned_slice >= num_chunks) 1 else (num_chunks + aligned_slice - 1) / aligned_slice;
 
     const sc_scratch_bytes: usize = constants.scratch_size * 2;
     const scratches = try allocator.alloc([]u8, worker_count);
@@ -879,53 +877,63 @@ pub fn decompressFastL14Parallel(
         .block_src = block_src,
         .dst = dst,
         .dst_start_off = dst_start_off,
-        .next_chunk = std.atomic.Value(usize).init(0),
         .error_flag = std.atomic.Value(u32).init(0),
         .captured_err = std.atomic.Value(u16).init(0),
     };
 
+    // ── Apply sidecar ────────────────────────────────────────────────
+    applySidecar(dst, dst_start_off, decompressed_size, &sidecar);
+
+    // ── Single parallel pass (contiguous-slice) ──────────────────────
+    // Each worker saves/restores its boundary guard internally,
+    // so no separate overcopy repair pass is needed.
+    dispatchWorkers(&shared, scratches, worker_count, aligned_slice, pool_opt);
+    if (shared.error_flag.load(.monotonic) != 0) return reportWorkerError(&shared);
+
+    dst_off_inout.* += decompressed_size;
+}
+
+fn dispatchWorkers(
+    shared: *FastL14Shared,
+    scratches: [][]u8,
+    worker_count: usize,
+    slice_size_arg: usize,
+    pool_opt: ?*std.Thread.Pool,
+) void {
+    const slice_size: usize = slice_size_arg;
     if (worker_count == 1) {
-        fastL14WorkerFn(&shared, scratches[0]);
+        fastL14WorkerFn(shared, scratches[0], 0, shared.chunks.len);
     } else if (pool_opt) |pool| {
         var wg: std.Thread.WaitGroup = .{};
         for (0..worker_count) |i| {
-            pool.spawnWg(&wg, fastL14WorkerFn, .{ &shared, scratches[i] });
+            const s = i * slice_size;
+            const e = @min(s + slice_size, shared.chunks.len);
+            pool.spawnWg(&wg, fastL14WorkerFn, .{ shared, scratches[i], s, e });
         }
         pool.waitAndWork(&wg);
     } else {
-        const threads = try allocator.alloc(std.Thread, worker_count);
-        defer allocator.free(threads);
+        var threads_buf: [256]std.Thread = undefined;
+        const threads = threads_buf[0..worker_count];
         var spawned: usize = 0;
         while (spawned < worker_count) : (spawned += 1) {
-            threads[spawned] = std.Thread.spawn(.{}, fastL14WorkerFn, .{ &shared, scratches[spawned] }) catch |err| {
-                for (threads[0..spawned]) |t| t.join();
-                return err;
+            const s = spawned * slice_size;
+            const e = @min(s + slice_size, shared.chunks.len);
+            threads[spawned] = std.Thread.spawn(.{}, fastL14WorkerFn, .{ shared, scratches[spawned], s, e }) catch {
+                shared.error_flag.store(1, .monotonic);
+                break;
             };
         }
-        for (threads) |t| t.join();
+        for (threads[0..spawned]) |t| t.join();
     }
+}
 
-    if (shared.error_flag.load(.monotonic) != 0) {
-        const code = shared.captured_err.load(.monotonic);
-        if (code != 0) {
-            const any_err: anyerror = @errorFromInt(code);
-            const narrow: DecodeError = @errorCast(any_err);
-            return narrow;
-        }
-        return error.Truncated;
+fn reportWorkerError(shared: *const FastL14Shared) DecodeError {
+    const code = shared.captured_err.load(.monotonic);
+    if (code != 0) {
+        const any_err: anyerror = @errorFromInt(code);
+        return @errorCast(any_err);
     }
-
-    // Phase 2 workers' fast.decodeChunk pattern overcopies past each
-    // chunk's dst_end due to the vectorised `copy64`/`copy16` loops.
-    // In serial decode this is harmless because the next chunk
-    // overwrites the overshoot; in parallel decode, a later chunk can
-    // finish FIRST and then an earlier chunk's overshoot stomps its
-    // correct bytes. The walker records these overshoot positions as
-    // "overcopy_leaves" in the sidecar's literal_bytes, so re-running
-    // phase 1 here restores them to the correct values.
-    runPhaseOne(dst, dst_start_off, decompressed_size, &sidecar);
-
-    dst_off_inout.* += decompressed_size;
+    return error.Truncated;
 }
 
 // ────────────────────────────────────────────────────────────
