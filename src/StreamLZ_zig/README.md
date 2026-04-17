@@ -214,7 +214,7 @@ src/StreamLZ_zig/
       entropy_decoder.zig         tANS / Huffman / RLE / recursive dispatch
       huffman_decoder.zig         canonical Huffman 11-bit LUT, 3-stream parallel
       tans_decoder.zig            tANS table decode + LUT init + 5-state decode
-      cleanness_analyzer.zig      diagnostic-only DAG analyzer (see Investigations)
+      cleanness_analyzer.zig      sidecar builder + DAG analyzer (parallel decode)
     encode/
       streamlz_encoder.zig        framed compress, Fast L1-L5 + compressFramedHigh
       fast_constants.zig          level mapping + min-match-length table
@@ -257,35 +257,26 @@ parity tweak, and one thread-dispatch gap.
 
 ### 1. L1-L5 parallel decompress
 
-**L1-L4: landed** via a v2 frame-format change (commits `abe348c..37d6263`).
-The encoder walks each frame block's LZ-token closure at compress time and
-emits a sidecar listing every match op and literal byte whose effect crosses
-a sub-chunk boundary (plus guard bytes for `copy64`/`copy16` overcopy at
-chunk tails). The decoder reads the sidecar, applies it into `dst` in a
-fast phase-1 pass, then dispatches each sub-chunk's Fast decoder on its own
-thread in phase 2. Overcopy-corrupted positions are repaired by a second
-phase-1 pass after phase-2 workers join.
+**L1-L5: landed.** The v2 frame format carries a per-block sidecar that
+enables parallel Fast decompress at all five levels.
 
-Sidecar payload uses delta-encoded targets, LEB128 varints, and literal-run
-RLE — roughly 5× smaller than the straight record-per-op form. See the
-[B1_json benchmark](#v2-parallel-fast-l1-l4-decompress--b1_json-large_100mbjson-926-mb)
-above for throughput + correctness.
+**L1-L4** use a small sidecar (~150 KB for enwik8) containing cross-chunk
+match ops and literal leaves from a BFS closure analysis. The decoder
+applies the sidecar, dispatches contiguous-slice workers, and each worker
+saves/restores its slice boundary guard for overcopy repair.
 
-**L5: still serial.** The lazy chain parser produces ~10× more closure
-tokens per block than greedy L1-L4, so an always-on sidecar for L5 would
-dominate file size. The likely path is a per-block opt-in trigger that
-emits only when sub-chunk cross-references are dense enough to amortize
-the sidecar cost — not yet implemented.
+**L5** uses a larger sidecar (~1.2 MB for enwik8) containing cross-chunk
+source bytes at recursive transitive depth ≥ 1, filtered to 16-chunk
+slice boundaries. The decoder constrains its worker count so slice_size
+is a multiple of 16 (capped at 24 workers). Single-pass contiguous-slice
+decode with worker-internal overcopy repair.
 
-**Historical rationale** (still true for L5 and any future v1 content):
-serial Fast decompress is already at the per-core ceiling — Arrow Lake
-decodes L1 enwik8 at ~6.1 GB/s on a single thread. Parallelizing without a
-sidecar would require a phase-1 analysis pass that costs more than the
-serial decode itself. See `FailedExperiments.md` "Fast decoder: lookahead
-prefetch for next match" and "Fast decoder: branched copy16 for short-token
-match copy" for cheap optimizations that were ruled out.
+L5 parallel decompress on enwik8 (100 MB, 24-core Arrow Lake): **10 ms
+(9.8 GB/s)** vs 19 ms serial — **1.9× speedup.** Sidecar adds 1.2 MB
+to the 42 MB compressed file (2.8% overhead). Round-trip verified at
+1–24 simulated core counts.
 
-**Status: L1-L4 landed; L5 open.**
+**Status: L1-L5 landed.**
 
 ### 2. C1 — Fast decoder `@prefetch` hints in cmd==2 / medium paths
 
