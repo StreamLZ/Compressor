@@ -729,3 +729,146 @@ allocator's default behavior beats manual pooling for buffers > L3.
 
 Reverted to `var hasher = try MatchHasher16Dual.init(allocator, bits, 0);
 defer hasher.deinit();` on every call.
+
+---
+
+## Fast decoder: branched copy16 for short-token match copy
+
+**Hypothesis**: The short-token hot loop emits 2× `copy64` (8-byte mov
+pairs) for the match copy = 2 store uops per iteration. Replacing with
+1× `copy16` (SSE MOVDQU) when `distance >= 16`, falling back to the
+2× `copy64` cascade when `distance in [8,15]` (encoder min offset is 8),
+would cut 1 store uop per iteration on the common path. With
+store-throughput at ~1.5/cycle on Arrow Lake and 3 stores/iter, the
+theoretical minimum is 2 cycles/iter — we observed 2.4, so ~20% left
+on the table if we can eliminate one store.
+
+**What we tried**:
+```zig
+if (@intFromPtr(dst) - @intFromPtr(match_ptr) >= 16) {
+    copy.copy16(dst, match_ptr);
+} else {
+    copy.copy64(dst, match_ptr);
+    copy.copy64(dst + 8, match_ptr + 8);
+}
+```
+
+L3 bench enwik8 (50 runs):
+- Baseline (2× copy64): 5923 best / 5730 mean MB/s
+- Branched:             5664 best / 5540 mean MB/s  (**-3.3% mean**)
+
+**Why it regressed**: The branch introduces `sub` + `cmp` + `jae` = 3
+extra uops per iteration (on the hot path), offsetting the 1 store uop
+saved. And the branch mispredicts whenever the distance distribution
+shifts across chunks (file-dependent), adding ~10-cycle pipeline
+flushes.
+
+**The theoretical lever is real** (we are close to store-throughput
+bound), but you can't get it via a dynamic branch on `distance`. To
+actually collapse 2 stores into 1 would need either:
+  (a) statically prove distance is always ≥ 16 for this path (encoder
+      guarantee — not currently true, min is 8)
+  (b) use PSHUFB-based pattern replication for the small-offset case,
+      making copy16 always safe (LZ4-style repeat-byte table)
+
+Option (b) is the standard trick but requires a mask lookup table and
+one PSHUFB per short-token iter — more complex than the branch, may or
+may not pay off on Arrow Lake. Not pursued in this session.
+
+Also tried an unconditional `copy16` for the long-match 16-bit offset
+loop (assumed min offset was larger). **Produced wrong output** — the
+encoder does emit offsets in [8,15] on this path. Reverted. Keep the
+2× copy64 cascade.
+
+---
+
+## Fast decoder: lookahead prefetch for next match
+
+**Hypothesis**: VTune showed the short-token hot loop retiring at the
+first match store (2.94s out of 6.5s total wall, ~45% of samples). The
+store was parking there because it's waiting on the match *load*, which
+is the only random-access load in the loop. A software prefetch of the
+next iteration's match address — computed at the end of the current
+iteration from a peek at `cmd_stream[0]` + `off16_stream[0]` — should
+turn some L2/L3 stalls into L1 hits.
+
+**What we tried**:
+```zig
+// at the tail of the short-token branch
+if (@intFromPtr(cmd_stream) != @intFromPtr(cmd_stream_end)) {
+    const peek_cmd: u32 = cmd_stream[0];
+    const peek_new_dist: i64 = off16_stream[0];
+    const peek_offs: i64 = if ((peek_cmd & 0x80) == 0)
+        -peek_new_dist else recent_offs;
+    const peek_addr: usize = @intFromPtr(dst) +% @as(usize, @bitCast(peek_offs));
+    @prefetch(@as([*]const u8, @ptrFromInt(peek_addr)),
+              .{ .rw = .read, .locality = 3 });
+}
+```
+
+L3 bench enwik8 (100 runs):
+- Baseline: 5888 best / 5745 mean
+- With prefetch: **5328 best / 5200 mean** (−10%)
+
+**Why it regressed**: Three culprits, all adding uops to a hot loop
+that was already within ~20% of the theoretical frontend/store-port
+ceiling.
+1. The peek `cmd_stream[0]` and `off16_stream[0]` loads consume two
+   load-port slots each iteration, even though they usually hit L1.
+2. The `if (cmd_stream != cmd_stream_end)` guard mispredicts on the
+   final iteration of each chunk (the branch direction flips once).
+3. `@prefetch` itself is 1 uop on Arrow Lake (issues via the load
+   port), adding throughput pressure.
+
+Net uop add ≈ 6-8 per iteration. The hot loop was ~25 uops
+pre-prefetch, so 25 → 32 uops is a 28% frontend-dispatch increase.
+The L1/L2 hit conversion (~20% of match loads that *weren't* already
+hot) doesn't recover that overhead.
+
+**Takeaway**: Software prefetch only pays in loops that are
+*memory-bound with idle frontend slots*. This decoder is
+frontend/store-port-bound, so adding prefetch uops makes it slower, not
+faster. To confirm the bottleneck, we'd need `vtune -collect
+uarch-exploration` (needs admin) for the Top-Down breakdown — the
+current `hotspots` PC sampling can't distinguish "parked waiting on
+memory" from "parked waiting on dispatch slot."
+
+Kept the match copy as 2× `copy64`.
+
+---
+
+## Fast decoder: `@prefetch` in medium-match / cmd==2 long-match paths (C1 parity)
+
+**Date**: 2026-04-17
+
+**What**: Added `@prefetch(dst_begin - off32_stream[3], .{.rw = .read, .locality = 3})`
+at the tail of the medium-match (`cmd > 2`) and cmd==2 long-match paths, matching
+the C# `Sse.Prefetch0(dstBegin - off32Stream[3])` lookahead. Fires after each
+far-offset match copy, prefetching the source position of a match 3 entries ahead
+in the off32 stream.
+
+**Results** (24-core Arrow Lake, `benchc -r 10`):
+
+| Corpus  | Level | Before (MB/s) | After (MB/s) | Change |
+|---------|-------|--------------|-------------|--------|
+| enwik8  | L1    | 16,679       | 17,861      | +7.1%  |
+| enwik8  | L3    | 17,585       | 17,912      | +1.9%  |
+| enwik8  | L5    | 9,627        | 9,447       | -1.9%  |
+| silesia | L1    | 22,944       | 19,723      | -14%   |
+| silesia | L3    | 24,169       | 21,342      | -12%   |
+| silesia | L5    | 11,199       | 11,291      | +0.8%  |
+
+**Why it failed**: Text (enwik8) has many large-offset matches whose source
+positions are DRAM misses — the prefetch hides latency and helps. Binary/mixed
+data (silesia) has mostly short-offset matches whose sources are already in
+L1/L2 cache. The prefetch wastes frontend uops: the `off32_stream[3]` load,
+the bounds check, and the prefetch instruction itself all cost cycles for zero
+benefit on a frontend-bound decoder.
+
+A conditional prefetch (only when `far > 65536`) might help, but the branch
+itself adds frontend pressure. A text-vs-binary heuristic exists at compress
+time (`text_detector.zig`) but the decoder has no access to it.
+
+**Verdict**: Reverted. The C# prefetch may help on .NET's less-optimized hot
+loop; the Zig decoder is tight enough that the overhead outweighs the benefit
+on mixed workloads.
