@@ -140,14 +140,11 @@ const TokenInfo = struct {
     target_start: u64,
     length: u32,
     earliest: u32,
-    // Src-range start in whole-file coordinates. i64 because matches that
-    // reach before file position 0 are technically invalid but we clamp
-    // rather than error out.
     src_start: i64,
-    // Start of the 128 KB sub-chunk containing this token (whole-file
-    // coordinate). Used to classify cross-sub-chunk seeds and to bound
-    // closure membership to "reads from a prior sub-chunk".
-    sub_chunk_start: u64,
+    // Start of the 256 KB chunk containing this token (whole-file
+    // coordinate). Used to classify cross-chunk seeds — only matches
+    // whose src reaches before this boundary need sidecar coverage.
+    chunk_start: u64,
 };
 
 /// Phase-1 sidecar operation: a closure match that phase 1 executes by
@@ -198,7 +195,7 @@ fn partitionCollectMatch(
     allocator: std.mem.Allocator,
     byte_earliest: []u32,
     producer_map: []u32,
-    sub_chunk_start: u64,
+    chunk_start_abs: u64,
     dst_file_pos: u64,
     recent_offs: i64,
     length: usize,
@@ -244,7 +241,7 @@ fn partitionCollectMatch(
         .length = @intCast(length),
         .earliest = earliest,
         .src_start = src_pos_signed,
-        .sub_chunk_start = sub_chunk_start,
+        .chunk_start = chunk_start_abs,
     });
 }
 
@@ -258,7 +255,7 @@ fn partitionFastSubChunk(
     saved_dist: *i32,
     start_off: usize,
     file_pos_base: u64,
-    sub_chunk_start_abs: u64,
+    chunk_start_abs: u64,
     byte_earliest: []u32,
     producer_map: []u32,
     file_capacity: u64,
@@ -323,14 +320,14 @@ fn partitionFastSubChunk(
                 off16_stream = @ptrFromInt(@intFromPtr(off16_stream) + 2);
             }
             const match_length: usize = (cmd >> 3) & 0xF;
-            try partitionCollectMatch(allocator, byte_earliest, producer_map, sub_chunk_start_abs, file_pos_base + dst_off, recent_offs, match_length, file_capacity, tokens);
+            try partitionCollectMatch(allocator, byte_earliest, producer_map, chunk_start_abs, file_pos_base + dst_off, recent_offs, match_length, file_capacity, tokens);
             dst_off += match_length;
         } else if (cmd > 2) {
             const length: usize = cmd + 5;
             const far: u32 = off32_stream[0];
             off32_stream += 1;
             const dist_match: i64 = -(@as(i64, @intCast(dst_off)) + @as(i64, @intCast(far)));
-            try partitionCollectMatch(allocator, byte_earliest, producer_map, sub_chunk_start_abs, file_pos_base + dst_off, dist_match, length, file_capacity, tokens);
+            try partitionCollectMatch(allocator, byte_earliest, producer_map, chunk_start_abs, file_pos_base + dst_off, dist_match, length, file_capacity, tokens);
             // Medium match write extent: decoder does two copy16 calls
             // = 32 bytes starting at dst_off.
             const mm_write_end = dst_off + 32;
@@ -373,7 +370,7 @@ fn partitionFastSubChunk(
             const off16: u16 = off16_stream[0];
             off16_stream += 1;
             recent_offs = -@as(i64, off16);
-            try partitionCollectMatch(allocator, byte_earliest, producer_map, sub_chunk_start_abs, file_pos_base + dst_off, recent_offs, length, file_capacity, tokens);
+            try partitionCollectMatch(allocator, byte_earliest, producer_map, chunk_start_abs, file_pos_base + dst_off, recent_offs, length, file_capacity, tokens);
             // Long match (cmd==1) decoder uses `while (remaining > 0)
             // { copy64; copy64; d += 16; remaining -= 16; }`, writing
             // ceil(length/16) * 16 bytes before dst advances by length.
@@ -392,7 +389,7 @@ fn partitionFastSubChunk(
             const far: u32 = off32_stream[0];
             off32_stream += 1;
             const dist_match: i64 = -(@as(i64, @intCast(dst_off)) + @as(i64, @intCast(far)));
-            try partitionCollectMatch(allocator, byte_earliest, producer_map, sub_chunk_start_abs, file_pos_base + dst_off, dist_match, length, file_capacity, tokens);
+            try partitionCollectMatch(allocator, byte_earliest, producer_map, chunk_start_abs, file_pos_base + dst_off, dist_match, length, file_capacity, tokens);
             // Long match (cmd==2) decoder same pattern: ceil(length/16) * 16
             // bytes via a copy16 loop.
             const lm2_write_end = dst_off + ((length + 15) / 16) * 16;
@@ -460,11 +457,12 @@ fn partitionFastChunkPayload(
     var dst_remaining: usize = chunk_dst_size;
     var dst_off_in_chunk: u64 = 0;
 
+    // The 256 KB chunk start in file coordinates. ALL tokens in this
+    // chunk share this value — only matches reading before it are
+    // cross-chunk seeds for the parallel-decode sidecar.
+    const chunk_start_abs: u64 = running_dst_off;
+
     while (dst_remaining != 0) {
-        // Sub-chunk absolute start (before block1/block2 split). This is
-        // the boundary where `recent_offset` resets, so it's what a
-        // cross-sub-chunk match is measured against.
-        const sub_chunk_start_abs: u64 = running_dst_off + dst_off_in_chunk;
         const dst_count: usize = @min(@as(usize, 0x20000), dst_remaining);
         if (src_pos + 4 > chunk_src.len) return error.Truncated;
         const chunkhdr: u32 = (@as(u32, chunk_src[src_pos]) << 16) |
@@ -553,10 +551,10 @@ fn partitionFastChunkPayload(
             // applied an 8-byte skew to every sub-chunk's block1 after
             // the first, causing src_start computations to diverge from
             // the real decoder.
+            const sub_chunk_start_abs: u64 = running_dst_off + dst_off_in_chunk;
             const s_off: usize = if (sub_chunk_start_abs == 0 and iteration == 0) 8 else 0;
             const sub_chunk_file_pos: u64 = running_dst_off + dst_off_in_chunk + (dst_count - dst_size_left);
 
-            // Initial 8-byte raw region at the very start of the file.
             if (s_off > 0) {
                 var i: usize = 0;
                 while (i < s_off) : (i += 1) {
@@ -566,9 +564,9 @@ fn partitionFastChunkPayload(
             }
 
             if (mode == 0) {
-                try partitionFastSubChunk(.delta, allocator, lz_ptr, dst_size_cur, &saved_dist, s_off, sub_chunk_file_pos, sub_chunk_start_abs, byte_earliest, producer_map, file_capacity, tokens, overcopy_leaves);
+                try partitionFastSubChunk(.delta, allocator, lz_ptr, dst_size_cur, &saved_dist, s_off, sub_chunk_file_pos, chunk_start_abs, byte_earliest, producer_map, file_capacity, tokens, overcopy_leaves);
             } else {
-                try partitionFastSubChunk(.raw, allocator, lz_ptr, dst_size_cur, &saved_dist, s_off, sub_chunk_file_pos, sub_chunk_start_abs, byte_earliest, producer_map, file_capacity, tokens, overcopy_leaves);
+                try partitionFastSubChunk(.raw, allocator, lz_ptr, dst_size_cur, &saved_dist, s_off, sub_chunk_file_pos, chunk_start_abs, byte_earliest, producer_map, file_capacity, tokens, overcopy_leaves);
             }
             dst_size_left -= dst_size_cur;
             if (dst_size_left == 0) break;
@@ -828,14 +826,12 @@ pub fn analyzeFilePartition(
         // Cheap proxy: token whose transitive dep tree reaches below
         // its own sub-chunk.  Correlated with closure membership but
         // not identical.
-        if (@as(u64, t.earliest) < t.sub_chunk_start) {
+        if (@as(u64, t.earliest) < t.chunk_start) {
             stats.low_earliest_tokens += 1;
         }
 
-        // Seed: match with src_start physically before own sub_chunk_start
-        // (ignoring src_start < 0 which means "reaches before file").
-        const sub_start_signed: i64 = @intCast(t.sub_chunk_start);
-        if (t.src_start < sub_start_signed) {
+        const chunk_start_signed: i64 = @intCast(t.chunk_start);
+        if (t.src_start < chunk_start_signed) {
             stats.cross_chunk_seed_tokens += 1;
             if (in_closure[idx] == 0) {
                 in_closure[idx] = 1;
@@ -1093,13 +1089,17 @@ pub fn buildPpocSidecar(
     defer seed_queue.deinit(allocator);
 
     for (tokens.items, 0..) |t, idx| {
-        const sub_start_signed: i64 = @intCast(t.sub_chunk_start);
-        if (t.src_start < sub_start_signed) {
+        const chunk_start_signed: i64 = @intCast(t.chunk_start);
+        if (t.src_start < chunk_start_signed) {
             if (in_closure[idx] == 0) {
                 in_closure[idx] = 1;
                 try seed_queue.append(allocator, @intCast(idx));
             }
         }
+    }
+
+    if (std.process.hasEnvVar(allocator, "SLZ_CLOSURE_STATS") catch false) {
+        std.debug.print("[CLOSURE-STATS] seeds={d} total_tokens={d}\n", .{ seed_queue.items.len, tokens.items.len });
     }
 
     // BFS backward from seeds. Record literal leaves along the way.
@@ -1173,6 +1173,132 @@ pub fn buildPpocSidecar(
     }
 
     sidecar.total_positions = total_pos;
+
+    // Closure completeness check: for every walker-seen token T, every
+    // byte position in T's src range that lives in a DIFFERENT chunk
+    // than T's target chunk must appear in the sidecar (either as a
+    // literal_byte or within a match_op's target range). Otherwise a
+    // parallel worker that decodes T's chunk before T's src chunk
+    // would read an un-populated position (allocator garbage), and the
+    // decode silently corrupts. This is the check that ACTUALLY
+    // validates the closure, as opposed to the walker-reconstruct
+    // check above which only validates the walker's full token stream.
+    if (std.process.hasEnvVar(allocator, "SLZ_CLOSURE_CHECK") catch false) {
+        // Build "covered" bitmap: true for positions populated by phase 1.
+        const covered = try allocator.alloc(u8, @intCast(total_decomp));
+        defer allocator.free(covered);
+        @memset(covered, 0);
+        for (sidecar.literal_bytes.items) |lit| {
+            if (lit.position < total_decomp) covered[@intCast(lit.position)] = 1;
+        }
+        for (sidecar.match_ops.items) |op| {
+            if (op.src_start < 0) continue;
+            const tgt: u64 = op.target_start;
+            const len: u64 = op.length;
+            const hi: u64 = @min(tgt + len, total_decomp);
+            var q: u64 = tgt;
+            while (q < hi) : (q += 1) {
+                covered[@intCast(q)] = 1;
+            }
+        }
+
+        const chunk_size_u64: u64 = @intCast(constants.chunk_size);
+        var gap_count: u64 = 0;
+        var first_gap_pos: ?u64 = null;
+        var first_gap_token: ?usize = null;
+        for (tokens.items, 0..) |t, tok_idx| {
+            if (t.src_start < 0) continue;
+            if (t.length == 0) continue;
+            const tgt_chunk: u64 = t.target_start / chunk_size_u64;
+            const src_lo: u64 = @intCast(t.src_start);
+            const src_hi: u64 = @min(src_lo + t.length, total_decomp);
+            var p: u64 = src_lo;
+            while (p < src_hi) : (p += 1) {
+                const src_chunk: u64 = p / chunk_size_u64;
+                if (src_chunk == tgt_chunk) continue; // same-chunk read, handled by sequential decode
+                if (covered[@intCast(p)] == 0) {
+                    gap_count += 1;
+                    if (first_gap_pos == null) {
+                        first_gap_pos = p;
+                        first_gap_token = tok_idx;
+                    }
+                }
+            }
+        }
+        std.debug.print(
+            "[CLOSURE-CHECK] total_tokens={d} closure_gaps={d} first_gap_pos={?d} first_gap_token_idx={?d}\n",
+            .{ tokens.items.len, gap_count, first_gap_pos, first_gap_token },
+        );
+        if (first_gap_token) |tidx| {
+            const t = tokens.items[tidx];
+            std.debug.print(
+                "[CLOSURE-CHECK] token[{d}]: tgt={d} src={d} len={d} chunk_start={d} tgt_chunk={d} gap_pos={?d} gap_chunk={?d}\n",
+                .{ tidx, t.target_start, t.src_start, t.length, t.chunk_start, t.target_start / chunk_size_u64, first_gap_pos, if (first_gap_pos) |fgp| fgp / chunk_size_u64 else null },
+            );
+        }
+    }
+
+    // Walker reconstruction check: execute the walker's full token
+    // stream on a fresh buffer (starting from literal positions
+    // pre-filled from dst_ref) and verify the result matches dst_ref.
+    // If walker is complete AND correct, this produces dst_ref exactly.
+    // Any mismatch reveals either (a) a missing token, (b) a wrong
+    // src_start, or (c) a wrong length that the per-token dst_ref
+    // invariant check below can't detect.
+    if (std.process.hasEnvVar(allocator, "SLZ_WALKER_RECONSTRUCT") catch false) {
+        const recon = try allocator.alloc(u8, @intCast(total_decomp));
+        defer allocator.free(recon);
+        @memset(recon, 0xAA);
+        // Literals: positions producer_map says aren't touched by any token.
+        var p_lit: u64 = 0;
+        while (p_lit < total_decomp) : (p_lit += 1) {
+            if (producer_map[@intCast(p_lit)] == std.math.maxInt(u32)) {
+                recon[@intCast(p_lit)] = dst_ref[@intCast(p_lit)];
+            }
+        }
+        // Tokens in emission order (= cmd-stream order = target_start-ascending).
+        for (tokens.items) |t| {
+            if (t.src_start < 0) continue;
+            const length: usize = t.length;
+            const src_i: usize = @intCast(t.src_start);
+            const tgt: usize = @intCast(t.target_start);
+            if (src_i + length > total_decomp or tgt + length > total_decomp) continue;
+            var i: usize = 0;
+            while (i < length) : (i += 1) {
+                recon[tgt + i] = recon[src_i + i];
+            }
+        }
+        var diffs: u64 = 0;
+        var first_diff_pos: ?u64 = null;
+        var i: u64 = 0;
+        while (i < total_decomp) : (i += 1) {
+            if (recon[@intCast(i)] != dst_ref[@intCast(i)]) {
+                if (first_diff_pos == null) first_diff_pos = i;
+                diffs += 1;
+            }
+        }
+        std.debug.print(
+            "[WALKER-RECON] total_tokens={d} reconstruction_diffs={d} first_diff_pos={?d}\n",
+            .{ tokens.items.len, diffs, first_diff_pos },
+        );
+        if (first_diff_pos) |fdp| {
+            // Walk backward through tokens to find which one targets fdp
+            // (or should have). Also identify the range.
+            std.debug.print("[WALKER-RECON]   dst_ref[{d}]=0x{x:0>2}  recon[{d}]=0x{x:0>2}\n", .{
+                fdp, dst_ref[@intCast(fdp)], fdp, recon[@intCast(fdp)],
+            });
+            std.debug.print("[WALKER-RECON]   producer_map[{d}]={d} (maxInt means literal)\n", .{
+                fdp, producer_map[@intCast(fdp)],
+            });
+            if (producer_map[@intCast(fdp)] != std.math.maxInt(u32)) {
+                const tidx = producer_map[@intCast(fdp)];
+                const t = tokens.items[tidx];
+                std.debug.print("[WALKER-RECON]   token[{d}]: tgt={d} src={d} len={d}\n", .{
+                    tidx, t.target_start, t.src_start, t.length,
+                });
+            }
+        }
+    }
 
     return sidecar;
 }
