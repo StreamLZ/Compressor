@@ -176,31 +176,41 @@ pub fn compressFramedHigh(
             can_compress,
         );
     } else if (can_parallel_blocks) {
-        // Parallel non-SC High: build one global MLS covering all of
-        // `src`, then hand blocks out to worker threads. Not byte-exact
-        // (range partitioner assigns blocks in a
-        // different order), but reproducible across Zig runs.
+        // Parallel non-SC High: build one global MLS, dictionary preload.
+        const dict_p = opts.dictionary orelse &[_]u8{};
+        const dict_len_p = dict_p.len;
+        var combined_p: ?[]u8 = null;
+        const effective_src_p: []const u8 = if (dict_len_p > 0) blk: {
+            const buf = allocator.alloc(u8, dict_len_p + src.len) catch return error.OutOfMemory;
+            @memcpy(buf[0..dict_len_p], dict_p);
+            @memcpy(buf[dict_len_p..], src);
+            combined_p = buf;
+            break :blk buf;
+        } else src;
+        defer if (combined_p) |buf| allocator.free(buf);
+
         var global_mls = try mls_mod.ManagedMatchLenStorage.init(allocator, src.len + 1, 8.0);
         defer global_mls.deinit();
-        global_mls.window_base_offset = 0;
-        global_mls.round_start_pos = 0;
+        global_mls.window_base_offset = @intCast(dict_len_p);
+        global_mls.round_start_pos = @intCast(dict_len_p);
         if (mapping.use_bt4) {
-            try match_finder_bt4.findMatchesBT4(allocator, src, &global_mls, 4, 0, 128);
+            try match_finder_bt4.findMatchesBT4(allocator, effective_src_p, &global_mls, 4, dict_len_p, 128);
         } else {
-            match_finder.findMatchesHashBased(allocator, src, &global_mls, 4, 0) catch |err| return if (err == error.HashBitsOutOfRange) error.BadLevel else @errorCast(err);
+            match_finder.findMatchesHashBased(allocator, effective_src_p, &global_mls, 4, dict_len_p) catch |err| return if (err == error.HashBitsOutOfRange) error.BadLevel else @errorCast(err);
         }
         const frame_block_hdr_pos: usize = pos;
         pos += 8;
         const frame_block_start: usize = pos;
         const written = try compress_parallel.compressBlocksParallel(
             allocator,
-            src,
+            effective_src_p,
             dst[pos..],
             &ctx,
             &global_mls,
             sc_flag_bit,
             self_contained,
             resolved_threads,
+            dict_len_p,
         );
         pos += written;
         try finalizeSingleFrameBlock(
@@ -283,18 +293,31 @@ pub fn compressFramedHigh(
         pos += 8;
         const frame_block_start: usize = pos;
 
+        // Dictionary preload: create dict ++ src combined buffer.
+        const dict_h = opts.dictionary orelse &[_]u8{};
+        const dict_len_h = dict_h.len;
+        var combined_h: ?[]u8 = null;
+        const effective_src_h: []const u8 = if (dict_len_h > 0) blk: {
+            const buf = allocator.alloc(u8, dict_len_h + src.len) catch return error.OutOfMemory;
+            @memcpy(buf[0..dict_len_h], dict_h);
+            @memcpy(buf[dict_len_h..], src);
+            combined_h = buf;
+            break :blk buf;
+        } else src;
+        defer if (combined_h) |buf| allocator.free(buf);
+
         // For SC and other paths, we still need a whole-source MLS for
         // L5+ optimal parsing.
         var mls_opt: ?mls_mod.ManagedMatchLenStorage = null;
         defer if (mls_opt) |*m| m.deinit();
         if (can_compress and mapping.codec_level >= 5) {
             var mls = try mls_mod.ManagedMatchLenStorage.init(allocator, src.len + 1, 8.0);
-            mls.window_base_offset = 0;
-            mls.round_start_pos = 0;
+            mls.window_base_offset = @intCast(dict_len_h);
+            mls.round_start_pos = @intCast(dict_len_h);
             if (mapping.use_bt4) {
-                try match_finder_bt4.findMatchesBT4(allocator, src, &mls, 4, 0, 128);
+                try match_finder_bt4.findMatchesBT4(allocator, effective_src_h, &mls, 4, dict_len_h, 128);
             } else {
-                match_finder.findMatchesHashBased(allocator, src, &mls, 4, 0) catch |err| return if (err == error.HashBitsOutOfRange) error.BadLevel else @errorCast(err);
+                match_finder.findMatchesHashBased(allocator, effective_src_h, &mls, 4, dict_len_h) catch |err| return if (err == error.HashBitsOutOfRange) error.BadLevel else @errorCast(err);
             }
             mls_opt = mls;
         }
@@ -306,16 +329,16 @@ pub fn compressFramedHigh(
             null;
         defer if (serial_mt_buf) |buf| allocator.free(buf);
 
-        var src_off: usize = 0;
-        while (can_compress and src_off < src.len) {
-            const block_src_len: usize = @min(src.len - src_off, lz_constants.chunk_size);
+        var src_off: usize = dict_len_h;
+        while (can_compress and src_off < effective_src_h.len) {
+            const block_src_len: usize = @min(effective_src_h.len - src_off, lz_constants.chunk_size);
             const block_dst_remaining: usize = dst.len - pos;
-            const keyframe = self_contained or src_off == 0;
+            const keyframe = self_contained or src_off == dict_len_h;
             const written = try compressOneHighBlock(
                 &ctx,
                 &hasher,
                 if (mls_opt) |*m| m else null,
-                src,
+                effective_src_h,
                 src_off,
                 block_src_len,
                 dst[pos..][0..block_dst_remaining],

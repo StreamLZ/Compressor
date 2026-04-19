@@ -56,6 +56,7 @@ const PcShared = struct {
     mls: *const mls_mod.ManagedMatchLenStorage,
     self_contained: bool,
     sc_flag_bit: u8,
+    dict_prefix_len: usize,
     /// Per-block result slots. Each worker writes into `tmp_bufs[i]`
     /// and stores the written byte count in `written[i]`.
     tmp_bufs: []const []u8,
@@ -116,9 +117,9 @@ fn pcWorkerFn(shared: *PcShared) void {
         // 1, 6, 11, ... → run-to-run nondeterminism.
         worker_cross_block = .{};
 
-        const src_off = block_idx * lz_constants.chunk_size;
+        const src_off = shared.dict_prefix_len + block_idx * lz_constants.chunk_size;
         const block_src_len = @min(shared.src.len - src_off, lz_constants.chunk_size);
-        const keyframe = shared.self_contained or src_off == 0;
+        const keyframe = shared.self_contained or block_idx == 0;
 
         const n_or_err = compressOneHighBlock(
             &worker_ctx,
@@ -156,8 +157,10 @@ pub fn compressBlocksParallel(
     sc_flag_bit: u8,
     self_contained: bool,
     num_threads: u32,
+    dict_prefix_len: usize,
 ) CompressError!usize {
-    const num_blocks: usize = (src.len + lz_constants.chunk_size - 1) / lz_constants.chunk_size;
+    const content_len = src.len - dict_prefix_len;
+    const num_blocks: usize = (content_len + lz_constants.chunk_size - 1) / lz_constants.chunk_size;
     std.debug.assert(num_blocks > 1);
 
     // Per-block tmp buffers sized to compressBound(block_src_len).
@@ -170,8 +173,8 @@ pub fn compressBlocksParallel(
     }
     for (tmp_bufs) |*b| b.* = &[_]u8{};
     for (tmp_bufs, 0..) |*b, i| {
-        const src_off = i * lz_constants.chunk_size;
-        const block_src_len = @min(src.len - src_off, lz_constants.chunk_size);
+        const blk_off = i * lz_constants.chunk_size;
+        const block_src_len = @min(content_len - blk_off, lz_constants.chunk_size);
         b.* = try allocator.alloc(u8, compressBound(block_src_len));
     }
 
@@ -186,6 +189,7 @@ pub fn compressBlocksParallel(
         .mls = mls,
         .self_contained = self_contained,
         .sc_flag_bit = sc_flag_bit,
+        .dict_prefix_len = dict_prefix_len,
         .tmp_bufs = tmp_bufs,
         .written = written,
         .next_block = std.atomic.Value(usize).init(0),
