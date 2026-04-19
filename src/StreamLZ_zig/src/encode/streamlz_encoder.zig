@@ -1166,6 +1166,13 @@ fn compressFramedHigh(
             mls_opt = mls;
         }
 
+        // Pre-allocate match table once for all blocks (L5+ only).
+        const serial_mt_buf: ?[]mls_mod.LengthAndOffset = if (can_compress and mapping.codec_level >= 5)
+            allocator.alloc(mls_mod.LengthAndOffset, 4 * high_compressor.sub_chunk_size) catch return error.OutOfMemory
+        else
+            null;
+        defer if (serial_mt_buf) |buf| allocator.free(buf);
+
         var src_off: usize = 0;
         while (can_compress and src_off < src.len) {
             const block_src_len: usize = @min(src.len - src_off, lz_constants.chunk_size);
@@ -1181,6 +1188,7 @@ fn compressFramedHigh(
                 dst[pos..][0..block_dst_remaining],
                 sc_flag_bit,
                 keyframe,
+                serial_mt_buf,
             );
             pos += written;
             src_off += block_src_len;
@@ -1269,6 +1277,16 @@ fn compressOneFrameBlockWindowed(
     // frame block since their cap is `64 MB - 128 MB block = 0`; every
     // L11 frame block where the cap clamped dict to 0). Subsequent inner
     // blocks (`inner_off > 0`) are never keyframes.
+    // Pre-allocate match table once for all sub-chunks in this frame
+    // block (L5+ only). Max sub-chunk = sub_chunk_size, so the table
+    // needs 4 * sub_chunk_size entries. Reused across inner blocks and
+    // sub-chunks, eliminating repeated alloc/free cycles.
+    const framed_mt_buf: ?[]mls_mod.LengthAndOffset = if (ctx.compression_level >= 5)
+        allocator.alloc(mls_mod.LengthAndOffset, 4 * high_compressor.sub_chunk_size) catch return error.OutOfMemory
+    else
+        null;
+    defer if (framed_mt_buf) |buf| allocator.free(buf);
+
     var inner_off: usize = 0;
     while (inner_off < block_bytes) {
         const inner_len: usize = @min(block_bytes - inner_off, lz_constants.chunk_size);
@@ -1283,6 +1301,7 @@ fn compressOneFrameBlockWindowed(
             dst[pos..],
             0, // sc_flag_bit
             keyframe,
+            framed_mt_buf,
         );
         pos += written;
         inner_off += inner_len;
@@ -1395,6 +1414,7 @@ fn compressOneHighBlock(
     dst_block: []u8,
     sc_flag_bit: u8,
     keyframe: bool,
+    match_table_buf: ?[]mls_mod.LengthAndOffset,
 ) CompressError!usize {
     var local_pos: usize = 0;
     const block_src: []const u8 = src[src_off..][0..block_src_len];
@@ -1465,6 +1485,7 @@ fn compressOneHighBlock(
                 @intCast(start_position_for_sub),
                 &chunk_type,
                 &lz_cost,
+                match_table_buf,
             ) catch null;
 
             if (n_opt) |n| {
@@ -1603,6 +1624,17 @@ fn pcWorkerFn(shared: *PcShared) void {
     var hasher: high_compressor.HighHasher = .{ .none = {} };
     defer hasher.deinit();
 
+    // Pre-allocate match table once per worker thread (L5+ only).
+    const worker_mt_buf: ?[]mls_mod.LengthAndOffset = if (shared.base_ctx.compression_level >= 5)
+        (shared.backing_allocator.alloc(mls_mod.LengthAndOffset, 4 * high_compressor.sub_chunk_size) catch {
+            _ = shared.captured_err.cmpxchgStrong(0, @intFromError(error.OutOfMemory), .monotonic, .monotonic);
+            _ = shared.error_flag.store(1, .monotonic);
+            return;
+        })
+    else
+        null;
+    defer if (worker_mt_buf) |buf| shared.backing_allocator.free(buf);
+
     while (true) {
         const block_idx = shared.next_block.fetchAdd(1, .monotonic);
         if (block_idx >= shared.num_blocks) return;
@@ -1629,6 +1661,7 @@ fn pcWorkerFn(shared: *PcShared) void {
             shared.tmp_bufs[block_idx],
             shared.sc_flag_bit,
             keyframe,
+            worker_mt_buf,
         );
         if (n_or_err) |n| {
             shared.written[block_idx] = n;
@@ -1783,6 +1816,17 @@ fn scWorkerFn(shared: *ScShared) void {
     var hasher: high_compressor.HighHasher = .{ .none = {} };
     defer hasher.deinit();
 
+    // Pre-allocate match table once per SC worker thread (L5+ only).
+    const sc_mt_buf: ?[]mls_mod.LengthAndOffset = if (shared.base_ctx.compression_level >= 5)
+        (shared.backing_allocator.alloc(mls_mod.LengthAndOffset, 4 * high_compressor.sub_chunk_size) catch {
+            _ = shared.captured_err.cmpxchgStrong(0, @intFromError(error.OutOfMemory), .monotonic, .monotonic);
+            _ = shared.error_flag.store(1, .monotonic);
+            return;
+        })
+    else
+        null;
+    defer if (sc_mt_buf) |buf| shared.backing_allocator.free(buf);
+
     const group_size = lz_constants.sc_group_size;
 
     while (true) {
@@ -1867,6 +1911,7 @@ fn scWorkerFn(shared: *ScShared) void {
                 shared.tmp_bufs[chunk_idx],
                 shared.sc_flag_bit,
                 keyframe,
+                sc_mt_buf,
             );
             if (n_or_err) |n| {
                 shared.written[chunk_idx] = n;

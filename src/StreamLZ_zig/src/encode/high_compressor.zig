@@ -288,6 +288,7 @@ pub fn doCompress(
     start_pos: i32,
     chunk_type_out: *i32,
     cost_out: *f32,
+    match_table_buf: ?[]mls_mod.LengthAndOffset,
 ) !?usize {
     if (ctx.compression_level >= 5) {
         return high_optimal_parser.optimal(
@@ -301,6 +302,7 @@ pub fn doCompress(
             start_pos,
             chunk_type_out,
             cost_out,
+            match_table_buf,
         );
     }
 

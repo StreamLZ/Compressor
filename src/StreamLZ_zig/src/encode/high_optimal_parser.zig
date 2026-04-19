@@ -292,6 +292,11 @@ pub fn optimal(
     start_pos: i32,
     chunk_type_out: *i32,
     cost_out: *f32,
+    /// Pre-allocated buffer for the match table. When non-null, must
+    /// have at least `4 * src_size` entries. The caller retains
+    /// ownership; `optimal` will NOT free it. When null, a fresh
+    /// buffer is allocated (and freed) internally — legacy behaviour.
+    match_table_buf: ?[]LengthAndOffset,
 ) !?usize {
     chunk_type_out.* = 0;
     const src_len_usize: usize = @intCast(src_size);
@@ -316,9 +321,12 @@ pub fn optimal(
     const window_base: [*]const u8 = source;
 
     // Match table — extracted from MLS when provided, otherwise zero-filled.
-    // Allocate a fresh `laoManaged` buffer.
-    const match_table = try ctx.allocator.alloc(LengthAndOffset, @intCast(4 * src_size));
-    defer ctx.allocator.free(match_table);
+    // When the caller supplies a pre-allocated buffer we slice it to the
+    // required length; otherwise fall back to a per-call allocation.
+    const mt_len: usize = @intCast(4 * src_size);
+    const mt_owned = if (match_table_buf == null) try ctx.allocator.alloc(LengthAndOffset, mt_len) else null;
+    defer if (mt_owned) |owned| ctx.allocator.free(owned);
+    const match_table: []LengthAndOffset = if (match_table_buf) |buf| buf[0..mt_len] else mt_owned.?;
     @memset(match_table, .{ .length = 0, .offset = 0 });
     if (mls) |m| {
         const mls_start: usize = @intCast(start_pos - m.round_start_pos);
@@ -632,10 +640,9 @@ pub fn optimal(
 
                 var lao_index: usize = 0;
                 while (lao_index < 4) : (lao_index += 1) {
-                    //
-                    // bit reinterpretation, not a range-checked cast. The varlen extractor
-                    // may have written a garbage value into the offset slot immediately after
-                    // a length=0 terminator; the break below catches that case safely.
+                    // The varlen encoding stores large unsigned values in i32 fields,
+                    // so @bitCast is needed. The extractor now guarantees remaining
+                    // slots are zeroed, so no garbage reaches this cast.
                     var lao_ml: u32 = @bitCast(match_table[4 * pos + lao_index].length);
                     var lao_offs: u32 = @bitCast(match_table[4 * pos + lao_index].offset);
                     if (lao_ml < @as(u32, @intCast(min_match_length))) break;
@@ -1134,6 +1141,6 @@ test "optimal: short input returns null" {
     var dst_buf: [1024]u8 = undefined;
     var chunk_type: i32 = -1;
     var cost: f32 = 0;
-    const result = try optimal(&ctx, .{}, null, &src, @intCast(src.len), &dst_buf, dst_buf[dst_buf.len..].ptr, 0, &chunk_type, &cost);
+    const result = try optimal(&ctx, .{}, null, &src, @intCast(src.len), &dst_buf, dst_buf[dst_buf.len..].ptr, 0, &chunk_type, &cost, null);
     try testing.expectEqual(@as(?usize, null), result);
 }

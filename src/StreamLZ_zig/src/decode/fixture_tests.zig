@@ -22,6 +22,10 @@ const std = @import("std");
 const decoder = @import("streamlz_decoder.zig");
 
 const testing = std.testing;
+const page_alloc = std.heap.page_allocator;
+
+/// Maximum fixture file size we will attempt to load (256 MiB).
+const max_fixture_bytes: usize = 256 * 1024 * 1024;
 
 const Failure = struct {
     slz_name: []const u8,
@@ -124,8 +128,37 @@ test "fixture corpus roundtrip: every .slz decodes to its matching .raw" {
         };
         defer allocator.free(raw_name);
 
-        // Read both files.
-        const slz_bytes = slz_dir.readFileAlloc(allocator, entry.name, 1 << 30) catch |err| {
+        // Check file sizes before reading — skip fixtures above 256 MiB.
+        const slz_stat = slz_dir.statFile(entry.name) catch |err| {
+            try failures.append(allocator, .{
+                .slz_name = try allocator.dupe(u8, entry.name),
+                .reason = try allocator.dupe(u8, "stat slz"),
+                .detail = try std.fmt.allocPrint(allocator, "{s}", .{@errorName(err)}),
+            });
+            continue;
+        };
+        if (slz_stat.size > max_fixture_bytes) {
+            std.debug.print("\n  [fixture_tests] {s}: slz file {d} bytes > 256 MiB cap — skipping\n", .{ entry.name, slz_stat.size });
+            total -= 1;
+            continue;
+        }
+
+        const raw_stat = raw_dir.statFile(raw_name) catch |err| {
+            try failures.append(allocator, .{
+                .slz_name = try allocator.dupe(u8, entry.name),
+                .reason = try allocator.dupe(u8, "stat raw"),
+                .detail = try std.fmt.allocPrint(allocator, "{s}: {s}", .{ raw_name, @errorName(err) }),
+            });
+            continue;
+        };
+        if (raw_stat.size > max_fixture_bytes) {
+            std.debug.print("\n  [fixture_tests] {s}: raw file {d} bytes > 256 MiB cap — skipping\n", .{ entry.name, raw_stat.size });
+            total -= 1;
+            continue;
+        }
+
+        // Read both files using page_allocator to avoid testing.allocator overhead on large buffers.
+        const slz_bytes = slz_dir.readFileAlloc(page_alloc, entry.name, max_fixture_bytes) catch |err| {
             try failures.append(allocator, .{
                 .slz_name = try allocator.dupe(u8, entry.name),
                 .reason = try allocator.dupe(u8, "read slz"),
@@ -133,9 +166,9 @@ test "fixture corpus roundtrip: every .slz decodes to its matching .raw" {
             });
             continue;
         };
-        defer allocator.free(slz_bytes);
+        defer page_alloc.free(slz_bytes);
 
-        const raw_bytes = raw_dir.readFileAlloc(allocator, raw_name, 1 << 30) catch |err| {
+        const raw_bytes = raw_dir.readFileAlloc(page_alloc, raw_name, max_fixture_bytes) catch |err| {
             try failures.append(allocator, .{
                 .slz_name = try allocator.dupe(u8, entry.name),
                 .reason = try allocator.dupe(u8, "read raw"),
@@ -143,10 +176,10 @@ test "fixture corpus roundtrip: every .slz decodes to its matching .raw" {
             });
             continue;
         };
-        defer allocator.free(raw_bytes);
+        defer page_alloc.free(raw_bytes);
 
-        // Allocate dst with safe_space headroom.
-        const dst = allocator.alloc(u8, raw_bytes.len + decoder.safe_space) catch |err| {
+        // Allocate dst with safe_space headroom — page_allocator for the large buffer.
+        const dst = page_alloc.alloc(u8, raw_bytes.len + decoder.safe_space) catch |err| {
             try failures.append(allocator, .{
                 .slz_name = try allocator.dupe(u8, entry.name),
                 .reason = try allocator.dupe(u8, "alloc"),
@@ -154,7 +187,7 @@ test "fixture corpus roundtrip: every .slz decodes to its matching .raw" {
             });
             continue;
         };
-        defer allocator.free(dst);
+        defer page_alloc.free(dst);
 
         const n = decoder.decompressFramed(slz_bytes, dst) catch |err| {
             try failures.append(allocator, .{

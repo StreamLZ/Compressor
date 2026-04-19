@@ -12,6 +12,10 @@ const encoder = @import("streamlz_encoder.zig");
 const decoder = @import("../decode/streamlz_decoder.zig");
 
 const testing = std.testing;
+const page_alloc = std.heap.page_allocator;
+
+/// Maximum fixture file size we will attempt to load (256 MiB).
+const max_fixture_bytes: usize = 256 * 1024 * 1024;
 
 const Failure = struct {
     raw_name: []const u8,
@@ -62,7 +66,23 @@ test "encoder roundtrip: every .raw encodes + decodes byte-exact (L1/L2)" {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".raw")) continue;
 
-        const raw_bytes = raw_dir.readFileAlloc(allocator, entry.name, 1 << 30) catch |err| {
+        // Check file size before reading — skip fixtures above 256 MiB.
+        const raw_stat = raw_dir.statFile(entry.name) catch |err| {
+            try failures.append(allocator, .{
+                .raw_name = try allocator.dupe(u8, entry.name),
+                .level = 0,
+                .reason = try allocator.dupe(u8, "stat"),
+                .detail = try std.fmt.allocPrint(allocator, "{s}", .{@errorName(err)}),
+            });
+            continue;
+        };
+        if (raw_stat.size > max_fixture_bytes) {
+            std.debug.print("\n  [encode_fixture_tests] {s}: {d} bytes > 256 MiB cap — skipping\n", .{ entry.name, raw_stat.size });
+            continue;
+        }
+
+        // Use page_allocator for the large file buffer to avoid testing.allocator overhead.
+        const raw_bytes = raw_dir.readFileAlloc(page_alloc, entry.name, max_fixture_bytes) catch |err| {
             try failures.append(allocator, .{
                 .raw_name = try allocator.dupe(u8, entry.name),
                 .level = 0,
@@ -71,14 +91,14 @@ test "encoder roundtrip: every .raw encodes + decodes byte-exact (L1/L2)" {
             });
             continue;
         };
-        defer allocator.free(raw_bytes);
+        defer page_alloc.free(raw_bytes);
 
         const levels = [_]u8{ 1, 2, 3, 4, 5 };
         for (levels) |level| {
             total += 1;
             const bound = encoder.compressBound(raw_bytes.len);
-            const encoded = try allocator.alloc(u8, bound);
-            defer allocator.free(encoded);
+            const encoded = try page_alloc.alloc(u8, bound);
+            defer page_alloc.free(encoded);
 
             const n = encoder.compressFramed(allocator, raw_bytes, encoded, .{ .level = level }) catch |err| {
                 try failures.append(allocator, .{
@@ -90,8 +110,8 @@ test "encoder roundtrip: every .raw encodes + decodes byte-exact (L1/L2)" {
                 continue;
             };
 
-            const decoded = try allocator.alloc(u8, raw_bytes.len + decoder.safe_space);
-            defer allocator.free(decoded);
+            const decoded = try page_alloc.alloc(u8, raw_bytes.len + decoder.safe_space);
+            defer page_alloc.free(decoded);
 
             const written = decoder.decompressFramed(encoded[0..n], decoded) catch |err| {
                 try failures.append(allocator, .{

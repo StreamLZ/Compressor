@@ -324,6 +324,11 @@ pub fn extractLaoFromMls(
                 lao[lao_cur].offset = offs;
                 if (len == 0) break;
             }
+            // Zero remaining slots so callers never see garbage values.
+            while (lao_cur < lao_idx + num_lao_per_offs) : (lao_cur += 1) {
+                lao[lao_cur].length = 0;
+                lao[lao_cur].offset = 0;
+            }
         } else {
             lao[lao_idx].length = 0;
         }
