@@ -18,6 +18,7 @@ const std = @import("std");
 const constants = @import("fast_constants.zig");
 const writer_mod = @import("FastStreamWriter.zig");
 const copy = @import("../io/copy_helpers.zig");
+const ptr_math = @import("../io/ptr_math.zig");
 const offset_encoder = @import("offset_encoder.zig");
 
 const FastStreamWriter = writer_mod.FastStreamWriter;
@@ -36,8 +37,7 @@ pub inline fn extendMatchForward(
     var s = source;
     while (@intFromPtr(s) < @intFromPtr(source_end)) {
         const lhs: u32 = std.mem.readInt(u32, s[0..4], .little);
-        const rhs_addr: usize = @intFromPtr(s) +% @as(usize, @bitCast(recent_offset));
-        const rhs_ptr: [*]const u8 = @ptrFromInt(rhs_addr);
+        const rhs_ptr: [*]const u8 = ptr_math.offsetPtr([*]const u8, s, recent_offset);
         const rhs: u32 = std.mem.readInt(u32, rhs_ptr[0..4], .little);
         const xor = lhs ^ rhs;
         s += 4;
@@ -256,8 +256,7 @@ pub inline fn writeOffset(
             // SIMD byte subtract: delta[i] = literal[i] - byte_at_recent_offset[i]
             const V8 = @Vector(8, u8);
             const a: V8 = literal_start[0..8].*;
-            const back_addr: usize = @intFromPtr(literal_start) +% @as(usize, @bitCast(recent_offset));
-            const back_ptr: [*]const u8 = @ptrFromInt(back_addr);
+            const back_ptr: [*]const u8 = ptr_math.offsetPtr([*]const u8, literal_start, recent_offset);
             const b: V8 = back_ptr[0..8].*;
             const out: V8 = a -% b;
             delta_cur[0..8].* = out;
@@ -320,8 +319,7 @@ fn writeOffsetWithLiteral1Inner(
     const V16Bool = @Vector(16, bool);
     while (i < literal_run_length) {
         const a_ptr = literal_start + i;
-        const b_addr: usize = @intFromPtr(a_ptr) +% @as(usize, @bitCast(recent_offset));
-        const b_ptr: [*]const u8 = @ptrFromInt(b_addr);
+        const b_ptr: [*]const u8 = ptr_math.offsetPtr([*]const u8, a_ptr, recent_offset);
         const a: V16 = a_ptr[0..16].*;
         const b: V16 = b_ptr[0..16].*;
         const eq: V16Bool = a == b;

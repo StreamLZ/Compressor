@@ -26,14 +26,14 @@ const constants = @import("../format/streamlz_constants.zig");
 /// Reverse-order Huffman lookup table used by the hot decode loop.
 /// Both arrays are indexed by the low 11 bits of the forward bit buffer.
 /// Aligned to a cache-line boundary.
-pub const HuffRevLut = extern struct {
+pub const HuffRevLut = struct {
     bits2_len: [constants.huffman_lut_size]u8 align(64) = @splat(0),
     bits2_sym: [constants.huffman_lut_size]u8 align(64) = @splat(0),
 };
 
 /// Forward-order LUT used during construction (before bit-reversal).
 /// +16-byte overflow for vectorized fill safety.
-pub const NewHuffLut = extern struct {
+pub const NewHuffLut = struct {
     bits2_len: [constants.huffman_lut_size + constants.huffman_lut_overflow]u8 align(64) = @splat(0),
     bits2_sym: [constants.huffman_lut_size + constants.huffman_lut_overflow]u8 align(64) = @splat(0),
 };
@@ -76,7 +76,7 @@ pub const BitReader2 = struct {
     bit_pos: u32,
 };
 
-pub const HuffRange = extern struct {
+pub const HuffRange = struct {
     symbol: u16,
     num: u16,
 };

@@ -5,7 +5,7 @@
 //! Current coverage:
 //!   * Frame-level uncompressed block path (phase 3a)
 //!   * Fast codec (L1-5) compressed path via fast_lz_decoder (phase 3b)
-//!   * High codec (L6-11) not yet wired -- returns `HighNotImplemented`
+//!   * High codec (L6-11) compressed path via high_lz_decoder
 
 const std = @import("std");
 const frame = @import("../format/frame_format.zig");
@@ -27,7 +27,6 @@ pub const DecompressError = error{
     BadChunkHeader,
     BlockDataTruncated,
     OutputTooSmall,
-    HighNotImplemented,
     ChecksumMismatch,
     ChunkSizeMismatch,
 } || fast.DecodeError || high.DecodeError || std.mem.Allocator.Error || std.Thread.SpawnError || std.Thread.CpuCountError;

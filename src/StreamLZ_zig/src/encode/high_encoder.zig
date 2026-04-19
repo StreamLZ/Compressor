@@ -15,6 +15,7 @@ const entropy_enc = @import("entropy_encoder.zig");
 const offset_enc = @import("offset_encoder.zig");
 const cost_coeffs = @import("cost_coefficients.zig");
 const high_types = @import("high_types.zig");
+const ptr_math = @import("../io/ptr_math.zig");
 
 const ByteHistogram = hist_mod.ByteHistogram;
 const HighStreamWriter = high_types.HighStreamWriter;
@@ -236,8 +237,7 @@ inline fn writeLiterals(writer: *HighStreamWriter, src: [*]const u8, len: usize,
         const neg: isize = -@as(isize, writer.recent0);
         var i: usize = 0;
         while (i < len) : (i += 1) {
-            const back_addr: usize = @intFromPtr(src + i) +% @as(usize, @bitCast(neg));
-            const back_ptr: [*]const u8 = @ptrFromInt(back_addr);
+            const back_ptr: [*]const u8 = ptr_math.offsetPtr([*]const u8, src + i, neg);
             sl[i] = src[i] -% back_ptr[0];
         }
         writer.delta_literals = sl + len;

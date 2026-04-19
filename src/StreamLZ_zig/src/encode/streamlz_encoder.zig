@@ -53,7 +53,6 @@ pub const CompressError = error{
     BadBlockSize,
     BadScGroupSize,
     DestinationTooSmall,
-    HashBitsOutOfRange,
 } || std.mem.Allocator.Error || fast_enc.EncodeError || std.Thread.SpawnError;
 
 pub const Options = struct {
@@ -280,6 +279,7 @@ pub fn compressFramed(
     opts: Options,
 ) CompressError!usize {
     if (opts.level < 1 or opts.level > 11) return error.BadLevel;
+    if (opts.hash_bits != 0 and (opts.hash_bits < 8 or opts.hash_bits > 24)) return error.BadLevel;
     const min_dst = compressBound(src.len);
     if (dst.len < min_dst) return error.DestinationTooSmall;
 
@@ -417,10 +417,10 @@ fn compressFramedOne(
         1 => {
             // Fast 1 (engine -2): u16 hash table, 14-bit cap. Hasher gets
             // the text-bumped min_match_length (affects hash multiplier).
-            greedy_hasher_u16 = try FastMatchHasher(u16).init(allocator, .{
+            greedy_hasher_u16 = FastMatchHasher(u16).init(allocator, .{
                 .hash_bits = greedy_hash_bits,
                 .min_match_length = resolved.hasher_min_match_length,
-            });
+            }) catch |err| return if (err == error.HashBitsOutOfRange) error.BadLevel else @errorCast(err);
         },
         5 => {
             // Fast 6 (engine 4): lazy chain hasher with lazy-2 evaluation.
@@ -428,10 +428,10 @@ fn compressFramedOne(
         },
         else => {
             // Fast 2 (engine -1), Fast 3 (engine 1), Fast 5 (engine 2).
-            greedy_hasher_u32 = try FastMatchHasher(u32).init(allocator, .{
+            greedy_hasher_u32 = FastMatchHasher(u32).init(allocator, .{
                 .hash_bits = greedy_hash_bits,
                 .min_match_length = resolved.hasher_min_match_length,
-            });
+            }) catch |err| return if (err == error.HashBitsOutOfRange) error.BadLevel else @errorCast(err);
         },
     }
 
@@ -1054,7 +1054,7 @@ fn compressFramedHigh(
         if (mapping.use_bt4) {
             try match_finder_bt4.findMatchesBT4(allocator, src, &global_mls, 4, 0, 128);
         } else {
-            try match_finder.findMatchesHashBased(allocator, src, &global_mls, 4, 0);
+            match_finder.findMatchesHashBased(allocator, src, &global_mls, 4, 0) catch |err| return if (err == error.HashBitsOutOfRange) error.BadLevel else @errorCast(err);
         }
         const frame_block_hdr_pos: usize = pos;
         pos += 8;
@@ -1161,7 +1161,7 @@ fn compressFramedHigh(
             if (mapping.use_bt4) {
                 try match_finder_bt4.findMatchesBT4(allocator, src, &mls, 4, 0, 128);
             } else {
-                try match_finder.findMatchesHashBased(allocator, src, &mls, 4, 0);
+                match_finder.findMatchesHashBased(allocator, src, &mls, 4, 0) catch |err| return if (err == error.HashBitsOutOfRange) error.BadLevel else @errorCast(err);
             }
             mls_opt = mls;
         }
@@ -1251,7 +1251,7 @@ fn compressOneFrameBlockWindowed(
     if (mapping.use_bt4) {
         try match_finder_bt4.findMatchesBT4(allocator, window_slice, &mls, 4, dict_bytes, 128);
     } else {
-        try match_finder.findMatchesHashBased(allocator, window_slice, &mls, 4, dict_bytes);
+        match_finder.findMatchesHashBased(allocator, window_slice, &mls, 4, dict_bytes) catch |err| return if (err == error.HashBitsOutOfRange) error.BadLevel else @errorCast(err);
     }
 
     // Iterate the 256 KB internal blocks of this frame block's NEW bytes.
@@ -1454,7 +1454,7 @@ fn compressOneHighBlock(
             const dst_remaining_for_sub: usize = dst_block.len - sub_payload_start;
             const dst_sub_start: [*]u8 = dst_block[sub_payload_start..].ptr;
             const dst_sub_end: [*]u8 = dst_sub_start + dst_remaining_for_sub;
-            const n_or_err = high_compressor.doCompress(
+            const n_opt: ?usize = high_compressor.doCompress(
                 ctx,
                 hasher,
                 mls_ptr,
@@ -1465,11 +1465,11 @@ fn compressOneHighBlock(
                 @intCast(start_position_for_sub),
                 &chunk_type,
                 &lz_cost,
-            );
+            ) catch null;
 
-            if (n_or_err) |n| {
+            if (n_opt) |n| {
                 const total_lz_cost = lz_cost + 3.0;
-                const lz_wins = total_lz_cost < sub_memset_cost and n > 0 and n < round_bytes;
+                const lz_wins = total_lz_cost < sub_memset_cost and n > @as(usize, 0) and n < round_bytes;
                 if (lz_wins) {
                     const hdr: u32 = @as(u32, @intCast(n)) |
                         (@as(u32, @intCast(chunk_type)) << lz_constants.sub_chunk_type_shift) |
@@ -1483,7 +1483,8 @@ fn compressOneHighBlock(
                 } else {
                     local_pos = sub_hdr_pos;
                 }
-            } else |_| {
+            } else {
+                // Compression wasn't beneficial — fall back to raw.
                 local_pos = sub_hdr_pos;
             }
         }

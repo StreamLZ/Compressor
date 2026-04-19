@@ -23,6 +23,7 @@ const lz_constants = @import("../format/streamlz_constants.zig");
 const ByteHistogram = hist_mod.ByteHistogram;
 const BitWriter64Forward = bw_mod.BitWriter64Forward;
 const BitWriter64Backward = bw_mod.BitWriter64Backward;
+const ptr_math = @import("../io/ptr_math.zig");
 
 /// `dst[i] = src[i] - src[i + neg_offset]` for `len` bytes. `neg_offset`
 /// is negative when the match source is before `src`. The function may
@@ -35,8 +36,7 @@ pub fn subtractBytesUnsafe(dst: [*]u8, src: [*]const u8, len: usize, neg_offset:
     var remaining = len;
     while (remaining > 16) : (remaining -= 16) {
         const a: V16 = s[0..16].*;
-        const back_addr: usize = @intFromPtr(s) +% @as(usize, @bitCast(neg_offset));
-        const back_ptr: [*]const u8 = @ptrFromInt(back_addr);
+        const back_ptr: [*]const u8 = ptr_math.offsetPtr([*]const u8, s, neg_offset);
         const b: V16 = back_ptr[0..16].*;
         const out: V16 = a -% b;
         d[0..16].* = out;
@@ -47,8 +47,7 @@ pub fn subtractBytesUnsafe(dst: [*]u8, src: [*]const u8, len: usize, neg_offset:
     // OK — caller guarantees 16 bytes of slack).
     if (remaining > 0) {
         const a: V16 = s[0..16].*;
-        const back_addr: usize = @intFromPtr(s) +% @as(usize, @bitCast(neg_offset));
-        const back_ptr: [*]const u8 = @ptrFromInt(back_addr);
+        const back_ptr: [*]const u8 = ptr_math.offsetPtr([*]const u8, s, neg_offset);
         const b: V16 = back_ptr[0..16].*;
         const out: V16 = a -% b;
         @memcpy(d[0..remaining], (@as([*]const u8, @ptrCast(&out)))[0..remaining]);
@@ -63,8 +62,7 @@ pub fn subtractBytes(dst: [*]u8, src: [*]const u8, len: usize, neg_offset: isize
     var remaining = len;
     while (remaining >= 16) : (remaining -= 16) {
         const a: V16 = s[0..16].*;
-        const back_addr: usize = @intFromPtr(s) +% @as(usize, @bitCast(neg_offset));
-        const back_ptr: [*]const u8 = @ptrFromInt(back_addr);
+        const back_ptr: [*]const u8 = ptr_math.offsetPtr([*]const u8, s, neg_offset);
         const b: V16 = back_ptr[0..16].*;
         const out: V16 = a -% b;
         d[0..16].* = out;
@@ -73,8 +71,7 @@ pub fn subtractBytes(dst: [*]u8, src: [*]const u8, len: usize, neg_offset: isize
     }
     var i: usize = 0;
     while (i < remaining) : (i += 1) {
-        const back_addr: usize = @intFromPtr(s) +% @as(usize, @bitCast(neg_offset));
-        const back_ptr: [*]const u8 = @ptrFromInt(back_addr);
+        const back_ptr: [*]const u8 = ptr_math.offsetPtr([*]const u8, s, neg_offset);
         d[i] = s[i] -% back_ptr[i];
     }
 }

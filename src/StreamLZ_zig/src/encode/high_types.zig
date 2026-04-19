@@ -21,7 +21,7 @@ pub const recent_offset_count: usize = 3;
 /// matches the decoder's carousel in `ProcessLzRuns` and must not be
 /// changed without updating both sides.
 ///
-pub const HighRecentOffs = extern struct {
+pub const HighRecentOffs = struct {
     offs: [8]i32 = @splat(0),
 
     pub fn create() HighRecentOffs {
@@ -69,7 +69,7 @@ pub const HighStreamWriter = struct {
 };
 
 /// A single token in the parsed LZ sequence.
-pub const Token = extern struct {
+pub const Token = struct {
     recent_offset0: i32,
     lit_len: i32,
     match_len: i32,
@@ -91,7 +91,7 @@ pub const ExportedTokens = struct {
 };
 
 /// Optimal-parser state (one per grid cell).
-pub const State = extern struct {
+pub const State = struct {
     best_bit_count: i32 = 0,
     recent_offs0: i32 = 0,
     recent_offs1: i32 = 0,

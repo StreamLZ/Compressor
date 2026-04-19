@@ -75,14 +75,12 @@ pub const Codec = enum(u8) {
     high = 0,
     fast = 1,
     turbo = 2,
-    _,
 
     pub fn name(self: Codec) []const u8 {
         return switch (self) {
             .high => "High",
             .fast => "Fast",
             .turbo => "Turbo",
-            else => "Unknown",
         };
     }
 };
@@ -107,6 +105,7 @@ pub const FrameHeader = struct {
 pub const ParseError = error{
     BadMagic,
     UnsupportedVersion,
+    BadCodec,
     BadBlockSize,
     BadScGroupSize,
     Truncated,
@@ -127,7 +126,7 @@ pub fn parseHeader(src: []const u8) ParseError!FrameHeader {
 
     const raw_flags: FrameFlags = @bitCast(src[pos]);
     pos += 1;
-    const codec: Codec = @enumFromInt(src[pos]);
+    const codec: Codec = std.meta.intToEnum(Codec, src[pos]) catch return error.BadCodec;
     pos += 1;
     const lvl = src[pos];
     pos += 1;

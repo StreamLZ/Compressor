@@ -1482,6 +1482,7 @@ test {
     _ = @import("io/BitReader.zig");
     _ = @import("io/bit_writer.zig");
     _ = @import("io/copy_helpers.zig");
+    _ = @import("io/ptr_math.zig");
     _ = @import("decode/streamlz_decoder.zig");
     _ = @import("decode/huffman_decoder.zig");
     _ = @import("decode/entropy_decoder.zig");

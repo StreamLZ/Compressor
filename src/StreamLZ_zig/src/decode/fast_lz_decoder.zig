@@ -20,6 +20,7 @@
 const std = @import("std");
 const constants = @import("../format/streamlz_constants.zig");
 const copy = @import("../io/copy_helpers.zig");
+const ptr_math = @import("../io/ptr_math.zig");
 const entropy = @import("entropy_decoder.zig");
 
 pub const DecodeError = error{
@@ -407,8 +408,7 @@ fn processModeImpl(
             const use_new_dist: bool = (cmd & 0x80) == 0;
 
             if (is_delta) {
-                const delta_src_addr: usize = @intFromPtr(dst) +% @as(usize, @bitCast(@as(isize, @intCast(recent_offs))));
-                const delta_src: [*]const u8 = @ptrFromInt(delta_src_addr);
+                const delta_src: [*]const u8 = ptr_math.offsetPtr([*]const u8, dst, @as(isize, @intCast(recent_offs)));
                 copy.copy64Add(dst, lit_stream, delta_src);
             } else {
                 copy.copy64(dst, lit_stream);
@@ -485,8 +485,8 @@ fn processModeImpl(
                 }
             }
             // Overshoot correction: remaining is ≤ 0, so subtract back to exact length.
-            dst = @ptrFromInt(@intFromPtr(dst) +% @as(usize, @bitCast(remaining)));
-            lit_stream = @ptrFromInt(@intFromPtr(lit_stream) +% @as(usize, @bitCast(remaining)));
+            dst = ptr_math.offsetPtr([*]u8, dst, remaining);
+            lit_stream = ptr_math.offsetPtr([*]const u8, lit_stream, remaining);
         } else if (cmd == 1) {
             // ── Long match with 16-bit offset ──
             if (@intFromPtr(lz.src_end) - @intFromPtr(length_stream) == 0) return error.SourceTruncated;

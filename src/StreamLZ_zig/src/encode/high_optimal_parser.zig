@@ -279,9 +279,8 @@ fn collectStatistics(
 /// Optimal parser entry point. Performs the 3-phase DP + backward
 /// extraction + outer-loop rematch for L8+.
 ///
-/// Returns the compressed byte count on success, or `error.BailOut`
-/// when the parser couldn't improve on raw (the caller should emit
-/// uncompressed).
+/// Returns the compressed byte count on success, or `null` when
+/// compression isn't beneficial (the caller should emit uncompressed).
 pub fn optimal(
     ctx: *const HighEncoderContext,
     opts: OptimalParserOptions,
@@ -293,10 +292,10 @@ pub fn optimal(
     start_pos: i32,
     chunk_type_out: *i32,
     cost_out: *f32,
-) !usize {
+) !?usize {
     chunk_type_out.* = 0;
     const src_len_usize: usize = @intCast(src_size);
-    if (src_size <= 128) return error.BailOut;
+    if (src_size <= 128) return null;
 
     const state_width: usize = if (ctx.compression_level >= 8) 2 else 1;
     const max_literal_run_trials: i32 = if (ctx.compression_level >= 6) 8 else 4;
@@ -400,7 +399,7 @@ pub fn optimal(
         &cost,
         chunk_type_out,
     );
-    if (n_first >= src_len_usize) return error.BailOut;
+    if (n_first >= src_len_usize) return null;
 
     var best_cost: f32 = cost;
     var best_length: usize = n_first;
@@ -1031,7 +1030,7 @@ pub fn optimal(
 
             // Append this chunk's tokens to the full lz_token_array.
             if (lz_token_array.size + num_tokens > lz_token_array.capacity) {
-                return error.BailOut;
+                return null;
             }
             @memcpy(
                 lz_tokens[lz_token_array.size .. lz_token_array.size + num_tokens],
@@ -1070,7 +1069,7 @@ pub fn optimal(
         chunk_type_out.* = tmp_ct;
         best_cost = cost;
         best_length = n_enc;
-        if (n_enc > tmp_dst_size) return error.BailOut;
+        if (n_enc > tmp_dst_size) return null;
         @memcpy(dst[0..n_enc], tmp_dst_buf[0..n_enc]);
 
         // Outer loop: for L8+, when the chosen chunk type disagrees with
@@ -1122,7 +1121,7 @@ test "updateState: improves only when bits < current" {
     try testing.expectEqual(@as(i32, 5), states[1].match_len);
 }
 
-test "optimal: short input returns BailOut" {
+test "optimal: short input returns null" {
     var src: [100]u8 = undefined;
     for (&src, 0..) |*b, i| b.* = @intCast(i);
     const ctx: HighEncoderContext = .{
@@ -1135,8 +1134,6 @@ test "optimal: short input returns BailOut" {
     var dst_buf: [1024]u8 = undefined;
     var chunk_type: i32 = -1;
     var cost: f32 = 0;
-    try testing.expectError(
-        error.BailOut,
-        optimal(&ctx, .{}, null, &src, @intCast(src.len), &dst_buf, dst_buf[dst_buf.len..].ptr, 0, &chunk_type, &cost),
-    );
+    const result = try optimal(&ctx, .{}, null, &src, @intCast(src.len), &dst_buf, dst_buf[dst_buf.len..].ptr, 0, &chunk_type, &cost);
+    try testing.expectEqual(@as(?usize, null), result);
 }

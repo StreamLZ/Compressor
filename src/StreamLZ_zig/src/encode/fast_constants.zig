@@ -147,7 +147,7 @@ pub fn getHashBits(
     min_high_level_bits: u6,
     max_high_level_bits: u6,
 ) u6 {
-    if (user_hash_bits > 0) return @intCast(user_hash_bits);
+    if (user_hash_bits > 0) return @intCast(@max(8, @min(user_hash_bits, 24)));
     const clamped_src: usize = @max(src_len, 1);
     const bits: u6 = @intCast(std.math.log2_int(usize, clamped_src) + 1);
     const upper: u6 = if (level >= 5)

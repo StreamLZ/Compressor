@@ -33,7 +33,7 @@ pub const DecodeError = error{
 
 /// Intermediate table: A[] holds weight-1 symbols, B[] holds
 /// `(symbol << 16) | weight` for weight ≥ 2.
-pub const TansData = extern struct {
+pub const TansData = struct {
     a_used: u32 = 0,
     b_used: u32 = 0,
     a: [256]u8 = @splat(0),
@@ -41,16 +41,12 @@ pub const TansData = extern struct {
 };
 
 /// Single LUT entry — 8 bytes, cache-friendly.
-pub const TansLutEnt = extern struct {
+pub const TansLutEnt = struct {
     x: u32,
     bits_x: u8,
     symbol: u8,
     w: u16,
 };
-
-comptime {
-    std.debug.assert(@sizeOf(TansLutEnt) == 8);
-}
 
 /// Mutable 5-state decoder parameters.
 pub const TansDecoderParams = struct {

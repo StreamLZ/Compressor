@@ -238,15 +238,27 @@ pub const HighHasher = union(enum) {
 pub fn allocateHighHasher(
     allocator: std.mem.Allocator,
     setup: HighSetup,
-) !HighHasher {
+) std.mem.Allocator.Error!HighHasher {
     if (setup.level >= 5) return .{ .none = {} };
-    const bits: u6 = @intCast(setup.hash_bits);
+    const bits: u6 = @intCast(@max(@as(u32, 8), @min(setup.hash_bits, 24)));
     const mml: u32 = @max(setup.min_match_length, 4);
     return switch (setup.hasher_type) {
-        .hasher1 => .{ .h1 = try MatchHasher1.init(allocator, bits, mml) },
-        .hasher2x => .{ .h2x = try MatchHasher2x.init(allocator, bits, mml) },
-        .hasher4 => .{ .h4 = try MatchHasher4.init(allocator, bits, mml) },
-        .hasher4_dual => .{ .h4_dual = try MatchHasher4Dual.init(allocator, bits, mml) },
+        .hasher1 => .{ .h1 = MatchHasher1.init(allocator, bits, mml) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => unreachable, // bits already clamped to [8,24]
+        } },
+        .hasher2x => .{ .h2x = MatchHasher2x.init(allocator, bits, mml) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => unreachable, // bits already clamped to [8,24]
+        } },
+        .hasher4 => .{ .h4 = MatchHasher4.init(allocator, bits, mml) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => unreachable, // bits already clamped to [8,24]
+        } },
+        .hasher4_dual => .{ .h4_dual = MatchHasher4Dual.init(allocator, bits, mml) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => unreachable, // bits already clamped to [8,24]
+        } },
         .none => .{ .none = {} },
     };
 }
@@ -276,7 +288,7 @@ pub fn doCompress(
     start_pos: i32,
     chunk_type_out: *i32,
     cost_out: *f32,
-) !usize {
+) !?usize {
     if (ctx.compression_level >= 5) {
         return high_optimal_parser.optimal(
             ctx,
@@ -351,7 +363,7 @@ pub fn doCompress(
             cost_out,
             chunk_type_out,
         ),
-        .none => error.BailOut,
+        .none => return null,
     };
 }
 

@@ -21,6 +21,7 @@ const FastMatchHasher = @import("fast_match_hasher.zig").FastMatchHasher;
 const match_hasher = @import("match_hasher.zig");
 const writer_mod = @import("FastStreamWriter.zig");
 const token_writer = @import("fast_token_writer.zig");
+const ptr_math = @import("../io/ptr_math.zig");
 
 const FastStreamWriter = writer_mod.FastStreamWriter;
 const MatchHasher2x = match_hasher.MatchHasher2x;
@@ -110,8 +111,7 @@ pub fn runGreedyParser(
         hash_table[hash_index] = cur_pos_t;
 
         // Recent-offset candidate.
-        const recent_src_addr: usize = @intFromPtr(source_cursor) +% @as(usize, @bitCast(recent_offset));
-        const recent_src_ptr: [*]const u8 = @ptrFromInt(recent_src_addr);
+        const recent_src_ptr: [*]const u8 = ptr_math.offsetPtr([*]const u8, source_cursor, recent_offset);
         const recent_word: u32 = std.mem.readInt(u32, recent_src_ptr[0..4], .little);
         const xor_value: u32 = bytes_at_cursor ^ recent_word;
 
@@ -368,8 +368,7 @@ pub fn findMatchWithHasher(
     hasher.setHashPosPrefetch(next_cursor_ptr);
 
     // ── Recent-offset match path ───────────────────────────────────────
-    const recent_src_addr: usize = @intFromPtr(source_cursor) +% @as(usize, @bitCast(recent_offset));
-    const recent_src_ptr: [*]const u8 = @ptrFromInt(recent_src_addr);
+    const recent_src_ptr: [*]const u8 = ptr_math.offsetPtr([*]const u8, source_cursor, recent_offset);
     const recent_word: u32 = std.mem.readInt(u32, recent_src_ptr[0..4], .little);
     const xor_value: u32 = recent_word ^ bytes_at_source;
     if (xor_value == 0) {
@@ -605,8 +604,7 @@ pub fn findMatchWithChainHasher(
     hasher.setHashPosPrefetch(next_cursor_ptr);
 
     // ── Recent-offset match path ───────────────────────────────────────
-    const recent_src_addr: usize = @intFromPtr(source_cursor) +% @as(usize, @bitCast(recent_offset));
-    const recent_src_ptr: [*]const u8 = @ptrFromInt(recent_src_addr);
+    const recent_src_ptr: [*]const u8 = ptr_math.offsetPtr([*]const u8, source_cursor, recent_offset);
     const recent_word: u32 = std.mem.readInt(u32, recent_src_ptr[0..4], .little);
     const xor_value: u32 = recent_word ^ bytes_at_source;
     if (xor_value == 0) {

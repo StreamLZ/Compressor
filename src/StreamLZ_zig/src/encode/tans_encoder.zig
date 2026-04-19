@@ -106,22 +106,17 @@ inline fn ilog2Round(v: u32) u32 {
 /// `te_data[base_offset + (state >> nb)]`. `base_offset` may be negative
 /// when the effective base is before the buffer — the minimum accessed
 /// index is always within `[0, L)` by construction.
-pub const TansEncEntry = extern struct {
+pub const TansEncEntry = struct {
     base_offset: i32,
     thres: u16,
     num_bits: u8,
-    _pad: u8 = 0,
 };
-
-comptime {
-    std.debug.assert(@sizeOf(TansEncEntry) == 8);
-}
 
 // ────────────────────────────────────────────────────────────
 //  Max heap for normalization (inline, HeapEntry-specialized)
 // ────────────────────────────────────────────────────────────
 
-const HeapEntry = extern struct {
+const HeapEntry = struct {
     score: f32,
     index: i32,
 };

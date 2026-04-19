@@ -15,6 +15,7 @@
 const std = @import("std");
 const constants = @import("../format/streamlz_constants.zig");
 const copy = @import("../io/copy_helpers.zig");
+const ptr_math = @import("../io/ptr_math.zig");
 const high = @import("high_lz_decoder.zig");
 
 // Keep this in sync with decode/streamlz_decoder.zig::safe_space.
@@ -156,7 +157,7 @@ fn processLzRunsType0(
             // literals > 24 bytes enter the 8-byte-stride loop — much rarer
             // than the short-token case, and then still wide rather than
             // byte-wise.
-            const lit_src_ptr: [*]const u8 = @ptrFromInt(@intFromPtr(dst) +% @as(usize, @bitCast(@as(isize, lit_off_i))));
+            const lit_src_ptr: [*]const u8 = ptr_math.offsetPtr([*]const u8, dst, @as(isize, lit_off_i));
             copy.copy64Add(dst, lit_stream, lit_src_ptr);
             if (literal_length > 8) {
                 copy.copy64Add(dst + 8, lit_stream + 8, lit_src_ptr + 8);
@@ -255,7 +256,7 @@ fn copyMatchExact(dst_in: [*]u8, src_in: [*]const u8, length: usize) void {
 //  Type 1 — raw literals, two-phase
 // ────────────────────────────────────────────────────────────
 
-const LzToken = extern struct {
+const LzToken = struct {
     dst_pos: i32,
     offset: i32,
     lit_len: i32,
