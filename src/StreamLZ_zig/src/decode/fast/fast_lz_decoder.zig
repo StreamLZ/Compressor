@@ -440,11 +440,9 @@ fn processModeImpl(
             const far: u32 = off32_stream[0];
             off32_stream += 1;
             const match_ptr: [*]const u8 = dst_begin - far;
+            if (far > 65536) @prefetch(match_ptr, .{ .rw = .read, .locality = 1 });
             recent_offs = @as(i64, @intCast(@intFromPtr(match_ptr))) - @as(i64, @intCast(@intFromPtr(dst)));
             if (@intFromPtr(dst_end) - @intFromPtr(dst) < length) return error.OutputTruncated;
-            // 32 bytes via 2× SSE MOVDQU (was 4× scalar copy64). Medium
-            // match is always far-offset (32-bit), so there's no overlap
-            // concern and the 16-byte-wide vector load is safe.
             copy.copy16(dst, match_ptr);
             copy.copy16(dst + 16, match_ptr + 16);
             dst += length;
@@ -537,11 +535,10 @@ fn processModeImpl(
             const far: u32 = off32_stream[0];
             off32_stream += 1;
             const match_ptr: [*]const u8 = dst_begin - far;
+            if (far > 65536) @prefetch(match_ptr, .{ .rw = .read, .locality = 1 });
             recent_offs = @as(i64, @intCast(@intFromPtr(match_ptr))) - @as(i64, @intCast(@intFromPtr(dst)));
             if (@intFromPtr(dst_end) - @intFromPtr(dst) < length) return error.OutputTruncated;
 
-            // Long match with 32-bit far offset — always safe to use
-            // a single MOVDQU pair per iteration.
             var m = match_ptr;
             var d = dst;
             var remaining: isize = @intCast(length);
