@@ -1,10 +1,38 @@
 //! Parallel decompression helpers.
 //!
-//! Provides the SC (self-contained) parallel decode path used by unified
-//! levels L6-L8. The two-phase path for L9-L11 lives in
-//! `decompressCoreTwoPhase`.
+//! Three parallel strategies, dispatched by the caller based on the
+//! compression level stored in the frame header:
 //!
-//! SC semantics: self-contained blocks chunk the output into
+//!   **Strategy 1 — Sidecar Fast (L1-L5): `decompressFastL14Parallel`**
+//!     Preconditions (encoder contract):
+//!       - Frame carries a parallel_decode_metadata sidecar block whose
+//!         literal-byte leaves cover every cross-sub-chunk dependency.
+//!       - Worker slices are 16-chunk aligned so that sidecar boundary
+//!         positions never fall mid-slice.
+//!     The sidecar is applied to `dst` in a serial pre-pass (phase 1),
+//!     then per-chunk Fast decode runs fully in parallel (phase 2).
+//!
+//!   **Strategy 2 — SC groups (L6-L8): `decompressCoreParallel`**
+//!     Preconditions (encoder contract):
+//!       - Blocks are encoded as self-contained (SC): LZ back-references
+//!         never cross an `sc_group_size`-chunk boundary.
+//!       - A tail prefix table of `(num_chunks - 1) * 8` bytes is
+//!         appended after the last chunk's compressed data.
+//!     Groups of `sc_group_size` chunks run in parallel; chunks within
+//!     a group are decoded serially (intra-group refs are allowed).
+//!     After all workers join, the tail prefix table restores the first
+//!     8 bytes of every chunk except chunk 0.
+//!
+//!   **Strategy 3 — Two-phase High (L9-L11): `decompressCoreTwoPhase`**
+//!     Preconditions (encoder contract):
+//!       - All chunks in the block use the High codec (no Fast/Turbo).
+//!       - No SC grouping; chunks may back-reference any earlier output.
+//!     Phase 1 (parallel): entropy-decode (`readLzTable`) each chunk
+//!     into a per-chunk scratch region. Phase 2 (serial): resolve
+//!     match runs (`processLzRuns`) in chunk order since each chunk's
+//!     matches depend on earlier output being fully materialized.
+//!
+//! SC semantics detail: self-contained blocks chunk the output into
 //! `sc_group_size`-sized groups (4 chunks = 1 MB). Within a group,
 //! chunks may LZ-reference earlier chunks in the same group (so they
 //! must be decoded serially). Between groups, no back-references are
@@ -156,6 +184,10 @@ const Shared = struct {
     captured_err: std.atomic.Value(u16),
 };
 
+/// SC work-stealing worker. Claims groups atomically via `next_group`
+/// and decodes each group's chunks serially. Safe because the encoder
+/// guarantees no LZ back-references cross group boundaries, so each
+/// group is fully self-contained and independent of other groups.
 fn workerFn(shared: *Shared, scratch: []u8) void {
     const num_groups = (shared.chunks.len + shared.group_size - 1) / shared.group_size;
     while (true) {
@@ -300,6 +332,23 @@ fn decodeOneChunk(
 /// `block_src` is the full frame-block payload *including* the tail
 /// prefix bytes. `dst_off_inout` is advanced by `decompressed_size`
 /// on success.
+///
+/// Encoder contract:
+///   - The encoder MUST produce SC blocks where no LZ back-reference
+///     crosses an `sc_group_size`-chunk boundary. If this invariant is
+///     violated, parallel workers will read stale/zero bytes from
+///     output regions owned by other workers, producing silent corruption.
+///   - A tail prefix table of exactly `(num_chunks - 1) * 8` bytes MUST
+///     be appended after the last chunk's compressed data. If missing or
+///     truncated, the first 8 bytes of each chunk (except chunk 0) will
+///     retain whatever the LZ decoder wrote, which may differ from the
+///     serial-decode result.
+///
+/// Caller contract:
+///   - `dst` MUST have at least `decompressed_size + 64` bytes available
+///     from `dst_off_inout.*` onward. The extra 64 bytes absorb overcopy
+///     from SIMD `wildCopy16` at the end of the last chunk.
+///   - `sc_group_size` MUST be > 0 (typically 4, from the frame header).
 pub fn decompressCoreParallel(
     allocator: std.mem.Allocator,
     pool_opt: ?*std.Thread.Pool,
@@ -328,6 +377,14 @@ pub fn decompressCoreParallel(
     const dst_start_off = dst_off_inout.*;
     if (dst_start_off + decompressed_size + 64 > dst.len) return error.OutputTooSmall;
 
+    // -- Invariant assertions (debug only) --
+    // sc_group_size must be positive; zero would cause division-by-zero
+    // in the group count calculation below.
+    std.debug.assert(sc_group_size > 0);
+    // The dst buffer must have safe_space padding (64 bytes) beyond the
+    // decompressed region for SIMD wildCopy16 overcopy at chunk tails.
+    std.debug.assert(dst.len >= dst_start_off + decompressed_size + 64);
+
     // Worker count: min(num_groups, cpu_count).
     //
     // v2: `group_size` is now taken from the frame header rather than
@@ -343,6 +400,9 @@ pub fn decompressCoreParallel(
         }
     }
     const worker_count: usize = @min(num_groups, @max(@as(usize, 1), cpu_count_raw));
+    // Worker count must be at least 1; zero workers would silently skip
+    // all decode work and return success with an uninitialized dst.
+    std.debug.assert(worker_count > 0);
 
     // Per-worker scratch. Sized to scratch_size * 2 (matching the
     // two-phase path) so the token array overflow into the heap
@@ -587,6 +647,22 @@ fn tpPhase1OneChunk(
 /// entropy-decode + serial match-resolve. All chunks in the block
 /// must be High-decoder; if any is Fast/Turbo the caller falls
 /// back to the serial path.
+///
+/// Encoder contract:
+///   - Every chunk in the block MUST use the High codec. If any chunk
+///     is Fast or Turbo, this function returns `false` (fall back to
+///     serial) rather than producing incorrect output.
+///   - Chunks may back-reference any earlier output (no SC constraint).
+///     This is safe because phase 2 (match-resolve) runs serially in
+///     chunk order, so all prior output is materialized before each
+///     chunk's `processLzRuns` executes.
+///
+/// Caller contract:
+///   - `dst` MUST have at least `decompressed_size + 64` bytes from
+///     `dst_off_inout.*` onward (same safe_space as SC path).
+///   - Returns `false` without modifying `dst` when the block is not
+///     eligible (single chunk or mixed codec types). The caller must
+///     then use the serial decode path.
 pub fn decompressCoreTwoPhase(
     allocator: std.mem.Allocator,
     pool_opt: ?*std.Thread.Pool,
@@ -609,6 +685,10 @@ pub fn decompressCoreTwoPhase(
 
     const dst_start_off = dst_off_inout.*;
     if (dst_start_off + decompressed_size + 64 > dst.len) return error.OutputTooSmall;
+
+    // -- Invariant assertions (debug only) --
+    // Safe-space padding must be present for SIMD wildCopy16 overcopy.
+    std.debug.assert(dst.len >= dst_start_off + decompressed_size + 64);
 
     var cpu_count_raw: usize = if (max_threads > 0) max_threads else std.Thread.getCpuCount() catch 1;
     if (max_threads == 0) {
@@ -771,7 +851,32 @@ const FastL14Shared = struct {
     captured_err: std.atomic.Value(u16),
 };
 
+/// Decode a contiguous slice of chunks [start, end) within a Fast L1-L4
+/// parallel frame.
+///
+/// **64-byte guard trick**: The Fast LZ decoder uses `wildCopy16` (SIMD
+/// 16-byte unaligned stores) for literal and match copies. At the very
+/// end of a chunk's decompressed output, the last wildCopy16 may write
+/// up to 15 bytes past the chunk boundary into the NEXT chunk's output
+/// region. When chunks are decoded in parallel by different workers,
+/// this overcopy stomps bytes that the neighboring worker is about to
+/// (or has already) written correctly.
+///
+/// Fix: each worker saves the first 64 bytes of its FIRST chunk
+/// immediately after decoding it (before the previous slice's worker
+/// can overcopy into that region). After the full slice is decoded,
+/// those saved bytes are restored, undoing any overcopy damage. 64
+/// bytes is chosen as a safe upper bound: wildCopy16 can overcopy at
+/// most 15 bytes, but aligning to a cache line (64) avoids partial-
+/// line contention between workers.
+///
+/// The LAST chunk in each slice may overcopy into the next slice's
+/// region, but that next slice's worker will restore its own guard,
+/// so the overcopy is harmless.
 fn fastL14WorkerFn(shared: *FastL14Shared, scratch: []u8, start: usize, end: usize) void {
+    // Guard buffer: saves the first 64 bytes of this slice's first
+    // chunk so they can be restored after potential overcopy from
+    // the previous slice's last wildCopy16.
     var guard: [64]u8 = undefined;
     var guard_pos: usize = 0;
     var guard_len: usize = 0;
@@ -794,10 +899,12 @@ fn fastL14WorkerFn(shared: *FastL14Shared, scratch: []u8, start: usize, end: usi
             return;
         };
 
-        // After decoding the FIRST chunk in this slice, save its
-        // first 64 bytes. The previous slice's last chunk will
-        // eventually overcopy and stomp them. We restore after
-        // the decode loop finishes.
+        // Save the first 64 bytes of this slice's leading chunk right
+        // after decoding it. The previous slice's last chunk will
+        // eventually overcopy via wildCopy16 and stomp these bytes.
+        // We restore them after the full decode loop finishes.
+        // (Only needed when this is not the first slice — slice 0 has
+        // no predecessor that could overcopy into it.)
         if (chunk_idx == start and start > 0) {
             guard_pos = shared.dst_start_off + q.dst_offset;
             guard_len = @min(64, shared.dst.len - guard_pos);
@@ -805,12 +912,14 @@ fn fastL14WorkerFn(shared: *FastL14Shared, scratch: []u8, start: usize, end: usi
         }
     }
 
+    // Restore the guard bytes, undoing any overcopy damage from the
+    // previous slice's last wildCopy16.
     if (guard_len > 0) {
         @memcpy(shared.dst[guard_pos..][0..guard_len], guard[0..guard_len]);
     }
 }
 
-/// Apply the phase-1 sidecar ops to `dst[dst_off..][0..region_len]`.
+/// Apply the phase-1 sidecar literal bytes to `dst[dst_off..][0..region_len]`.
 ///
 /// Positions in the sidecar are relative to the FRAME's output start.
 /// When called for a single-piece frame with `dst_off == 0`, those
@@ -818,6 +927,10 @@ fn fastL14WorkerFn(shared: *FastL14Shared, scratch: []u8, start: usize, end: usi
 /// streams (each piece its own frame with its own sidecar), the
 /// caller supplies the running dst offset so positions land in the
 /// correct piece region.
+///
+/// Assumes: all `lit.position` values are < `region_len`. Positions
+/// outside the region are silently skipped (defensive, but should not
+/// occur if the encoder produced a valid sidecar).
 fn applySidecar(
     dst: []u8,
     dst_off: usize,
@@ -836,6 +949,29 @@ fn applySidecar(
 /// On entry `dst_off_inout.*` points at the first byte this block's
 /// output should occupy. On successful return it has been advanced by
 /// `decompressed_size`.
+///
+/// Encoder contract:
+///   - The frame MUST carry a parallel_decode_metadata sidecar block
+///     whose literal-byte leaves cover every byte position that a
+///     cross-sub-chunk LZ match would read before the owning chunk's
+///     worker has decoded it. If any leaf is missing, the affected
+///     worker reads stale/zero bytes and produces silent corruption.
+///   - Sidecar literal positions are relative to the frame's output
+///     start (not the absolute dst offset). They must all be less than
+///     `decompressed_size`.
+///
+/// Caller contract:
+///   - `dst` MUST have at least `decompressed_size + 64` bytes from
+///     `dst_off_inout.*` onward (safe_space for SIMD overcopy).
+///   - `sidecar_body` must be the raw body of the parallel_decode_metadata
+///     block (after the block-type header has been stripped).
+///
+/// Worker slice alignment:
+///   Worker slices are rounded up to multiples of 16 chunks so that
+///   sidecar boundaries (which the encoder emits at 16-chunk intervals)
+///   never fall inside a slice. If the alignment invariant is broken,
+///   a worker could decode a chunk whose sidecar literals were meant
+///   to be pre-populated by a different worker's slice, causing races.
 pub fn decompressFastL14Parallel(
     allocator: std.mem.Allocator,
     pool_opt: ?*std.Thread.Pool,
@@ -856,9 +992,21 @@ pub fn decompressFastL14Parallel(
     const dst_start_off = dst_off_inout.*;
     if (dst_start_off + decompressed_size + 64 > dst.len) return error.OutputTooSmall;
 
+    // -- Invariant assertions (debug only) --
+    // Safe-space padding for SIMD wildCopy16 overcopy at chunk tails.
+    std.debug.assert(dst.len >= dst_start_off + decompressed_size + 64);
+
     // ── Parse sidecar ──────────────────────────────────────────────────
     var sidecar = pdm.parseBlockBody(sidecar_body, allocator) catch return error.InvalidInternalHeader;
     defer sidecar.deinit();
+
+    // -- Sidecar invariant assertions (debug only) --
+    // Every literal-byte position in the sidecar must fall within the
+    // decompressed region. Out-of-bounds positions would write past the
+    // allocated dst buffer in applySidecar.
+    for (sidecar.literal_bytes) |lit| {
+        std.debug.assert(lit.position < decompressed_size);
+    }
 
     // ── Worker setup ─────────────────────────────────────────────────
     // Slice size aligned to 16 chunks (matching sidecar boundaries).
@@ -870,12 +1018,22 @@ pub fn decompressFastL14Parallel(
         }
     }
     const max_workers: usize = @min(24, @min(num_chunks, cpu_count_raw));
+    // Slice size is rounded up to a multiple of 16 chunks so that
+    // sidecar boundaries (emitted by the encoder at 16-chunk intervals)
+    // always fall on slice edges, never mid-slice. This prevents two
+    // workers from racing on the same sidecar-populated region.
     const aligned_slice: usize = blk: {
         if (max_workers <= 1) break :blk num_chunks;
         const ideal = (num_chunks + max_workers - 1) / max_workers;
         break :blk ((ideal + 15) / 16) * 16;
     };
+    // When multiple workers are used, verify the 16-chunk alignment.
+    if (max_workers > 1) {
+        std.debug.assert(aligned_slice % 16 == 0);
+    }
     const worker_count: usize = if (aligned_slice >= num_chunks) 1 else (num_chunks + aligned_slice - 1) / aligned_slice;
+    // Worker count must be at least 1.
+    std.debug.assert(worker_count > 0);
 
     const sc_scratch_bytes: usize = constants.scratch_size * 2;
     const scratches = try allocator.alloc([]u8, worker_count);

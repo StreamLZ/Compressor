@@ -108,7 +108,7 @@ pub const HighSetup = struct {
 };
 
 /// Sub-chunk size constant.
-pub const sub_chunk_size: usize = 0x20000;
+pub const sub_chunk_size = lz_constants.sub_chunk_size;
 
 /// Computes the level-dependent encoder parameters but DOES NOT
 /// allocate the hasher — the caller creates the hasher based on

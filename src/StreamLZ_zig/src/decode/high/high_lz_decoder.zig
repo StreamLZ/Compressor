@@ -409,7 +409,7 @@ pub fn phase1ProcessChunk(
 
     while (@intFromPtr(dst_end) - @intFromPtr(dst) != 0) {
         var dst_count: usize = @intFromPtr(dst_end) - @intFromPtr(dst);
-        if (dst_count > 0x20000) dst_count = 0x20000;
+        if (dst_count > constants.sub_chunk_size) dst_count = constants.sub_chunk_size;
         if (@intFromPtr(src_end) - @intFromPtr(src) < 4) return error.SourceTruncated;
 
         // Select per-sub-chunk scratch region.
@@ -521,7 +521,7 @@ pub fn decodeChunk(
 
     while (@intFromPtr(dst_end) - @intFromPtr(dst) != 0) {
         var dst_count: usize = @intFromPtr(dst_end) - @intFromPtr(dst);
-        if (dst_count > 0x20000) dst_count = 0x20000;
+        if (dst_count > constants.sub_chunk_size) dst_count = constants.sub_chunk_size;
         if (@intFromPtr(src_end) - @intFromPtr(src) < 4) return error.SourceTruncated;
 
         // 3-byte big-endian sub-chunk header.

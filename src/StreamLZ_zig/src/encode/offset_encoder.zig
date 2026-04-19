@@ -356,10 +356,11 @@ pub fn writeLzOffsetBits(
     u32_len_count: usize,
     flag_ignore_u32_length: bool,
 ) error{DestinationTooSmall}!usize {
-    if (@intFromPtr(dst_end) - @intFromPtr(dst) <= 16) return error.DestinationTooSmall;
+    const dst_len = @intFromPtr(dst_end) - @intFromPtr(dst);
+    if (dst_len <= 16) return error.DestinationTooSmall;
 
-    var f = BitWriter64Forward.init(dst);
-    var b = BitWriter64Backward.init(dst_end);
+    var f = BitWriter64Forward.initBounded(dst, dst_len);
+    var b = BitWriter64Backward.initBounded(dst_end, dst_len);
 
     // ── Length-count header (backward) ───────────────────────────────
     if (!flag_ignore_u32_length) {

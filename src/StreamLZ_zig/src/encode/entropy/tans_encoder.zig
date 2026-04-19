@@ -534,8 +534,9 @@ pub fn tansEncodeBytes(
     forward_bits_pad: u32,
     backward_bits_pad: u32,
 ) TansEncodeBytesResult {
-    var forward = BitWriter64Forward.init(dst);
-    var backward = BitWriter64Backward.init(dst_end);
+    const dst_len = @intFromPtr(dst_end) - @intFromPtr(dst);
+    var forward = BitWriter64Forward.initBounded(dst, dst_len);
+    var backward = BitWriter64Backward.initBounded(dst_end, dst_len);
 
     if ((forward_bits_pad & 7) != 0) {
         const pad: u5 = @intCast(8 - (forward_bits_pad & 7));
@@ -1019,7 +1020,7 @@ pub fn encodeArrayU8Tans(
     // Emit the table into a scratch buffer. We use a separate scratch so
     // the bit writer's 8-byte overshoot stores don't clobber adjacent data.
     var table_buf: [512]u8 = @splat(0);
-    var bw = BitWriter64Forward.init(&table_buf);
+    var bw = BitWriter64Forward.initBounded(&table_buf, table_buf.len);
     bw.writeNoFlush(log_table_bits - 8, 3);
     tansEncodeTable(&bw, log_table_bits, &weights, weights_size, used_symbols);
     bw.flush();

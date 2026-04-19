@@ -29,6 +29,15 @@ pub const default_window_size: usize = 128 * 1024 * 1024;
 
 pub const compress_buffer_padding: usize = 16;
 
+/// Extra bytes the decoder is allowed to write past `dst_len`.
+pub const safe_space: usize = 64;
+
+/// Sub-chunk size: 128 KB. Each outer 256 KB chunk contains up to 2 sub-chunks.
+pub const sub_chunk_size: usize = 0x20000;
+
+/// Maximum length value that fits in a single byte of the length stream.
+pub const extended_length_threshold: u32 = 251;
+
 pub const sub_chunk_type_shift: u6 = 19;
 pub const chunk_header_compressed_flag: u32 = 0x800000;
 

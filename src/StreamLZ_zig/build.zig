@@ -1,6 +1,15 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+// Build steps
+// -----------
+//   zig build          Default ReleaseFast build + install
+//   zig build run      Run the streamlz CLI
+//   zig build test     Run unit tests
+//   zig build safe     Build with ReleaseSafe (bounds + overflow checks)
+//   zig build fuzz     Build fuzz_decompress harness (ReleaseSafe)
+//                      Usage: zig-out/bin/fuzz-decompress <input-file>
+
 pub fn build(b: *std.Build) void {
     // Default the x86_64 CPU model to `x86_64_v3` (AVX2 baseline,
     // covering all Intel since Haswell 2013 and all AMD since
@@ -48,4 +57,42 @@ pub fn build(b: *std.Build) void {
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
+
+    // ---- ReleaseSafe build step ----
+    // Enables runtime safety checks (bounds, overflow) at moderate
+    // performance cost. Useful for CI and testing against untrusted data.
+    const safe_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .strip = strip,
+    });
+    const safe_exe = b.addExecutable(.{
+        .name = "streamlz-safe",
+        .root_module = safe_module,
+    });
+    safe_exe.linkLibC();
+    const safe_install = b.addInstallArtifact(safe_exe, .{});
+    const safe_step = b.step("safe", "Build with ReleaseSafe (bounds + overflow checks)");
+    safe_step.dependOn(&safe_install.step);
+
+    // ---- Fuzz harness for the decompressor ----
+    // Reads stdin as compressed input, calls decompressFramed, swallows
+    // decode errors. Panics only on memory safety violations (which
+    // ReleaseSafe catches). Feed with: afl-fuzz, honggfuzz, or manual
+    // corpus via  `zig build fuzz && echo ... | ./zig-out/bin/fuzz-decompress`
+    const fuzz_module = b.createModule(.{
+        .root_source_file = b.path("src/fuzz_decompress.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .strip = strip,
+    });
+    const fuzz_exe = b.addExecutable(.{
+        .name = "fuzz-decompress",
+        .root_module = fuzz_module,
+    });
+    fuzz_exe.linkLibC();
+    const fuzz_install = b.addInstallArtifact(fuzz_exe, .{});
+    const fuzz_step = b.step("fuzz", "Build fuzz_decompress harness (ReleaseSafe)");
+    fuzz_step.dependOn(&fuzz_install.step);
 }

@@ -9,6 +9,22 @@ const cleanness = @import("decode/cross_chunk_analyzer.zig");
 
 const version_string = "0.0.0-phase3a";
 
+/// Parse a flag of the form `-x N` from the argument list, advancing the
+/// index past the value.  Returns the parsed integer on match, or null if
+/// the current arg doesn't match `flag`.  Exits the process on a parse
+/// error so callers never see an invalid value.
+fn parseIntFlag(comptime T: type, args: []const []const u8, i: *usize, flag: []const u8, w: *std.Io.Writer) ?T {
+    if (std.mem.eql(u8, args[i.*], flag) and i.* + 1 < args.len) {
+        i.* += 1;
+        return std.fmt.parseInt(T, args[i.*], 10) catch {
+            w.print("error: invalid {s} value '{s}'\n", .{ flag, args[i.*] }) catch {};
+            w.flush() catch {};
+            std.process.exit(2);
+        };
+    }
+    return null;
+}
+
 const Command = enum {
     version,
     help,
@@ -917,30 +933,14 @@ fn runBenchCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []con
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
-        const a = args[i];
-        if (std.mem.eql(u8, a, "-l") and i + 1 < args.len) {
-            level = std.fmt.parseInt(u8, args[i + 1], 10) catch {
-                try w.print("error: invalid level '{s}'\n", .{args[i + 1]});
-                try w.flush();
-                std.process.exit(2);
-            };
-            i += 1;
-        } else if (std.mem.eql(u8, a, "-r") and i + 1 < args.len) {
-            runs = std.fmt.parseInt(u32, args[i + 1], 10) catch {
-                try w.print("error: invalid runs '{s}'\n", .{args[i + 1]});
-                try w.flush();
-                std.process.exit(2);
-            };
-            i += 1;
-        } else if (std.mem.eql(u8, a, "-t") and i + 1 < args.len) {
-            num_threads = std.fmt.parseInt(u32, args[i + 1], 10) catch {
-                try w.print("error: invalid thread count '{s}'\n", .{args[i + 1]});
-                try w.flush();
-                std.process.exit(2);
-            };
-            i += 1;
+        if (parseIntFlag(u8, args, &i, "-l", w)) |v| {
+            level = v;
+        } else if (parseIntFlag(u32, args, &i, "-r", w)) |v| {
+            runs = v;
+        } else if (parseIntFlag(u32, args, &i, "-t", w)) |v| {
+            num_threads = v;
         } else if (path == null) {
-            path = a;
+            path = args[i];
         } else {
             try w.writeAll("usage: streamlz benchc [-l N] [-r N] [-t N] <raw-file>\n");
             try w.flush();
@@ -1083,26 +1083,15 @@ fn runBench(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const []con
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
-        const a = args[i];
-        if (std.mem.eql(u8, a, "-r") and i + 1 < args.len) {
-            runs = std.fmt.parseInt(u32, args[i + 1], 10) catch {
-                try w.print("error: invalid runs '{s}'\n", .{args[i + 1]});
-                try w.flush();
-                std.process.exit(2);
-            };
-            i += 1;
-        } else if (std.mem.eql(u8, a, "-t") and i + 1 < args.len) {
-            num_threads = std.fmt.parseInt(u32, args[i + 1], 10) catch {
-                try w.print("error: invalid thread count '{s}'\n", .{args[i + 1]});
-                try w.flush();
-                std.process.exit(2);
-            };
-            i += 1;
+        if (parseIntFlag(u32, args, &i, "-r", w)) |v| {
+            runs = v;
+        } else if (parseIntFlag(u32, args, &i, "-t", w)) |v| {
+            num_threads = v;
         } else if (path == null) {
-            path = a;
+            path = args[i];
         } else {
             // Support legacy positional [runs] as second positional arg
-            runs = std.fmt.parseInt(u32, a, 10) catch {
+            runs = std.fmt.parseInt(u32, args[i], 10) catch {
                 try w.writeAll("usage: streamlz bench [-r N] [-t N] <file.slz>\n");
                 try w.flush();
                 std.process.exit(2);
@@ -1227,25 +1216,14 @@ fn runCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const []
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
-        const a = args[i];
-        if (std.mem.eql(u8, a, "-l") and i + 1 < args.len) {
-            level = std.fmt.parseInt(u8, args[i + 1], 10) catch {
-                try w.print("error: invalid level '{s}'\n", .{args[i + 1]});
-                try w.flush();
-                std.process.exit(2);
-            };
-            i += 1;
-        } else if (std.mem.eql(u8, a, "-t") and i + 1 < args.len) {
-            num_threads = std.fmt.parseInt(u32, args[i + 1], 10) catch {
-                try w.print("error: invalid thread count '{s}'\n", .{args[i + 1]});
-                try w.flush();
-                std.process.exit(2);
-            };
-            i += 1;
+        if (parseIntFlag(u8, args, &i, "-l", w)) |v| {
+            level = v;
+        } else if (parseIntFlag(u32, args, &i, "-t", w)) |v| {
+            num_threads = v;
         } else if (in_path == null) {
-            in_path = a;
+            in_path = args[i];
         } else if (out_path == null) {
-            out_path = a;
+            out_path = args[i];
         } else {
             try w.writeAll("usage: streamlz compress [-l N] [-t N] <in> <out>\n");
             try w.flush();
@@ -1318,18 +1296,12 @@ fn runDecompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const 
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
-        const a = args[i];
-        if (std.mem.eql(u8, a, "-t") and i + 1 < args.len) {
-            num_threads = std.fmt.parseInt(u32, args[i + 1], 10) catch {
-                try w.print("error: invalid thread count '{s}'\n", .{args[i + 1]});
-                try w.flush();
-                std.process.exit(2);
-            };
-            i += 1;
+        if (parseIntFlag(u32, args, &i, "-t", w)) |v| {
+            num_threads = v;
         } else if (in_path == null) {
-            in_path = a;
+            in_path = args[i];
         } else if (out_path == null) {
-            out_path = a;
+            out_path = args[i];
         } else {
             try w.writeAll("usage: streamlz decompress [-t N] <in.slz> <out>\n");
             try w.flush();

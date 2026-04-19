@@ -16,7 +16,7 @@ const high = @import("high/high_lz_decoder.zig");
 const parallel = @import("decompress_parallel.zig");
 
 /// Extra bytes the decoder is allowed to write past `dst_len`.
-pub const safe_space: usize = 64;
+pub const safe_space = constants.safe_space;
 
 pub const DecompressError = error{
     BadFrame,

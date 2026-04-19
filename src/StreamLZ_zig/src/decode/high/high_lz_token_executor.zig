@@ -18,8 +18,7 @@ const copy = @import("../../io/copy_helpers.zig");
 const ptr_math = @import("../../io/ptr_math.zig");
 const high = @import("high_lz_decoder.zig");
 
-// Keep this in sync with decode/streamlz_decoder.zig::safe_space.
-const safe_space: usize = 64;
+const safe_space = constants.safe_space;
 
 pub const DecodeError = high.DecodeError;
 

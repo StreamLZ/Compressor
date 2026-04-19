@@ -1265,3 +1265,8 @@ It is not a C# port. It is a Zig codebase. It should read like one.
 | `decode/` subdirectories: `fast/`, `high/`, `entropy/` | **DONE** |
 | `streamlz_encoder.zig` 5-way split (2636→667 lines) | **DONE** |
 | `optimal()` backward-extract phase extraction | **DONE** |
+| Debug bounds checks for bit_writer (`initBounded` + assert in flush) | **DONE** |
+| Parallel decoder contract documentation (7 assertions, module docs) | **DONE** |
+| `build.zig`: `zig build safe` (ReleaseSafe) + `zig build fuzz` target | **DONE** |
+| Centralize scattered constants (`safe_space`, `sub_chunk_size`, `extended_length_threshold`) | **DONE** |
+| CLI arg parsing cleanup (`parseIntFlag` helper, ~48 lines removed) | **DONE** |

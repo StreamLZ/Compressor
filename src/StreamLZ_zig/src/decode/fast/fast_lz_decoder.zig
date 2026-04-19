@@ -75,7 +75,7 @@ pub const FastLzTable = struct {
 const entropy_coded_off16_marker: u32 = 0xFFFF;
 
 const large_offset_threshold: u32 = constants.fast_large_offset_threshold;
-const extended_length_threshold: u32 = 251;
+const extended_length_threshold: u32 = constants.extended_length_threshold;
 
 // ────────────────────────────────────────────────────────────
 //  Offset stream helpers
@@ -377,7 +377,7 @@ fn processModeImpl(
 
     var dst = dst_in;
     const dst_end = dst_in + dst_size;
-    const safe_space: usize = 64; // must match streamlz_decoder.safe_space
+    const safe_space = constants.safe_space;
     const dst_safe_end: [*]u8 = if (dst_size >= safe_space) dst_end - safe_space else dst_in;
 
     var cmd_stream = lz.cmd_start;
@@ -665,7 +665,7 @@ pub fn decodeChunk(
 
     while (@intFromPtr(dst_end) - @intFromPtr(dst) != 0) {
         var dst_count: usize = @intFromPtr(dst_end) - @intFromPtr(dst);
-        if (dst_count > 0x20000) dst_count = 0x20000;
+        if (dst_count > constants.sub_chunk_size) dst_count = constants.sub_chunk_size;
         if (@intFromPtr(src_end) - @intFromPtr(src) < 4) return error.SourceTruncated;
 
         // 3-byte big-endian sub-chunk header: [23] comp flag | [22:19] mode | [18:0] size

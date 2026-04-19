@@ -29,7 +29,7 @@ const EntropyOptions = entropy_enc.EntropyOptions;
 const fast_framed = @import("fast_framed.zig");
 
 /// Default dictionary size when the caller doesn't override (1 GB).
-pub const default_dictionary_size: u32 = 0x40000000;
+pub const default_dictionary_size: u32 = @intCast(lz_constants.max_dictionary_size);
 
 // ────────────────────────────────────────────────────────────
 //  Platform-specific memory query (delegated to platform/)

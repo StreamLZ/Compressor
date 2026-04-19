@@ -15,7 +15,7 @@ pub const initial_copy_bytes: usize = 8;
 pub const block1_max_size: usize = 0x10000;
 
 /// Sub-chunk size: 128 KB. Each outer 256 KB chunk contains up to 2 sub-chunks.
-pub const sub_chunk_size: usize = 0x20000;
+pub const sub_chunk_size = lz_constants.sub_chunk_size;
 
 /// Threshold above which 32-bit offsets use the 4-byte encoding.
 pub const large_offset_threshold: u32 = lz_constants.fast_large_offset_threshold;
@@ -28,7 +28,7 @@ pub const entropy_coded_16_marker: u16 = 0xFFFF;
 pub const near_offset_max_match_length: usize = 90;
 
 /// Maximum length value that fits in a single byte of the length stream.
-pub const max_single_byte_length_value: u32 = 251;
+pub const max_single_byte_length_value: u32 = lz_constants.extended_length_threshold;
 
 /// Base value subtracted in the extended (3-byte) length encoding.
 pub const extended_length_base: u32 = 252;

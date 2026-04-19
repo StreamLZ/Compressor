@@ -21,9 +21,14 @@ pub const BitWriter64Forward = struct {
     bits: u64 = 0,
     pos: u32 = 63,
     total_bits: i64 = 0,
+    debug_limit: usize = std.math.maxInt(usize),
 
     pub fn init(dst: [*]u8) BitWriter64Forward {
         return .{ .position = dst };
+    }
+
+    pub fn initBounded(dst: [*]u8, len: usize) BitWriter64Forward {
+        return .{ .position = dst, .debug_limit = @intFromPtr(dst) + len };
     }
 
     pub inline fn flush(self: *BitWriter64Forward) void {
@@ -36,6 +41,7 @@ pub const BitWriter64Forward = struct {
         const swapped = @byteSwap(v);
         std.mem.writeInt(u64, self.position[0..8], swapped, .little);
         self.position += t;
+        std.debug.assert(@intFromPtr(self.position) <= self.debug_limit);
     }
 
     pub inline fn write(self: *BitWriter64Forward, bits: u32, n: u6) void {
@@ -62,9 +68,14 @@ pub const BitWriter64Backward = struct {
     bits: u64 = 0,
     pos: u32 = 63,
     total_bits: i64 = 0,
+    debug_limit: usize = 0,
 
     pub fn init(dst: [*]u8) BitWriter64Backward {
         return .{ .position = dst };
+    }
+
+    pub fn initBounded(dst: [*]u8, len: usize) BitWriter64Backward {
+        return .{ .position = dst, .debug_limit = @intFromPtr(dst) - len };
     }
 
     pub inline fn flush(self: *BitWriter64Backward) void {
@@ -77,6 +88,7 @@ pub const BitWriter64Backward = struct {
         const dst: [*]u8 = self.position - 8;
         std.mem.writeInt(u64, dst[0..8], v, .little);
         self.position -= t;
+        std.debug.assert(@intFromPtr(self.position) >= self.debug_limit);
     }
 
     pub inline fn write(self: *BitWriter64Backward, bits: u32, n: u6) void {
@@ -102,9 +114,14 @@ pub const BitWriter32Forward = struct {
     bits: u64 = 0,
     position: [*]u8,
     bit_pos: i32 = 0,
+    debug_limit: usize = std.math.maxInt(usize),
 
     pub fn init(dst: [*]u8) BitWriter32Forward {
         return .{ .position = dst };
+    }
+
+    pub fn initBounded(dst: [*]u8, len: usize) BitWriter32Forward {
+        return .{ .position = dst, .debug_limit = @intFromPtr(dst) + len };
     }
 
     pub inline fn write(self: *BitWriter32Forward, bits: u32, n: u6) void {
@@ -118,6 +135,7 @@ pub const BitWriter32Forward = struct {
             self.position += 4;
             self.bits >>= 32;
             self.bit_pos -= 32;
+            std.debug.assert(@intFromPtr(self.position) <= self.debug_limit);
         }
     }
 
@@ -129,6 +147,7 @@ pub const BitWriter32Forward = struct {
             self.bit_pos -= 8;
         }
         std.debug.assert(self.bit_pos <= 0);
+        std.debug.assert(@intFromPtr(self.position) <= self.debug_limit);
     }
 };
 
@@ -136,9 +155,14 @@ pub const BitWriter32Backward = struct {
     bits: u64 = 0,
     position: [*]u8,
     bit_pos: i32 = 0,
+    debug_limit: usize = 0,
 
     pub fn init(dst: [*]u8) BitWriter32Backward {
         return .{ .position = dst };
+    }
+
+    pub fn initBounded(dst: [*]u8, len: usize) BitWriter32Backward {
+        return .{ .position = dst, .debug_limit = @intFromPtr(dst) - len };
     }
 
     pub inline fn write(self: *BitWriter32Backward, bits: u32, n: u6) void {
@@ -153,6 +177,7 @@ pub const BitWriter32Backward = struct {
             std.mem.writeInt(u32, self.position[0..4], swapped, .little);
             self.bits >>= 32;
             self.bit_pos -= 32;
+            std.debug.assert(@intFromPtr(self.position) >= self.debug_limit);
         }
     }
 
@@ -164,6 +189,7 @@ pub const BitWriter32Backward = struct {
             self.bit_pos -= 8;
         }
         std.debug.assert(self.bit_pos <= 0);
+        std.debug.assert(@intFromPtr(self.position) >= self.debug_limit);
     }
 };
 

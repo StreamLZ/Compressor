@@ -71,8 +71,9 @@ pub const FileStats = struct {
     }
 };
 
-const extended_length_threshold: u32 = 251;
-const safe_space: usize = 64;
+const extended_length_threshold: u32 = constants.extended_length_threshold;
+const safe_space = constants.safe_space;
+const sub_chunk_size = constants.sub_chunk_size;
 
 // ────────────────────────────────────────────────────────────
 //  Partition analyzer (earliestLiteral + 2-thread split stats)
@@ -406,7 +407,7 @@ fn partitionFastChunkPayload(
     const chunk_start_abs: u64 = running_dst_off;
 
     while (dst_remaining != 0) {
-        const dst_count: usize = @min(@as(usize, 0x20000), dst_remaining);
+        const dst_count: usize = @min(sub_chunk_size, dst_remaining);
         if (src_pos + 4 > chunk_src.len) return error.Truncated;
         const chunkhdr: u32 = (@as(u32, chunk_src[src_pos]) << 16) |
             (@as(u32, chunk_src[src_pos + 1]) << 8) |
@@ -531,7 +532,7 @@ fn partitionFastBlock(
     file_capacity: u64,
     tokens: *std.ArrayList(TokenInfo),
 ) !void {
-    const max_chunk: usize = 0x20000;
+    const max_chunk = sub_chunk_size;
     const scratch_bytes: usize = constants.scratch_size;
     const scratch = try allocator.alignedAlloc(u8, .@"64", scratch_bytes);
     defer allocator.free(scratch);
@@ -1390,7 +1391,7 @@ fn parseOnlyFastChunkPayload(
     var dst_off_in_chunk: u64 = 0;
 
     while (dst_remaining != 0) {
-        const dst_count: usize = @min(@as(usize, 0x20000), dst_remaining);
+        const dst_count: usize = @min(sub_chunk_size, dst_remaining);
         if (src_pos + 4 > chunk_src.len) return error.Truncated;
         const chunkhdr: u32 = (@as(u32, chunk_src[src_pos]) << 16) |
             (@as(u32, chunk_src[src_pos + 1]) << 8) |
@@ -1480,7 +1481,7 @@ fn parseOnlyFastBlock(
     block_file_pos_base: u64,
     out_byte_count: *u64,
 ) !void {
-    const max_chunk: usize = 0x20000;
+    const max_chunk = sub_chunk_size;
     const scratch_bytes: usize = constants.scratch_size;
     const scratch = try allocator.alignedAlloc(u8, .@"64", scratch_bytes);
     defer allocator.free(scratch);
@@ -1898,7 +1899,7 @@ fn level0FastChunkPayload(
     var dst_off_in_chunk: u64 = 0;
 
     while (dst_remaining != 0) {
-        const dst_count: usize = @min(@as(usize, 0x20000), dst_remaining);
+        const dst_count: usize = @min(sub_chunk_size, dst_remaining);
         if (src_pos + 4 > chunk_src.len) return error.Truncated;
         const chunkhdr: u32 = (@as(u32, chunk_src[src_pos]) << 16) |
             (@as(u32, chunk_src[src_pos + 1]) << 8) |
@@ -2002,7 +2003,7 @@ fn level0HighChunkPayload(
     var dst_off_in_chunk: u64 = 0;
 
     while (dst_remaining != 0) {
-        const dst_count: usize = @min(@as(usize, 0x20000), dst_remaining);
+        const dst_count: usize = @min(sub_chunk_size, dst_remaining);
         if (src_pos + 4 > chunk_src.len) return error.Truncated;
         const chunkhdr: u32 = (@as(u32, chunk_src[src_pos]) << 16) |
             (@as(u32, chunk_src[src_pos + 1]) << 8) |
@@ -2075,7 +2076,7 @@ fn level0Block(
     bitmap_byte_capacity: u64,
     stats: *Level0Stats,
 ) !void {
-    const max_chunk: usize = 0x20000;
+    const max_chunk = sub_chunk_size;
     const scratch_bytes: usize = constants.scratch_size;
     const scratch = try allocator.alignedAlloc(u8, .@"64", scratch_bytes);
     defer allocator.free(scratch);
@@ -2499,7 +2500,7 @@ fn analyzeFastChunkPayload(
     var dst_off_in_chunk: u64 = 0;
 
     while (dst_remaining != 0) {
-        const dst_count: usize = @min(@as(usize, 0x20000), dst_remaining);
+        const dst_count: usize = @min(sub_chunk_size, dst_remaining);
 
         if (src_pos + 4 > chunk_src.len) return error.Truncated;
         const chunkhdr: u32 = (@as(u32, chunk_src[src_pos]) << 16) |
@@ -2739,7 +2740,7 @@ fn analyzeHighChunkPayload(
     var dst_off_in_chunk: u64 = 0;
 
     while (dst_remaining != 0) {
-        const dst_count: usize = @min(@as(usize, 0x20000), dst_remaining);
+        const dst_count: usize = @min(sub_chunk_size, dst_remaining);
 
         if (src_pos + 4 > chunk_src.len) return error.Truncated;
         const chunkhdr: u32 = (@as(u32, chunk_src[src_pos]) << 16) |
@@ -2846,7 +2847,7 @@ fn analyzeHighBlock(
     byte_round: []u16,
     file_stats: *FileStats,
 ) !void {
-    const max_chunk: usize = 0x20000;
+    const max_chunk = sub_chunk_size;
     const scratch_bytes: usize = constants.scratch_size;
     const scratch = try allocator.alignedAlloc(u8, .@"64", scratch_bytes);
     defer allocator.free(scratch);
@@ -2968,7 +2969,7 @@ fn analyzeFastBlock(
     file_stats: *FileStats,
 ) !void {
     // Allocate scratch + buffers once per block.
-    const max_chunk: usize = 0x20000; // 128 KB
+    const max_chunk = sub_chunk_size; // 128 KB
     const scratch_bytes: usize = constants.scratch_size;
     const scratch = try allocator.alignedAlloc(u8, .@"64", scratch_bytes);
     defer allocator.free(scratch);
