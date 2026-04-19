@@ -16,7 +16,7 @@
 
 const std = @import("std");
 const constants = @import("fast_constants.zig");
-const writer_mod = @import("fast_stream_writer.zig");
+const writer_mod = @import("FastStreamWriter.zig");
 const copy = @import("../io/copy_helpers.zig");
 const offset_encoder = @import("offset_encoder.zig");
 

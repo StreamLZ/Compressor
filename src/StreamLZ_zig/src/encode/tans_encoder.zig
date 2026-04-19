@@ -29,7 +29,7 @@
 //!     in the 10-round cycle tells us which state to use).
 
 const std = @import("std");
-const hist_mod = @import("byte_histogram.zig");
+const hist_mod = @import("ByteHistogram.zig");
 const bw_mod = @import("../io/bit_writer.zig");
 const cost_coeffs = @import("cost_coefficients.zig");
 

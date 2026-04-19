@@ -14,7 +14,7 @@
 //!      so these are Zig-port infrastructure for future High parity.
 
 const std = @import("std");
-const hist_mod = @import("byte_histogram.zig");
+const hist_mod = @import("ByteHistogram.zig");
 const entropy_enc = @import("entropy_encoder.zig");
 const cost_coeffs = @import("cost_coefficients.zig");
 const bw_mod = @import("../io/bit_writer.zig");
@@ -725,7 +725,7 @@ test "writeLzOffsetBits legacy path: direct BitWriter roundtrip" {
     // pair (BitWriter64Forward + BitReader.readDistance) works for the
     // legacy offset formula. Passes when the bit-level encode/decode
     // pair is correct.
-    const bit_reader_mod = @import("../io/bit_reader.zig");
+    const bit_reader_mod = @import("../io/BitReader.zig");
 
     const offset: u32 = 200;
     const bsr: u32 = std.math.log2_int(u32, offset + lz_constants.offset_bias_constant);
@@ -748,7 +748,7 @@ test "writeLzOffsetBits legacy path: direct BitWriter roundtrip" {
 }
 
 test "writeLzOffsetBits legacy path: full function roundtrip" {
-    const bit_reader_mod = @import("../io/bit_reader.zig");
+    const bit_reader_mod = @import("../io/BitReader.zig");
 
     const offset: u32 = 200;
     const bsr: u32 = std.math.log2_int(u32, offset + lz_constants.offset_bias_constant);
@@ -788,7 +788,7 @@ test "writeLzOffsetBits legacy path: two near offsets (fwd + bwd)" {
     // Two offsets trigger the alternating forward/backward write path.
     // Index 0 goes to forward, index 1 goes to backward. flag_ignore_u32_length
     // is still true so there's no count header competing for bits_b.
-    const bit_reader_mod = @import("../io/bit_reader.zig");
+    const bit_reader_mod = @import("../io/BitReader.zig");
 
     const off0: u32 = 200;
     const off1: u32 = 310;
@@ -826,7 +826,7 @@ test "writeLzOffsetBits legacy path: one offset with length-count header" {
     // Add the backward length-count header (flag_ignore_u32_length = false,
     // u32_len_count = 0). This writes a single-bit `1` marker to bits_b
     // before the offset loop runs. Decoder reads the header first.
-    const bit_reader_mod = @import("../io/bit_reader.zig");
+    const bit_reader_mod = @import("../io/BitReader.zig");
 
     const offset: u32 = 200;
     const u8_desc: u8 = buildNearU8Desc(offset);
@@ -882,7 +882,7 @@ test "writeLzOffsetBits legacy path: 10 near offsets + count header" {
     // Scale up to 10 offsets — alternating forward/backward — while
     // still including the backward count header. This is the shape the
     // High codec emits for a realistic sub-chunk.
-    const bit_reader_mod = @import("../io/bit_reader.zig");
+    const bit_reader_mod = @import("../io/BitReader.zig");
 
     const raw_offsets: [10]u32 = .{ 200, 310, 450, 600, 800, 1100, 1500, 2000, 2800, 4000 };
     var u8_offs: [10]u8 = undefined;
@@ -946,7 +946,7 @@ test "writeLzOffsetBits legacy path: 4 offsets + 2 u32_len overflows" {
     // L9/L11 roundtrip desyncs in practice. The decoder reads lengths
     // via `readLengthBackward` (index 1) and `readLength` (index 0)
     // alternating, after the offset stream has been consumed.
-    const bit_reader_mod = @import("../io/bit_reader.zig");
+    const bit_reader_mod = @import("../io/BitReader.zig");
 
     const raw_offsets: [4]u32 = .{ 200, 310, 450, 600 };
     var u8_offs: [4]u8 = undefined;
@@ -1030,7 +1030,7 @@ test "writeLzOffsetBits legacy path: 50 offsets + 20 u32_len overflows" {
     // writeLzOffsetBits' multi-write composition — it's upstream (in
     // assembleCompressedOutput's stream ordering) or downstream (in the
     // decoder's read position after literal/cmd/offs/len streams).
-    const bit_reader_mod = @import("../io/bit_reader.zig");
+    const bit_reader_mod = @import("../io/BitReader.zig");
 
     var raw_offsets: [50]u32 = undefined;
     var u8_offs: [50]u8 = undefined;

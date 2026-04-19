@@ -13,7 +13,7 @@
 //! returns mean "doesn't fit" (caller should fall back elsewhere).
 
 const std = @import("std");
-const hist_mod = @import("byte_histogram.zig");
+const hist_mod = @import("ByteHistogram.zig");
 const tans = @import("tans_encoder.zig");
 
 const ByteHistogram = hist_mod.ByteHistogram;

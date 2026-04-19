@@ -12,7 +12,7 @@
 const std = @import("std");
 const constants = @import("../format/streamlz_constants.zig");
 const copy = @import("../io/copy_helpers.zig");
-const BitReader = @import("../io/bit_reader.zig").BitReader;
+const BitReader = @import("../io/BitReader.zig").BitReader;
 const entropy = @import("entropy_decoder.zig");
 const runs = @import("high_lz_token_executor.zig");
 

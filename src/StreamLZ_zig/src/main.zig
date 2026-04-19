@@ -912,6 +912,7 @@ fn runAnalyze(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const []c
 fn runBenchCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const []const u8) !void {
     var level: u8 = 6;
     var runs: u32 = 3;
+    var num_threads: u32 = 0; // 0 = auto
     var path: ?[]const u8 = null;
 
     var i: usize = 0;
@@ -931,17 +932,24 @@ fn runBenchCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []con
                 std.process.exit(2);
             };
             i += 1;
+        } else if (std.mem.eql(u8, a, "-t") and i + 1 < args.len) {
+            num_threads = std.fmt.parseInt(u32, args[i + 1], 10) catch {
+                try w.print("error: invalid thread count '{s}'\n", .{args[i + 1]});
+                try w.flush();
+                std.process.exit(2);
+            };
+            i += 1;
         } else if (path == null) {
             path = a;
         } else {
-            try w.writeAll("usage: streamlz benchc [-l N] [-r N] <raw-file>\n");
+            try w.writeAll("usage: streamlz benchc [-l N] [-r N] [-t N] <raw-file>\n");
             try w.flush();
             std.process.exit(2);
         }
     }
 
     if (path == null) {
-        try w.writeAll("usage: streamlz benchc [-l N] [-r N] <raw-file>\n");
+        try w.writeAll("usage: streamlz benchc [-l N] [-r N] [-t N] <raw-file>\n");
         try w.flush();
         std.process.exit(2);
     }
@@ -1011,7 +1019,7 @@ fn runBenchCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []con
     try w.print("  Compress median: {d:.0}ms ({d:.1} MB/s)\n\n", .{ comp_median_ms, comp_median_mbps });
 
     // Warm-up decompress (parallel — matches what `-b` does for SC files).
-    _ = try decoder.decompressFramedParallel(allocator, compressed[0..comp_size], decompressed);
+    _ = try decoder.decompressFramedParallelThreaded(allocator, compressed[0..comp_size], decompressed, num_threads);
 
     // ── Decompress benchmark ──────────────────────────────────────────
     const dec_times = try allocator.alloc(u64, runs);
@@ -1019,7 +1027,7 @@ fn runBenchCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []con
     r = 0;
     while (r < runs) : (r += 1) {
         var timer = try std.time.Timer.start();
-        _ = try decoder.decompressFramedParallel(allocator, compressed[0..comp_size], decompressed);
+        _ = try decoder.decompressFramedParallelThreaded(allocator, compressed[0..comp_size], decompressed, num_threads);
         dec_times[r] = timer.read();
         const run_ms = @as(f64, @floatFromInt(dec_times[r])) / 1_000_000.0;
         const run_mbps = mb * 1000.0 / run_ms;
@@ -1069,19 +1077,47 @@ fn median(times: []const u64) u64 {
 }
 
 fn runBench(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const []const u8) !void {
-    if (args.len < 1 or args.len > 2) {
-        try w.writeAll("usage: streamlz bench <file.slz> [runs]\n");
+    var runs: u32 = 10;
+    var num_threads: u32 = 0; // 0 = auto
+    var path: ?[]const u8 = null;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (std.mem.eql(u8, a, "-r") and i + 1 < args.len) {
+            runs = std.fmt.parseInt(u32, args[i + 1], 10) catch {
+                try w.print("error: invalid runs '{s}'\n", .{args[i + 1]});
+                try w.flush();
+                std.process.exit(2);
+            };
+            i += 1;
+        } else if (std.mem.eql(u8, a, "-t") and i + 1 < args.len) {
+            num_threads = std.fmt.parseInt(u32, args[i + 1], 10) catch {
+                try w.print("error: invalid thread count '{s}'\n", .{args[i + 1]});
+                try w.flush();
+                std.process.exit(2);
+            };
+            i += 1;
+        } else if (path == null) {
+            path = a;
+        } else {
+            // Support legacy positional [runs] as second positional arg
+            runs = std.fmt.parseInt(u32, a, 10) catch {
+                try w.writeAll("usage: streamlz bench [-r N] [-t N] <file.slz>\n");
+                try w.flush();
+                std.process.exit(2);
+            };
+        }
+    }
+
+    if (path == null) {
+        try w.writeAll("usage: streamlz bench [-r N] [-t N] <file.slz>\n");
         try w.flush();
         std.process.exit(2);
     }
-    const path = args[0];
-    const runs: u32 = if (args.len == 2)
-        std.fmt.parseInt(u32, args[1], 10) catch 10
-    else
-        10;
 
-    const in_file = std.fs.cwd().openFile(path, .{}) catch |err| {
-        try w.print("error: cannot open '{s}': {s}\n", .{ path, @errorName(err) });
+    const in_file = std.fs.cwd().openFile(path.?, .{}) catch |err| {
+        try w.print("error: cannot open '{s}': {s}\n", .{ path.?, @errorName(err) });
         try w.flush();
         std.process.exit(1);
     };
@@ -1089,7 +1125,7 @@ fn runBench(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const []con
 
     const max_bytes: usize = 1 << 31;
     const src = in_file.readToEndAlloc(allocator, max_bytes) catch |err| {
-        try w.print("error: cannot read '{s}': {s}\n", .{ path, @errorName(err) });
+        try w.print("error: cannot read '{s}': {s}\n", .{ path.?, @errorName(err) });
         try w.flush();
         std.process.exit(1);
     };
@@ -1117,7 +1153,7 @@ fn runBench(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const []con
     // Warm-up: one untimed decode to page-fault the dst and prime the caches.
     // Uses parallel decompress (matches what `-b` does for SC files and
     // what production code paths take when an allocator is available).
-    _ = decoder.decompressFramedParallel(allocator, src, dst) catch |err| {
+    _ = decoder.decompressFramedParallelThreaded(allocator, src, dst, num_threads) catch |err| {
         try w.print("error: decompression failed: {s}\n", .{@errorName(err)});
         try w.flush();
         std.process.exit(1);
@@ -1128,7 +1164,7 @@ fn runBench(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const []con
     var run: u32 = 0;
     while (run < runs) : (run += 1) {
         var timer = try std.time.Timer.start();
-        _ = try decoder.decompressFramedParallel(allocator, src, dst);
+        _ = try decoder.decompressFramedParallelThreaded(allocator, src, dst, num_threads);
         const elapsed = timer.read();
         if (elapsed < best_ns) best_ns = elapsed;
         total_ns += elapsed;
@@ -1139,10 +1175,13 @@ fn runBench(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const []con
     const best_mbps: f64 = mb * 1e9 / @as(f64, @floatFromInt(best_ns));
     const mean_mbps: f64 = mb * 1e9 / @as(f64, @floatFromInt(mean_ns));
 
-    try w.print("bench: {s}\n", .{path});
+    try w.print("bench: {s}\n", .{path.?});
     try w.print("  src bytes:       {d}\n", .{src.len});
     try w.print("  decompressed:    {d} ({d:.2} MB)\n", .{ content_size, mb });
     try w.print("  runs:            {d} (plus 1 warm-up)\n", .{runs});
+    if (num_threads > 0) {
+        try w.print("  threads:         {d}\n", .{num_threads});
+    }
     try w.print("  best:            {d:.3} ms  ({d:.0} MB/s)\n", .{
         @as(f64, @floatFromInt(best_ns)) / 1_000_000.0,
         best_mbps,
@@ -1172,9 +1211,10 @@ fn printUsage(w: *std.Io.Writer) !void {
         \\  version              Print the version and toolchain info
         \\  help                 Print this message
         \\  info       <file>    Dump SLZ1 frame header + block list
-        \\  decompress <in> <out>      Decompress an SLZ1 file
-        \\  compress [-l N] <in> <out> Compress a file to SLZ1 (N=1 or 2)
-        \\  bench      <file> [runs]   Benchmark decompress on a preloaded file
+        \\  decompress [-t N] <in> <out>      Decompress an SLZ1 file
+        \\  compress [-l N] [-t N] <in> <out> Compress a file to SLZ1
+        \\  bench  [-r N] [-t N] <file.slz>   Benchmark decompress
+        \\  benchc [-l N] [-r N] [-t N] <raw> Benchmark compress+decompress
         \\
     );
 }
@@ -1272,16 +1312,38 @@ fn runCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const []
 }
 
 fn runDecompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const []const u8) !void {
-    if (args.len != 2) {
-        try w.writeAll("usage: streamlz decompress <in.slz> <out>\n");
+    var num_threads: u32 = 0; // 0 = auto
+    var in_path: ?[]const u8 = null;
+    var out_path: ?[]const u8 = null;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (std.mem.eql(u8, a, "-t") and i + 1 < args.len) {
+            num_threads = std.fmt.parseInt(u32, args[i + 1], 10) catch {
+                try w.print("error: invalid thread count '{s}'\n", .{args[i + 1]});
+                try w.flush();
+                std.process.exit(2);
+            };
+            i += 1;
+        } else if (in_path == null) {
+            in_path = a;
+        } else if (out_path == null) {
+            out_path = a;
+        } else {
+            try w.writeAll("usage: streamlz decompress [-t N] <in.slz> <out>\n");
+            try w.flush();
+            std.process.exit(2);
+        }
+    }
+    if (in_path == null or out_path == null) {
+        try w.writeAll("usage: streamlz decompress [-t N] <in.slz> <out>\n");
         try w.flush();
         std.process.exit(2);
     }
-    const in_path = args[0];
-    const out_path = args[1];
 
-    const in_file = std.fs.cwd().openFile(in_path, .{}) catch |err| {
-        try w.print("error: cannot open '{s}': {s}\n", .{ in_path, @errorName(err) });
+    const in_file = std.fs.cwd().openFile(in_path.?, .{}) catch |err| {
+        try w.print("error: cannot open '{s}': {s}\n", .{ in_path.?, @errorName(err) });
         try w.flush();
         std.process.exit(1);
     };
@@ -1289,7 +1351,7 @@ fn runDecompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const 
 
     const max_bytes: usize = 1 << 31; // 2 GiB hard cap for phase 3a
     const src = in_file.readToEndAlloc(allocator, max_bytes) catch |err| {
-        try w.print("error: cannot read '{s}': {s}\n", .{ in_path, @errorName(err) });
+        try w.print("error: cannot read '{s}': {s}\n", .{ in_path.?, @errorName(err) });
         try w.flush();
         std.process.exit(1);
     };
@@ -1314,26 +1376,26 @@ fn runDecompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const 
     };
     defer allocator.free(dst);
 
-    const written = decoder.decompressFramed(src, dst) catch |err| {
+    const written = decoder.decompressFramedParallelThreaded(allocator, src, dst, num_threads) catch |err| {
         try w.print("error: decompression failed: {s}\n", .{@errorName(err)});
         try w.flush();
         std.process.exit(1);
     };
 
-    const out_file = std.fs.cwd().createFile(out_path, .{}) catch |err| {
-        try w.print("error: cannot create '{s}': {s}\n", .{ out_path, @errorName(err) });
+    const out_file = std.fs.cwd().createFile(out_path.?, .{}) catch |err| {
+        try w.print("error: cannot create '{s}': {s}\n", .{ out_path.?, @errorName(err) });
         try w.flush();
         std.process.exit(1);
     };
     defer out_file.close();
     out_file.writeAll(dst[0..written]) catch |err| {
-        try w.print("error: cannot write '{s}': {s}\n", .{ out_path, @errorName(err) });
+        try w.print("error: cannot write '{s}': {s}\n", .{ out_path.?, @errorName(err) });
         try w.flush();
         std.process.exit(1);
     };
 
     try w.print("decompressed {d} → {d} bytes  ({s} → {s})\n", .{
-        src.len, written, in_path, out_path,
+        src.len, written, in_path.?, out_path.?,
     });
 }
 
@@ -1417,7 +1479,7 @@ test {
     _ = @import("format/frame_format.zig");
     _ = @import("format/streamlz_constants.zig");
     _ = @import("format/block_header.zig");
-    _ = @import("io/bit_reader.zig");
+    _ = @import("io/BitReader.zig");
     _ = @import("io/bit_writer.zig");
     _ = @import("io/copy_helpers.zig");
     _ = @import("decode/streamlz_decoder.zig");
@@ -1429,7 +1491,7 @@ test {
     _ = @import("decode/tans_decoder.zig");
     _ = @import("decode/decompress_parallel.zig");
     _ = @import("decode/fixture_tests.zig");
-    _ = @import("encode/byte_histogram.zig");
+    _ = @import("encode/ByteHistogram.zig");
     _ = @import("encode/fast_constants.zig");
     _ = @import("encode/tans_encoder.zig");
     _ = @import("encode/offset_encoder.zig");
@@ -1439,7 +1501,7 @@ test {
     _ = @import("encode/text_detector.zig");
     _ = @import("encode/cost_coefficients.zig");
     _ = @import("encode/fast_cost_model.zig");
-    _ = @import("encode/fast_stream_writer.zig");
+    _ = @import("encode/FastStreamWriter.zig");
     _ = @import("encode/fast_token_writer.zig");
     _ = @import("encode/fast_lz_parser.zig");
     _ = @import("encode/match_eval.zig");

@@ -10,7 +10,7 @@
 
 const std = @import("std");
 const lz_constants = @import("../format/streamlz_constants.zig");
-const hist_mod = @import("byte_histogram.zig");
+const hist_mod = @import("ByteHistogram.zig");
 const entropy_enc = @import("entropy_encoder.zig");
 const offset_enc = @import("offset_encoder.zig");
 const cost_coeffs = @import("cost_coefficients.zig");

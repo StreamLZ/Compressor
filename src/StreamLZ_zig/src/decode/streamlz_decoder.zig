@@ -36,7 +36,7 @@ pub const DecompressError = error{
 /// of bytes written to `dst`. `dst.len` must be at least `content_size + safe_space`
 /// bytes when the frame declares a content size.
 pub fn decompressFramed(src: []const u8, dst: []u8) DecompressError!usize {
-    return decompressFramedInner(null, src, dst);
+    return decompressFramedInner(null, src, dst, 0);
 }
 
 /// Parallel variant of `decompressFramed`. Uses `allocator` to spawn
@@ -47,7 +47,18 @@ pub fn decompressFramedParallel(
     src: []const u8,
     dst: []u8,
 ) DecompressError!usize {
-    return decompressFramedInner(allocator, src, dst);
+    return decompressFramedInner(allocator, src, dst, 0);
+}
+
+/// Like `decompressFramedParallel` but caps the worker count to
+/// `max_threads`. Pass 0 for auto (same as `decompressFramedParallel`).
+pub fn decompressFramedParallelThreaded(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+    dst: []u8,
+    max_threads: usize,
+) DecompressError!usize {
+    return decompressFramedInner(allocator, src, dst, max_threads);
 }
 
 /// Reusable decompression context that keeps a thread pool alive across
@@ -57,11 +68,21 @@ pub fn decompressFramedParallel(
 pub const DecompressContext = struct {
     allocator: std.mem.Allocator,
     pool: LazyPool,
+    max_threads: usize,
 
     pub fn init(allocator: std.mem.Allocator) DecompressContext {
         return .{
             .allocator = allocator,
             .pool = LazyPool.init(allocator),
+            .max_threads = 0,
+        };
+    }
+
+    pub fn initThreaded(allocator: std.mem.Allocator, max_threads: usize) DecompressContext {
+        return .{
+            .allocator = allocator,
+            .pool = LazyPool.init(allocator),
+            .max_threads = max_threads,
         };
     }
 
@@ -72,7 +93,7 @@ pub const DecompressContext = struct {
         while (src_pos < src.len) {
             const piece_src = src[src_pos..];
             const piece_dst = dst[dst_off..];
-            const pair = try decompressOneFrame(self.allocator, &self.pool, piece_src, piece_dst);
+            const pair = try decompressOneFrame(self.allocator, &self.pool, piece_src, piece_dst, self.max_threads);
             src_pos += pair.src_consumed;
             dst_off += pair.dst_written;
             if (pair.src_consumed == 0) break;
@@ -120,6 +141,7 @@ fn decompressFramedInner(
     allocator_opt: ?std.mem.Allocator,
     src: []const u8,
     dst: []u8,
+    max_threads: usize,
 ) DecompressError!usize {
     if (src.len == 0) return 0;
 
@@ -138,7 +160,7 @@ fn decompressFramedInner(
     while (src_pos < src.len) {
         const piece_src = src[src_pos..];
         const piece_dst = dst[dst_off..];
-        const pair = try decompressOneFrame(allocator_opt, &lazy_pool, piece_src, piece_dst);
+        const pair = try decompressOneFrame(allocator_opt, &lazy_pool, piece_src, piece_dst, max_threads);
         src_pos += pair.src_consumed;
         dst_off += pair.dst_written;
         if (pair.src_consumed == 0) break;
@@ -153,6 +175,7 @@ fn decompressOneFrame(
     lazy_pool: *LazyPool,
     src: []const u8,
     dst: []u8,
+    max_threads: usize,
 ) DecompressError!FrameResult {
     if (src.len == 0) return .{ .src_consumed = 0, .dst_written = 0 };
 
@@ -267,6 +290,7 @@ fn decompressOneFrame(
                             dst,
                             &dst_off,
                             block_hdr.decompressed_size,
+                            max_threads,
                         );
                         dispatched_parallel = true;
                     } else if (ph.self_contained and has_many_chunks) {
@@ -278,6 +302,7 @@ fn decompressOneFrame(
                             &dst_off,
                             block_hdr.decompressed_size,
                             hdr.sc_group_size,
+                            max_threads,
                         );
                         dispatched_parallel = true;
                     } else if (ph.decoder_type == .high and has_many_chunks) {
@@ -288,6 +313,7 @@ fn decompressOneFrame(
                             dst,
                             &dst_off,
                             block_hdr.decompressed_size,
+                            max_threads,
                         );
                         if (ok) dispatched_parallel = true;
                     }

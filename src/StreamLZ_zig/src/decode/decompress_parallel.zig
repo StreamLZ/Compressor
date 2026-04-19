@@ -308,6 +308,7 @@ pub fn decompressCoreParallel(
     dst_off_inout: *usize,
     decompressed_size: usize,
     sc_group_size: u8,
+    max_threads: usize,
 ) DecodeError!void {
     // Pre-scan to count chunks and compute prefix size. The pre-scan
     // walks headers only and doesn't read into the tail prefix region.
@@ -334,7 +335,13 @@ pub fn decompressCoreParallel(
     // eventually pick different sizes without a format bump.
     const group_size: usize = sc_group_size;
     const num_groups = (num_chunks + group_size - 1) / group_size;
-    const cpu_count_raw: usize = std.Thread.getCpuCount() catch 1;
+    var cpu_count_raw: usize = if (max_threads > 0) max_threads else std.Thread.getCpuCount() catch 1;
+    if (max_threads == 0) {
+        if (std.process.getEnvVarOwned(allocator, "SLZ_CORES") catch null) |val| {
+            defer allocator.free(val);
+            cpu_count_raw = std.fmt.parseInt(usize, val, 10) catch cpu_count_raw;
+        }
+    }
     const worker_count: usize = @min(num_groups, @max(@as(usize, 1), cpu_count_raw));
 
     // Per-worker scratch. Sized to scratch_size * 2 (matching the
@@ -587,6 +594,7 @@ pub fn decompressCoreTwoPhase(
     dst: []u8,
     dst_off_inout: *usize,
     decompressed_size: usize,
+    max_threads: usize,
 ) DecodeError!bool {
     // Pre-scan all chunks (no tail-prefix for non-SC).
     var scan = try preScanBlock(allocator, block_src, decompressed_size);
@@ -602,7 +610,13 @@ pub fn decompressCoreTwoPhase(
     const dst_start_off = dst_off_inout.*;
     if (dst_start_off + decompressed_size + 64 > dst.len) return error.OutputTooSmall;
 
-    const cpu_count_raw: usize = std.Thread.getCpuCount() catch 1;
+    var cpu_count_raw: usize = if (max_threads > 0) max_threads else std.Thread.getCpuCount() catch 1;
+    if (max_threads == 0) {
+        if (std.process.getEnvVarOwned(allocator, "SLZ_CORES") catch null) |val| {
+            defer allocator.free(val);
+            cpu_count_raw = std.fmt.parseInt(usize, val, 10) catch cpu_count_raw;
+        }
+    }
     const batch_size: usize = @max(@as(usize, 1), cpu_count_raw);
     // Per-chunk scratch: 2 sub-chunks, each up to `scratch_size` bytes.
     // Tested bumping this to fit the worst-case token array (1 MB) but
@@ -830,6 +844,7 @@ pub fn decompressFastL14Parallel(
     dst: []u8,
     dst_off_inout: *usize,
     decompressed_size: usize,
+    max_threads: usize,
 ) DecodeError!void {
     // ── Pre-scan chunks ──────────────────────────────────────────────
     var scan = try preScanBlock(allocator, block_src, decompressed_size);
@@ -847,10 +862,12 @@ pub fn decompressFastL14Parallel(
 
     // ── Worker setup ─────────────────────────────────────────────────
     // Slice size aligned to 16 chunks (matching sidecar boundaries).
-    var cpu_count_raw: usize = std.Thread.getCpuCount() catch 1;
-    if (std.process.getEnvVarOwned(allocator, "SLZ_CORES") catch null) |val| {
-        defer allocator.free(val);
-        cpu_count_raw = std.fmt.parseInt(usize, val, 10) catch cpu_count_raw;
+    var cpu_count_raw: usize = if (max_threads > 0) max_threads else std.Thread.getCpuCount() catch 1;
+    if (max_threads == 0) {
+        if (std.process.getEnvVarOwned(allocator, "SLZ_CORES") catch null) |val| {
+            defer allocator.free(val);
+            cpu_count_raw = std.fmt.parseInt(usize, val, 10) catch cpu_count_raw;
+        }
     }
     const max_workers: usize = @min(24, @min(num_chunks, cpu_count_raw));
     const aligned_slice: usize = blk: {

@@ -21,11 +21,11 @@ const std = @import("std");
 const fast_constants = @import("fast_constants.zig");
 const FastMatchHasher = @import("fast_match_hasher.zig").FastMatchHasher;
 const match_hasher = @import("match_hasher.zig");
-const writer_mod = @import("fast_stream_writer.zig");
+const writer_mod = @import("FastStreamWriter.zig");
 const parser = @import("fast_lz_parser.zig");
 const token_writer = @import("fast_token_writer.zig");
 const entropy_enc = @import("entropy_encoder.zig");
-const byte_hist = @import("byte_histogram.zig");
+const byte_hist = @import("ByteHistogram.zig");
 const cost_model = @import("fast_cost_model.zig");
 
 const MatchHasher2 = match_hasher.MatchHasher2;

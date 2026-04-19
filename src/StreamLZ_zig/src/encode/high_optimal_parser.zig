@@ -29,7 +29,7 @@ const high_types = @import("high_types.zig");
 const high_matcher = @import("high_matcher.zig");
 const high_cost_model = @import("high_cost_model.zig");
 const high_encoder = @import("high_encoder.zig");
-const hist_mod = @import("byte_histogram.zig");
+const hist_mod = @import("ByteHistogram.zig");
 
 const LengthAndOffset = mls_mod.LengthAndOffset;
 const ManagedMatchLenStorage = mls_mod.ManagedMatchLenStorage;

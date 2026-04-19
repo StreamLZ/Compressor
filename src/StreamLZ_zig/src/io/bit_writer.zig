@@ -172,7 +172,7 @@ pub const BitWriter32Backward = struct {
 // ────────────────────────────────────────────────────────────
 
 const testing = std.testing;
-const BitReader = @import("bit_reader.zig").BitReader;
+const BitReader = @import("BitReader.zig").BitReader;
 
 test "BitWriter64Forward writes big-endian bytes readable by BitReader.refill" {
     // Write three 8-bit values that, viewed as a forward MSB-first stream,

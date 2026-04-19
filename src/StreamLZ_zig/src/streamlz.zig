@@ -11,6 +11,7 @@ pub const CompressOptions = @import("encode/streamlz_encoder.zig").CompressOptio
 
 pub const decompressFramed = @import("decode/streamlz_decoder.zig").decompressFramed;
 pub const decompressFramedParallel = @import("decode/streamlz_decoder.zig").decompressFramedParallel;
+pub const decompressFramedParallelThreaded = @import("decode/streamlz_decoder.zig").decompressFramedParallelThreaded;
 pub const DecompressContext = @import("decode/streamlz_decoder.zig").DecompressContext;
 pub const DecompressError = @import("decode/streamlz_decoder.zig").DecompressError;
 

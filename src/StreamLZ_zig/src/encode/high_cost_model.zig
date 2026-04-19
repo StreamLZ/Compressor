@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const lz_constants = @import("../format/streamlz_constants.zig");
-const hist_mod = @import("byte_histogram.zig");
+const hist_mod = @import("ByteHistogram.zig");
 const high_types = @import("high_types.zig");
 const offset_encoder = @import("offset_encoder.zig");
 

@@ -7,7 +7,7 @@
 
 const std = @import("std");
 const lz_constants = @import("../format/streamlz_constants.zig");
-const hist_mod = @import("byte_histogram.zig");
+const hist_mod = @import("ByteHistogram.zig");
 
 const ByteHistogram = hist_mod.ByteHistogram;
 
