@@ -1105,6 +1105,35 @@ The match can read from the literal copy's overshoot region. Any
 attempt to split them across phases must reproduce the exact same
 write pattern, including overshoot.
 
+### What also failed: depth-0 intra-slice parallel execution
+
+**Approach**: Use the cross_chunk_analyzer's transitive depth logic to
+classify each token as depth-0 (all match sources within the same
+slice, no transitive cross-slice dependency) or depth-1+ (depends on
+cross-slice data). Execute depth-0 tokens during parallel phase 1;
+only depth-1+ tokens need serial phase 2.
+
+**Results** (enwik8 100 MB, L9, Type 1 tokens only):
+
+| Slice Size | Depth-0 (safe) | Depth-1+ (serial) | Workers |
+|-----------|---------------|-------------------|---------|
+| 4 MB (16 chunks) | 5.0% | 95.0% | ~24 |
+| 16 MB (64 chunks) | 18.0% | 82.0% | ~6 |
+| 64 MB (256 chunks) | 66.9% | 33.1% | ~1-2 |
+
+**Why**: The optimal parser's 64 MB dictionary creates deep transitive
+dependency chains that span the entire output. A match in chunk 400
+reads from chunk 350, which reads from chunk 300, which reads from
+chunk 250... Each hop is within the 64 MB window, but the chain
+reaches back across many slices. Even at 64 MB slices (matching the
+dictionary size), 33% of tokens are still transitively cross-slice —
+and at that size you only have 1-2 workers so parallelism is moot.
+
+**Conclusion**: Any decoder-only parallelism strategy for L9-L11 is
+defeated by the 64 MB dictionary's transitive chains. The only path
+to parallel L9-L11 decode is constraining the encoder (SC grouping,
+which is L6-L8), accepting the ratio cost.
+
 ### Remaining L9-L11 parallelism strategies (not yet tried)
 
 1. **SC grouping at L9-L11**: Use `self_contained = true` to forbid
@@ -1112,11 +1141,7 @@ write pattern, including overshoot.
    Already implemented as L6-L8 — would just need enabling at L9-L11.
    Cost: ratio regression from constraining the dictionary window.
 
-2. **Larger slices**: Instead of 16-chunk (4 MB) slices, use 64- or
-   128-chunk (16-32 MB) slices. Fewer cross-slice references = smaller
-   sidecar. But fewer parallel workers = less speedup.
-
-3. **Hybrid approach**: Use SC grouping within the existing format but
+2. **Hybrid approach**: Use SC grouping within the existing format but
    with larger group sizes (e.g., 16 chunks = 4 MB per group instead
    of 4 chunks = 1 MB). Already works with the existing decoder.
    Trades ratio for parallelism at a user-chosen granularity.
