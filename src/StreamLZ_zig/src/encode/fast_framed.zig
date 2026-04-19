@@ -576,3 +576,37 @@ pub fn compressFramedOne(
 
     return pos;
 }
+
+// ────────────────────────────────────────────────────────────
+//  Tests
+// ────────────────────────────────────────────────────────────
+
+test "compressFramedOne: empty input roundtrip" {
+    const allocator = std.testing.allocator;
+    var dst: [256]u8 = undefined;
+    const n = try compressFramedOne(allocator, &.{}, &dst, .{ .level = 1 });
+    try std.testing.expect(n > 0);
+    try std.testing.expect(n < 64);
+    const decoder = @import("../decode/streamlz_decoder.zig");
+    var dec_buf: [64]u8 = undefined;
+    const dec_n = try decoder.decompressFramed(dst[0..n], &dec_buf);
+    try std.testing.expectEqual(@as(usize, 0), dec_n);
+}
+
+test "compressFramedOne: all-equal bytes compresses small" {
+    const allocator = std.testing.allocator;
+    const src = try allocator.alloc(u8, 4096);
+    defer allocator.free(src);
+    @memset(src, 0xAA);
+    const bound = compressBound(src.len);
+    const dst = try allocator.alloc(u8, bound);
+    defer allocator.free(dst);
+    const n = try compressFramedOne(allocator, src, dst, .{ .level = 1 });
+    try std.testing.expect(n < 200);
+    const decoder = @import("../decode/streamlz_decoder.zig");
+    const dec = try allocator.alloc(u8, src.len + 64);
+    defer allocator.free(dec);
+    const dec_n = try decoder.decompressFramed(dst[0..n], dec);
+    try std.testing.expectEqual(src.len, dec_n);
+    try std.testing.expectEqualSlices(u8, src, dec[0..dec_n]);
+}

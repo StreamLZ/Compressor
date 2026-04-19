@@ -686,3 +686,61 @@ pub fn compressOneHighBlock(
 
     return local_pos;
 }
+
+// ────────────────────────────────────────────────────────────
+//  Tests
+// ────────────────────────────────────────────────────────────
+
+test "mapHighLevel L6" {
+    const m = mapHighLevel(6);
+    try std.testing.expectEqual(@as(i32, 5), m.codec_level);
+    try std.testing.expect(m.self_contained);
+    try std.testing.expect(!m.use_bt4);
+}
+
+test "mapHighLevel L7" {
+    const m = mapHighLevel(7);
+    try std.testing.expectEqual(@as(i32, 7), m.codec_level);
+    try std.testing.expect(m.self_contained);
+    try std.testing.expect(!m.use_bt4);
+}
+
+test "mapHighLevel L8" {
+    const m = mapHighLevel(8);
+    try std.testing.expectEqual(@as(i32, 9), m.codec_level);
+    try std.testing.expect(m.self_contained);
+    try std.testing.expect(m.use_bt4);
+}
+
+test "mapHighLevel L9" {
+    const m = mapHighLevel(9);
+    try std.testing.expectEqual(@as(i32, 5), m.codec_level);
+    try std.testing.expect(!m.self_contained);
+    try std.testing.expect(!m.use_bt4);
+}
+
+test "mapHighLevel L10" {
+    const m = mapHighLevel(10);
+    try std.testing.expectEqual(@as(i32, 7), m.codec_level);
+    try std.testing.expect(!m.self_contained);
+    try std.testing.expect(!m.use_bt4);
+}
+
+test "mapHighLevel L11" {
+    const m = mapHighLevel(11);
+    try std.testing.expectEqual(@as(i32, 9), m.codec_level);
+    try std.testing.expect(!m.self_contained);
+    try std.testing.expect(m.use_bt4);
+}
+
+test "compressFramedHigh: empty input roundtrip" {
+    const allocator = std.testing.allocator;
+    var dst: [256]u8 = undefined;
+    const n = try compressFramedHigh(allocator, &.{}, &dst, .{ .level = 9 });
+    try std.testing.expect(n > 0);
+    try std.testing.expect(n < 64);
+    const decoder = @import("../decode/streamlz_decoder.zig");
+    var dec_buf: [64]u8 = undefined;
+    const dec_n = try decoder.decompressFramed(dst[0..n], &dec_buf);
+    try std.testing.expectEqual(@as(usize, 0), dec_n);
+}
