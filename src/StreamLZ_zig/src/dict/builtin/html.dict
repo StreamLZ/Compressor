@@ -1,328 +1,137 @@
-
-
-
-
-
-
-
-
-<!DOCTYPE html>
-<html
-  lang="en"
-  data-color-mode="dark" data-dark-theme="dark"
-  data-color-mode="light" data-light-theme="light" data-dark-theme="dark"
-  data-a11y-animated-images="system" data-a11y-link-underlines="true"
-  
-  >
-
-
-
-
-  <head>
-    <meta charset="utf-8">
-  <link rel="dns-prefetch" href="https://github.githubassets.com">
-  <link rel="dns-prefetch" href="https://avatars.githubusercontent.com">
-  <link rel="dns-prefetch" href="https://github-cloud.s3.amazonaws.com">
-  <link rel="dns-prefetch" href="https://user-images.githubusercontent.com/">
-  <link rel="preconnect" href="https://github.githubassets.com" crossorigin>
-  <link rel="preconnect" href="https://avatars.githubusercontent.com">
-
-  
-    <link crossorigin="anonymous" rel="preload" as="script" href="https://github.githubassets.com/assets/global-banner-disable-8a300af6d815087d.js" />
-
-  <link rel="preload" href="https://github.githubassets.com/assets/mona-sans-14595085164a.woff2" as="font" type="font/woff2" crossorigin>
-
-
-  <link crossorigin="anonymous" media="all" rel="stylesheet" href="https://github.githubassets.com/assets/light-8f714f203754d3e3.css" /><link crossorigin="anonymous" media="all" rel="stylesheet" href="https://github.githubassets.com/assets/light_high_contrast-852c22d357937740.css" /><link crossorigin="anonymous" media="all" rel="stylesheet" href="https://github.githubassets.com/assets/dark-b5a0f9dbeed37e9c.css" /><link crossorigin="anonymous" media="all" rel="stylesheet" href="https://github.githubassets.com/assets/dark_high_contrast-b1b5000c4cba6bc9.css" /><link data-color-theme="light" crossorigin="anonymous" media="all" rel="stylesheet" data-href="https://github.githubassets.com/assets/light-8f714f203754d3e3.css" /><link data-color-theme="light_high_contrast" crossorigin="anonymous" media="all" rel="stylesheet" data-href="https://github.githubassets.com/assets/light_high_contrast-852c22d357937740.css" /><link data-color-theme="light_colorblind" crossorigin="anonymous" media="all" rel="stylesheet" data-href="https://github.githubassets.com/assets/light_colorblind-cd9e31fed96ffe09.css" /><link data-color-theme="light_colorblind_high_contrast" crossorigin="anonymous" media="all" rel="stylesheet" data-href="https://github.githubassets.com/assets/light_colorblind_high_contrast-d8387aac10e96d7c.css" /><link data-color-theme="light_tritanopia" crossorigin="anonymous" media="all" rel="stylesheet" data-href="https://github.githubassets.com/assets/light_tritanopia-de5a42a9379cb835.css" /><link data-color-theme="light_tritanopia_high_contrast" crossorigin="anonymous" media="all" rel="stylesheet" data-href="https://github.githubassets.com/assets/light_tritanopia_high_contrast-b80844282a9e6620.css" /><link data-color-theme="dark" crossorigin="anonymous" media="all" rel="stylesheet" data-href="https://github.githubassets.com/assets/dark-b5a0f9dbeed37e9c.css" /><link data-color-theme="dark_high_contrast" crossorigin="anonymous" media="all" rel="stylesheet" data-href="https://github.githubassets.com/assets/dark_high_contrast-b1b5000c4cba6bc9.css" /><link data-color-theme="dark_colorblind" crossorigin="anonymous" media="all" rel="stylesheet" data-href="https://github.githubassets.com/assets/dark_colorblind-85d7bc4072a238f0.css" /><link data-color-theme="dark_colorblind_high_contrast" crossorigin="anonymous" media="all" rel="stylesheet" data-href="https://github.githubassets.com/assets/dark_colorblind_high_contrast-f4838f9524519a33.css" /><link data-color-theme="dark_tritanopia" crossorigin="anonymous" media="all" rel="stylesheet" data-href="https://github.githubassets.com/assets/dark_tritanopia-23bce8ff4d024f04.css" /><link data-color-theme="dark_tritanopia_high_contrast" crossorigin="anonymous" media="all" rel="stylesheet" data-href="https://github.githubassets.com/assets/dark_tritanopia_high_contrast-e088d4bc2d56f7d6.css" /><link data-color-theme="dark_dimmed" crossorigin="anonymous" media="all" rel="stylesheet" data-href="https://github.githubassets.com/assets/dark_dimmed-6b102382a27a656f.css" /><link data-color-theme="dark_dimmed_high_contrast" crossorigin="anonymous" media="all" rel="stylesheet" data-href="https://github.githubassets.com/assets/dark_dimmed_high_contrast-1d3e6d98532ab032.css" />
-
-  <style type="text/css">
-    :root {
-      --tab-size-preference: 4;
-    }
-
-    pre, code {
-      tab-size: var(--tab-size-preference);
-    }
-  </style>
-
-    <link crossorigin="anonymous" media="all" rel="stylesheet" href="https://github.githubassets.com/assets/primer-primitives-26e89bb5a0c37ae9.css" />
-    <link crossorigin="anonymous" media="all" rel="stylesheet" href="https://github.githubassets.com/assets/primer-71a44d5be3f782c5.css" />
-    <link crossorigin="anonymous" media="all" rel="stylesheet" href="https://github.githubassets.com/assets/global-95af332f763e4560.css" />
-    <link crossorigin="anonymous" media="all" rel="stylesheet" href="https://github.githubassets.com/assets/github-8ecc5798f0584cac.css" />
-  <link crossorigin="anonymous" media="all" rel="stylesheet" href="https://github.githubassets.com/assets/site-f0f3cf01d3270d68.css" />
-<link crossorigin="anonymous" media="all" rel="stylesheet" href="https://github.githubassets.com/assets/landing-pages-a6b5c30fb0b32f71.css" />
-<link crossorigin="anonymous" media="all" rel="stylesheet" href="https://github.githubassets.com/assets/home-096932a4d38fa688.css" />
-
-  
-
-  <script type="application/json" id="client-env">{"locale":"en","featureFlags":["a11y_status_checks_ruleset","action_yml_language_service","actions_custom_images_public_preview_visibility","actions_custom_images_storage_billing_ui_visibility","actions_image_version_event","actions_workflow_language_service","alternate_user_config_repo","api_insights_show_missing_data_banner","arianotify_comprehensive_migration","batch_suggested_changes","codespaces_prebuild_region_target_update","coding_agent_model_selection","coding_agent_model_selection_all_skus","copilot_3p_agent_hovercards","copilot_agent_sessions_alive_updates","copilot_agent_snippy","copilot_agent_task_list_v2","copilot_agent_task_submit_with_modifier","copilot_agent_tasks_btn_repo","copilot_api_agentic_issue_marshal_yaml","copilot_ask_mode_dropdown","copilot_chat_attach_multiple_images","copilot_chat_clear_model_selection_for_default_change","copilot_chat_enable_tool_call_logs","copilot_chat_file_redirect","copilot_chat_input_commands","copilot_chat_opening_thread_switch","copilot_chat_reduce_quota_checks","copilot_chat_repository_picker","copilot_chat_search_bar_redirect","copilot_chat_selection_attachments","copilot_chat_vision_in_claude","copilot_chat_vision_preview_gate","copilot_coding_agent_task_response","copilot_custom_copilots","copilot_custom_copilots_feature_preview","copilot_duplicate_thread","copilot_extensions_hide_in_dotcom_chat","copilot_extensions_removal_on_marketplace","copilot_features_sql_server_logo","copilot_features_zed_logo","copilot_file_block_ref_matching","copilot_ftp_hyperspace_upgrade_prompt","copilot_icebreakers_experiment_dashboard","copilot_icebreakers_experiment_hyperspace","copilot_immersive_embedded","copilot_immersive_job_result_preview","copilot_immersive_layout_routes","copilot_immersive_structured_model_picker","copilot_immersive_task_hyperlinking","copilot_immersive_task_within_chat_thread","copilot_mc_cli_resume_any_users_task","copilot_mission_control_use_task_name","copilot_org_policy_page_focus_mode","copilot_redirect_header_button_to_agents","copilot_share_active_subthread","copilot_spaces_ga","copilot_spaces_individual_policies_ga","copilot_spaces_pagination","copilot_spark_empty_state","copilot_spark_handle_nil_friendly_name","copilot_stable_conversation_view","copilot_swe_agent_hide_model_picker_if_only_auto","copilot_swe_agent_use_subagents","copilot_unconfigured_is_inherited","custom_instructions_file_references","custom_properties_consolidate_default_value_input","dashboard_lists_max_age_filter","dashboard_universe_2025_feedback_dialog","enterprise_ai_controls","failbot_report_error_react_apps_on_page","flex_cta_groups_mvp","global_nav_react","hyperspace_2025_logged_out_batch_1","hyperspace_2025_logged_out_batch_2","initial_per_page_pagination_updates","issue_fields_global_search","issue_fields_report_usage","issue_fields_timeline_events","issues_cca_assign_actor_with_agent","issues_dashboard_inp_optimization","issues_expanded_file_types","issues_index_semantic_search","issues_lazy_load_comment_box_suggestions","issues_react_auto_retry_on_error","issues_react_bots_timeline_pagination","issues_react_chrome_container_query_fix","issues_react_defer_hot_cache_preheating","issues_react_deferred_list_data","issues_react_hot_cache","issues_react_low_quality_comment_warning","issues_react_prohibit_title_fallback","issues_react_safari_scroll_preservation","issues_react_use_turbo_for_cross_repo_navigation","landing_pages_ninetailed","landing_pages_web_vitals_tracking","lifecycle_label_name_updates","marketing_pages_search_explore_provider","memex_default_issue_create_repository","memex_display_button_config_menu","memex_grouped_by_edit_route","memex_live_update_hovercard","memex_mwl_filter_field_delimiter","mission_control_retry_on_401","mission_control_use_body_html","oauth_authorize_clickjacking_protection","open_agent_session_in_vscode_insiders","open_agent_session_in_vscode_stable","primer_brand_next","primer_react_css_has_selector_perf","projects_assignee_max_limit","prs_conversations_react","react_quality_profiling","repos_allow_finder_filters_rollout","repos_relevance_page","ruleset_deletion_confirmation","sample_network_conn_type","session_logs_ungroup_reasoning_text","site_calculator_actions_2025","site_features_copilot_universe","site_homepage_collaborate_video","spark_prompt_secret_scanning","spark_server_connection_status","suppress_automated_browser_vitals","suppress_non_representative_vitals","viewscreen_sandbox","webp_support","workbench_store_readonly"],"copilotApiOverrideUrl":"https://api.githubcopilot.com"}</script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/high-contrast-cookie-2c87d5c76bc5d1e0.js"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/wp-runtime-826e1f078bede7e7.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/19762-203ba93c6a6f3066.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/49863-8861e351482cb073.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/64220-5924ae3b3c473575.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/environment-2cd02065315011b3.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/runtime-helpers-7744803ecc19870c.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/2966-25cb8e34b31306a4.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/96232-fb82336d69225835.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/41013-ac21ea90ed8590af.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/51210-185739338ae8119b.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/24387-6b7f5e596897eded.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/81683-740d112caee5baa9.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/46740-84bdd4782a486b80.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/81751-750bd09cbdd426df.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/github-elements-6065e846b60ac1a6.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/element-registry-559588089abef811.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/react-core-ac5286c081aff97d.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/react-lib-e74a1db7c21f7e74.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/7053-20b4a6914bbde21f.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/79039-9ce5da88e09eef89.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/61110-212553c409076913.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/2887-0e9a84f5dc250853.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/26533-6b8040883d16f6ae.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/62249-2895213a788d973c.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/2694-372ce035e93800e0.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/56093-7e45e1dafab59419.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/28360-dc31a60141b9384f.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/65316-c849c86dc66fef72.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/22960-fce2676ce9889137.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/51683-f6844a8acd415e3b.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/76545-cf3621a1f2f36d8d.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/behaviors-dfb8b6902db23a9e.js" defer="defer"></script>
-<link crossorigin="anonymous" media="all" rel="stylesheet" href="https://github.githubassets.com/assets/react-core.10393900597d030e.module.css" />
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/38302-277be92deeed3c63.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/notifications-global-d3e65f4852a526e6.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/43444-89d4ff3b4b1970e3.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/18131-33bac26695a3f496.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/marketing-essentials-62ece28fca3879ee.js" defer="defer"></script>
-  
-  <script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/primer-react-9537ac79f0a3d832.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/octicons-react-39f7eb9c9327cc85.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/78168-dda25026ab7e88b8.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/68751-4d3d1aac1f81a213.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/70641-4c5f6e243c497d10.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/46752-4c55523fe83d3457.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/3690-00b319bff1602f81.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/71236-7c82c9609b2bcb51.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/19628-1447858333ea98d6.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/48761-12fae4ba6721da65.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/82931-bf9f33f363ee0de7.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/16111-364cf74b4896f28d.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/51597-d4c09c3023b70d15.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/9751-e245755b735860a1.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/51672-be19ca8e20b0d5f7.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/62620-310c23598abf6d76.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/20832-b52a70cc6d8f527c.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/80640-7a29ffe3dbf0bc13.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/84957-7f92b92925cb86a8.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/40293-b9d753b73ed07ca5.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/landing-pages-d5321a030d1423a8.js" defer="defer"></script>
-<link crossorigin="anonymous" media="all" rel="stylesheet" href="https://github.githubassets.com/assets/primer-react-css.257816c5781f334a.module.css" />
-<link crossorigin="anonymous" media="all" rel="stylesheet" href="https://github.githubassets.com/assets/landing-pages.500b3685cea9bcb9.module.css" />
-
-
-  <title>GitHub · Change is constant. GitHub keeps you ahead. · GitHub</title>
-
-
-
-  <meta name="route-pattern" content="/" data-turbo-transient>
-  <meta name="route-controller" content="dashboard" data-turbo-transient>
-  <meta name="route-action" content="index" data-turbo-transient>
-  <meta name="fetch-nonce" content="v2:7d113823-6745-fc93-42ba-0698fe9e6f60">
-
-    
-  <meta name="current-catalog-service-hash" content="40dc28bd654b20f337468a532ff456ed5863889cfbb4e982b793597321d48d3f">
-
-
-  <meta name="request-id" content="A387:3612CF:1B2D940:22CBC18:699A9B7B" data-pjax-transient="true"/><meta name="html-safe-nonce" content="ce620aa28077b5a4eaf2d1424c1b87d870372a681b2c77c8649804656137a4b9" data-pjax-transient="true"/><meta name="visitor-payload" content="eyJyZWZlcnJlciI6IiIsInJlcXVlc3RfaWQiOiJBMzg3OjM2MTJDRjoxQjJEOTQwOjIyQ0JDMTg6Njk5QTlCN0IiLCJ2aXNpdG9yX2lkIjoiMjQzNzAzMTM5OTc2NzMxNzM3MSIsInJlZ2lvbl9lZGdlIjoiaWFkIiwicmVnaW9uX3JlbmRlciI6ImlhZCJ9" data-pjax-transient="true"/><meta name="visitor-hmac" content="ffae1d5fee7d474e92e5019b5f4de93bc50c1e116870d1ded9285c01d9aecba1" data-pjax-transient="true"/>
-
-
-
-    <meta name="page-subject" content="GitHub">
-
-  <meta name="github-keyboard-shortcuts" content="dashboards,copilot" data-turbo-transient="true" />
-  
-
-  <meta name="selected-link" value="/" data-turbo-transient>
-  <link rel="assets" href="https://github.githubassets.com/">
-
-    <meta name="google-site-verification" content="Apib7-x98H0j5cPqHWwSMm6dNU4GmODRoqxLiDzdx9I">
-
-<meta name="octolytics-url" content="https://collector.github.com/github/collect" />
-
-<meta name="octolytics-page-type" content="marketing" />
-
-<meta name="octolytics-revenue-play" content="Platform" />
-
-  
-
-  
-
-
-
-
-    <meta name="user-login" content="">
-
-  
-
-    <meta name="viewport" content="width=device-width">
-
-    
-
-      <meta name="description" content="Join the world&#39;s most widely adopted, AI-powered developer platform where millions of developers, businesses, and the largest open source community build software that advances humanity.">
-
-      <link rel="search" type="application/opensearchdescription+xml" href="/opensearch.xml" title="GitHub">
-
-    <link rel="fluid-icon" href="https://github.com/fluidicon.png" title="GitHub">
-    <meta property="fb:app_id" content="1401488693436528">
-    <meta name="apple-itunes-app" content="app-id=1477376905, app-argument=https://github.com/" />
-
-      <meta name="twitter:image" content="https://images.ctfassets.net/8aevphvgewt8/4pe4eOtUJ0ARpZRE4fNekf/f52b1f9c52f059a33170229883731ed0/GH-Homepage-Universe-img.png" /><meta name="twitter:site" content="@github" /><meta name="twitter:card" content="summary_large_image" /><meta name="twitter:title" content="GitHub · Change is constant. GitHub keeps you ahead." /><meta name="twitter:description" content="Join the world&#39;s most widely adopted, AI-powered developer platform where millions of developers, businesses, and the largest open source community build software that advances humanity." />
-  <meta property="og:image" content="https://images.ctfassets.net/8aevphvgewt8/4pe4eOtUJ0ARpZRE4fNekf/f52b1f9c52f059a33170229883731ed0/GH-Homepage-Universe-img.png" /><meta property="og:image:alt" content="Join the world&#39;s most widely adopted, AI-powered developer platform where millions of developers, businesses, and the largest open source community build software that advances humanity." /><meta property="og:site_name" content="GitHub" /><meta property="og:type" content="object" /><meta property="og:title" content="GitHub · Change is constant. GitHub keeps you ahead." /><meta property="og:url" content="https://github.com/" /><meta property="og:description" content="Join the world&#39;s most widely adopted, AI-powered developer platform where millions of developers, businesses, and the largest open source community build software that advances humanity." />
-  
-
-
-
-
-      <meta name="hostname" content="github.com">
-
-
-
-        <meta name="expected-hostname" content="github.com">
-
-
-  <meta http-equiv="x-pjax-version" content="219dcb93b7493255549ed6e4a71ebd44d657aae66348e0274eab28fc025d89a3" data-turbo-track="reload">
-  <meta http-equiv="x-pjax-csp-version" content="13854b94e654841b18d7bbceea8296448cc8c5a1f7884c811da88056a0035ad3" data-turbo-track="reload">
-  <meta http-equiv="x-pjax-css-version" content="20414e98442146cd7c7f78b5f030955d6ce4de6d09dfb1ec55df5bf7ece04854" data-turbo-track="reload">
-  <meta http-equiv="x-pjax-js-version" content="8ea75b9480dd46be2854159b09221afdadf84a27a926d6b4931f617236ba17d9" data-turbo-track="reload">
-
-  <meta name="turbo-cache-control" content="no-preview" data-turbo-transient="">
-
-      <meta name="turbo-cache-control" content="no-cache" data-turbo-transient>
-
-
-  <meta name="is_logged_out_page" content="true">
-
-  <link rel="alternate" hreflang="en-us" href="https://github.com" />
-<link rel="alternate" hreflang="ja" href="https://github.com?locale=ja" />
-<link rel="alternate" hreflang="ko-kr" href="https://github.com?locale=ko-KR" />
-<link rel="alternate" hreflang="pt-br" href="https://github.com?locale=pt-BR" />
-<link rel="alternate" hreflang="es-419" href="https://github.com?locale=es-419" />
-<link rel="alternate" hreflang="x-default" href="https://github.com/" />
-
-
-
-
-      <link rel="canonical" href="https://github.com" data-turbo-transient>
-
-
-    <meta name="turbo-body-classes" content="logged-out env-production page-responsive header-overlay header-overlay-fixed js-header-overlay-fixed">
-  <meta name="disable-turbo" content="true">
-
-
-  <meta name="browser-stats-url" content="https://api.github.com/_private/browser/stats">
-
-  <meta name="browser-errors-url" content="https://api.github.com/_private/browser/errors">
-
-  <meta name="release" content="1e9ddf6952a4b738d6e480c258c7af9917702457">
-  <meta name="ui-target" content="full">
-
-  <link rel="mask-icon" href="https://github.githubassets.com/assets/pinned-octocat-093da3e6fa40.svg" color="#000000">
-  <link rel="alternate icon" class="js-site-favicon" type="image/png" href="https://github.githubassets.com/favicons/favicon.png">
-  <link rel="icon" class="js-site-favicon" type="image/svg+xml" href="https://github.githubassets.com/favicons/favicon.svg" data-base-href="https://github.githubassets.com/favicons/favicon">
-
-<meta name="theme-color" content="#1e2327">
-<meta name="color-scheme" content="light dark" />
-
-
-  <link rel="manifest" href="/manifest.json" crossOrigin="use-credentials">
-
-  </head>
-
-  <body class="logged-out env-production page-responsive header-overlay header-overlay-fixed js-header-overlay-fixed" style="word-wrap: break-word;" >
-    <div data-turbo-body class="logged-out env-production page-responsive header-overlay header-overlay-fixed js-header-overlay-fixed" style="word-wrap: break-word;"  data-turbo="false">
-      <div id="__primerPortalRoot__" role="region" style="z-index: 1000; position: absolute; width: 100%;" data-turbo-permanent></div>
-      
-
-    <div class="position-relative header-wrapper js-header-wrapper ">
-      <a href="#start-of-content" data-skip-target-assigned="false" class="px-2 py-4 color-bg-accent-emphasis color-fg-on-emphasis show-on-focus js-skip-to-content">Skip to content</a>
-
-      <span data-view-component="true" class="progress-pjax-loader Progress position-fixed width-full">
-    <span style="width: 0%;" data-view-component="true" class="Progress-item progress-pjax-loader-bar left-0 top-0 color-bg-accent-emphasis"></span>
-</span>      
-      
-      <link crossorigin="anonymous" media="all" rel="stylesheet" href="https://github.githubassets.com/assets/primer-react-css.257816c5781f334a.module.css" />
-<link crossorigin="anonymous" media="all" rel="stylesheet" href="https://github.githubassets.com/assets/keyboard-shortcuts-dialog.f9d579378b96cc1f.module.css" />
+ght="40" viewBox="0 0 107 40" fih containsincluding the defined by thepublicatio="Help:Introduction to Wikipedia">anyone can edi89.4921 29.015ZM116.277 22.3775V31.9731V32.0452Hهالرياضتحياتيبتوقيتالأولer of Wikibase entities loaded: 0/500
+-->
+<!--hvgewt8/5m9WKL1QJeiDrnxuL9pBux/f7336610c32283d86МоскведругиегородавопросShapur's reign saw the military resurgence of thand__Testimonial-module__Testimonial__quoteMark_r ofreleased inresidentialand some ofking of theeorge">Boy George</a>?</li>
+<li>... that <b><a e Customer Stories: Mercedes Benz","label":{"sysnewsletterpropertiesdefinitionleadershipTechnoloNintendo">Nintendo</a>. He stars in the <i><a hr.module.css" />
 
 <react-partial
-  partial-name="keyboard-shortcuts-dialog"
-  data-ssr="false"
-  data-attempted-ssr="false"
-  data-react-profiling="true"
->
+  partial-namcreationquantity. ISBN 0did not instance-search-utput #mp-banner{background-color:#331a00;border-Spacer-size1012:148px" aria-hidden="true"></divmation about<div id="header">" action="http://<a certainty which king is depicted, but it may be-.381.353-.552a6.507 6.507 0 0 0-4.666 5.5Zm10.1षाआपकेलियेशुरूइसndia. This photograph shows a 4th-century silver40.3509V23.6681H175.876V37.6647H187.045V40.3509Hीशहरअलगकभीनगरपासemotional song from <i>The Legend of Zelda</i>, overlay-fixed js-header-overlay-fixed">
+  <metalementparticipating in theoriginally developedetrd">Stephen Linard</a></b> designed clothes for  0 0 1 1.275.326.749.749 0 0 1-.215.734L9.06 8l3ईदोनोंउपकरणपढ़ेंiv class="hlist wikipedia-languages-langs inlineum___E0iQL Primer_Brand__Statistic-module__Statierentare often usedto ensure thatagreement withcikidata</a></span><br>Free knowledge base</div>"
+  data-color-mode="light" data-light-theme="lt-size:11pxexplanation ofthe concept ofwritten indation">Wikimedia Foundation</a>, a non-profit s.</span></p><span class="sr-only"></span><a clascript><can be foundbecause the has not beenneig unique way to navigate the encyclopedia.</li></-path="/search/custom_scopes" data-delete-customessremains theliterature,is a memberthe populartference_desk" title="Wikipedia:Reference desk">R:&quot;text:github&quot;}">
+        <svg xmlns=�тогокогдапослевсегосайт�portal">Community portal</a></b> – The centralel&quot;:&quot;mcp_registry_link_ecosystem_footevitylife inChapter-shadowNotable</td>
+ returnstays of the year">List of days of the year</a></b-30T13:25:42.622Z","updatedAt":"2026-01-26T23:50atedsocial and politicalthat would otherwiseperpt #mp-tfp tr:first-child td:first-child a.mw-fil__fYDxq"><span>Manage projects and assign tasks اللهالتربيةالروابطالأدبيhed time: 20260222050418
+Cache expiry: 3600
+Re58.2576 146.953 58.2576ZM186.114 69.7443H191.106deredwas developedIndo-Europeanvulnerable toprople="foundationsite:our-work/wikimedia-projects/" 17.0183 3.83593 17.6875 4.66148 17.6875H7.65106ntendedreceived theassumed thatareas of theprima, including policies and technical issues.</li>{&quot;action&quot;:&quot;premium_support&quot;,ore generalinformation used for theindependent teak-word;">Daytona International Speedway</div><-ratio-mobile:43 / 42;--aspect-ratio-desktop:16 f the besteach other.Constantinepeople fromdialetle="Frederick Wiseman">Frederick Wiseman</a></le__TextInput--medium___kJrew CtaFormControl-inpudthe time ofContainer">maintainingChristopherMucemplate:Flatlist
+ 14.72%   42.624      9 Templa84 1.75 1.75v3A1.75 1.75 0 0 1 14.25 16H1.75A1.7toryndicationcurrentlyclassNamecriticismtraditioym" title="Bosnian (bs:)" lang="bs">Bosanski</spth":834,"height":924}},"fileName":"mercado-libre��नसभाफिक्सिंगसुर�assy in Madrid incident">A group broke into the  17.1108H144.906V31.9731H148.374V17.1108ZM163.13ht:bold;&quot; and &quot;depending on the marginChronological summary of the 2026 Winter Olympick__EG3d4" target="_blank" rel="noreferrer"><span�الجديدةالتعليمالأخبارال�but 13 of his 267 games at the team's home courtpath d="M3.75 2h3.5a.75.75 0 0 1 0 1.5h-3.5a.25.исистемарешенияСкачатьпоiki/Zhang_Jingsheng" title="Zhang Jingsheng">Zha"><path d="M7.75 2a.75.75 0 0 1 .75.75V7h4.25a.7tionallypredominantly&nbsp;|&nbsp;&nbsp;</span> t .hlist ol>li{counter-increment:listitem}.mw-paer_Brand__Heading-module__Heading___IVpmp Primerالرسالةالعامكتبهابرامجالey Kong</a></b> is a character created by <a hre/div></li><li><div class="NavDropdown-module__colds thating&quot; valign=topthe Germanoutside of="en" dir="ltr"><style data-mw-deduplicate="Tempo-libre.svg","contentType":"image/svg+xml"}}},{"n =attached to thesuggesting thatin the form of kipedia:Main_Page/Tomorrow
+ 23.30%   67.458    ="GitHub · Change is constant. GitHub keeps youeeducation andinfluenced byreputation as
+<meta nport</a> with the intention of crashing it into 0 0 1-.734-.215ZM11.5 7a4.499 4.499 0 1 0-8.997 k rel="provided thethe story ofcompetitionsenglih trails">rail with trail</a> in the U.S.?</li> 16.1927V3.80729C9.14586 2.98174 8.47662 2.3125 urned outhaving the</span>
+ occasionalbecause iground-color:#270e1a;border-color:#882c43}html.s:"Entry","id":"53ouvUpHYxLpZ1jfrn0fml"}}]}},{"meciation of
+</head>
+<bodylocated on theis referreommons/thumb/2/24/Wikinews-logo.svg/60px-Wikinew</svg></button>
+    </div>
+  </div>
   
-  <script type="application/json" data-target="react-partial.embeddedData">{"props":{"docsUrl":"https://docs.github.com/get-started/accessibility/keyboard-shortcuts"}}</script>
-  <div data-target="react-partial.reactRoot"></div>
-</react-partial>
-
-
-
-
-            
+</divrobots" content="<div id="footer">the United StaPotsdam">SUNY Potsdam</a> basketball coach <b><ath d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6/script>
+/favicon.ico" />operating system" stylecter</a> protecting his stash of bananas. Donkeyutton--size-medium___EyCyw Primer_Brand__ActionModuced insufficient todescription">short storiescolor:#ddcef2}.mw-parser-output #mp-lower .mp-h2gin"
+            class="HeaderMenu-link HeaderMdition,description+conversationcontact withis gele="Norwegian Nynorsk (nn:)" lang="nn">Norsk nyna_checks","copilot_chat_repository_picker","copieobservationmaintenanceencountered<h2 class="mordonesian (id:)" lang="id">Bahasa Indonesia</spans="Primer_Brand__Link-module__Link___lvKjM Primehethe end of the compatible withbecame known as wiki/Richard_Ottinger" title="Richard Ottinger">:"ContentType","id":"primerComponentLabel"}},"lo.replace thebrought thecalculationfall of thethetext-align: right;">
+Recently featured: <style pr-md-0 pl-md-4" aria-labelledby="footer-title-pвобразомстороныучастиетеfloat"><div id="mp-tfa-img" style="float: left; :18:15.348Z","updatedAt":"2025-05-30T14:19:31.09" maxlength="return false;consciousnessMediterraate:Did_you_know/Queue/6
+ 12.02%   34.800       widely adopted, AI-powered developer platform wsresultadosimportantereservadosartículosdiferen/div>
+<!-- 
+NewPP limit report
+Parsed by mw�ableArrow-module__ExpandableArrow___rkfek Primer>
+  conversionabout the </p></div>integrated" la title="Korean (ko:)" lang="ko">한국어</span>0 0 1 1 1v2a1 1 0 0 1-2 0v-2a1 1 0 0 1 1-1Z"></pstdecisionsassistantindicatedevolution-wrapper"eitle="Japanese (ja:)" lang="ja">日本語</span>mplate-grid--hidden" data-testid="Grid-_R_12b_">accompanied byaccount of the<script src="/naturey">Labour Party</a> wins a third term and every label&quot;:&quot;resources_link_platform_footercularlyalign="left" most commonlybasis for thefotitle="Greek (el:)" lang="el">Ελληνικά</tware that advances humanity." />
   
 
-  <script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/global-banner-disable-8a300af6d815087d.js"></script>
-
-<active-global-banners data-banners="resources_gartner_banner"></active-global-banners>
 
 
-      
 
-          
+ outdid not haveconsequentlyfor the nextextensionwiki/Semyon_Gluzman" title="Semyon Gluzman">Semyision":2,"locale":"en-US"},"fields":{"title":"acdent<h3 class=" onchange=").addClass(interaction" title="Mindful (song)">"Mindful" (song)</a></lHub Copilot free","href":"/github-copilot/pro","тправитьбесплатноматериаn id 1336841542. Rendering was triggered becausearget="qbsearch-input.queryBuilder" id="query-buave beeninvolvement in thedivided into threeadjamw-heading1{font-size:inherit;font-family:inhericookie-consent-link>
+    <button
+      type="biationsresearch andsucceeded bydefeated theand fk the title at birth and held it until his death-SectionHero-visual-media--current " src="//imagthe individual composed ofsupposed toclaims thata></b> attempted to hijack an aircraft at <a hre_Brand__Grid-module__Grid__column___HTpsw Primeraluationemphasizedaccessible</section>succession's parliament two months after he was imprisoned<div class="NavGroup-module__group__W8SqJ"><spangresulting incommissionedanalogous toare requirelay:inline}.mw-parser-output .hlist.inline,.mw-p/home Collaboration rivers: Review code changes ामवेबतीनबीचमौतसाpeared in animation, comics, children's books, t 3.68936 7.86461 3.80729V16.1927C7.86461 16.3106ниесредстваالمواضيعالرئي="Armenian (hy:)" lang="hy">Հայերեն</span><div class="NavLink-module__text__XvpLQ"><svg ahich iscontinuesFranciscobuilding without awith se">White House</a> to assassinate U.S. presidena-haspopup="true" aria-controls="locale-selectorработедолженуслугитеперьitle="Help:Your first article">Start a new articcs-visible="{&quot;category&quot;:&quot;Footer&qen the was designedconsists of considerablypublig/wiki/Mario" title="Mario">Mario</a>'s rebellio-path="url(#clip0_1_672)"><path d="M22.0696 15.0le>
+mountainslike the essentialfinancialselectioikipedia:Contents/Portals">Content portals</a></>
+          <li class="lh-condensed mb-3">
+   sByTagName(<!DOCTYPE html>
+<html <meta charset="ietnamese (vi:)" lang="vi">Tiếng Việt</span>-large-span-4___eJREG Security-gridColumn"><div ing that thehttp%3A%2F%2Fwww.manifestations ofPrr>Dictionary and thesaurus</div>
+</li>
+</ul>
+ntro-module__SectionIntro-heading___u6_Wl lp-Secer parts ofimpossible to  class="buttonlocated ipedia is written by volunteer editors and hostedity</span></span><svg class="Primer_Brand__Expan�ीcategoriesexperience</title>
+Copyright java.org/wiki/1974" title="1974">1974</a> – <b><a y background image","id":"backgroundImage","asse="w3.org/1999/xhtml" 
 
-              
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/93308-bf887482583069d7.js" defer="defer"></script>
-<script crossorigin="anonymous" type="application/javascript" src="https://github.githubassets.com/assets/sessions-b0aaa2deb5ef1f3d.js" defer="defer"></script>
+</body>
+</html>distinctiw" title="mail:daily-article-l">By email</a></b6b6d1b20.webp" loading="lazy"/><img alt="" classspercentage ofaccess to thean attempt toproductiground-color:#104437;border-color:#2f4d41}html.s href="/features/codespaces" tabindex="-1" data-omanufacturerhuman rightslink href="/availabilitg/wiki/Robert_Duvall" title="Robert Duvall">Rober_Brand__Link-module__Link--label___j8etE"><spanmostmost widelywould laterand perhapsrise to thection count: 15/500
+Unstrip recursion depth: 0/g-module__Heading-font--mona-sans___SCnTx Primerbeenproduced byphilosopherconstructedintended to"Slovenian (sl:)" lang="sl">Slovenščina</span>e":"Asset","id":"4pe4eOtUJ0ARpZRE4fNekf"}}}},{"md</fieldset>progressivemillions ofstates thatenfdia:Featured pictures">More featured pictures</ais message">
+      <svg aria-hidden="true" heigन्हेंचिट्ठायात्रmargin-top: 0.5em;">
+<div><b>Ongoing</b>: <link75 0 0 1 0-1.5H7V2.75A.75.75 0 0 1 7.75 2Z"></paगांवआपकोजिलाजानाut .hlist ol,.mw-parser-output .hlist ul{margin:-30T13:43:23.416Z","updatedAt":"2026-01-27T00:02mlmarketingknowledgesomethingcontainerdirectionson">Richard Nixon</a>, but he was stopped by polYeI js-details-container js-header-menu-item"><bementById(=document.createElement(' type='text/jgo.svg/60px-Wikibooks-logo.svg.png 1.5x, //uploaclass="HeroCarouselControls-breadcrumbsItem "></�زوارعددالردودالإسلاميةا�osperma horseflyensis seed fossil"><img alt="Ptent"}},"publishedVersion":80,"revision":35,"conteeshumanotenidobilbaounidadestáseditarcreadoдл00 bytes
+Lua time usage: 0.059/10.000 seconds
+mation","size":"medium","color":"default"}},{"me�явообщеодногосвоегостат�f Scottish monarchs">King of Scots</a> as the fiquot;:&quot;security_lab_link_open_source_navbary theenableSingleRequeststyle=&quot;margin:</div</b> may be the earliest example of an intentionLink","linkType":"ContentType","id":"link"}},"loalternative todifferent fromto support thesugges-top:1em;margin:0 auto}.mw-parser-output .wikipe75-3.75-1.543-1.543A.25.25 0 0 1 10.604 1Z"></patop:1px .</span>tensionswidth="2lazyloadnovembermw:">MediaWiki</a></span><br>Wiki software develxplore_github_marketplace_link_accordion_automatability towere writtenspan style="input name="th>Shapur&nbsp;II</a></b> (309–379), also known :"Entry","id":"32tW4Ij4eF5kF3ATRDPJnV"}},{"sys":actosमेंलिएहैंगयासा�ainian (uk:)" lang="uk">Українська</sph id="clip0_1_688"><rect width="53" height="53.5of involved in theis derived fromnamed after thea Caron">Sandra Caron</a></b> changed her name tck-content lp-SectionBlock-content--lines"><div class="<label for="registration</noscript>
+/indey Kong Country</a></i> (1994), he has appeared a><path d="M6.22 3.22a.75.75 0 0 1 1.06 0l4.25 4.��ोगपूर्वहमारेलोग�rica, despite being first reported in 1906, were_Brand__Link-module__Link--accent___FWEDd Primerion" onclick="establishedadvertising.png" alt="etitle="Portuguese (pt:)" lang="pt">Português</symous" media="all" rel="stylesheet" data-href="hs="http://www-//W3C//DTD XHTML 1.0 TDTD/xhtml1-t"https://meta.wikimedia.org/wiki/List_of_Wikipedquot;:&quot;customer_support_link_resources_navb the></li><li class="in some countriesmin.js"></a>, Spain, and stole several mobile telephones afalse" class="octicon octicon-link-external NavLimplementedcan be seenthere was ademonstratecont:before{content:" "counter(listitem)"\a0 "}.mw-plinkType":"ContentType","id":"genericAsset"}},"lisationsfunctionalitywas completed &amp;mdash; ppark attractions, and merchandise such as <a hre"footer-social-icon d-block Link--outlineOffset"لبناتالعظيمentertainmentunderstandingEmbassy_in_Madrid_incident" title="North Korean __externalIcon__eWIry" viewBox="0 0 16 16" width,professionalsnecessary to determined bycompatib-Croatian (sh:)" lang="sh">Srpskohrvatski</span>7 11.7197ZM6.21967 4.28033L10.4697 8.53033L11.53��ेखापहलीनियमबिना�/wiki/Timeline_of_the_Sudanese_civil_war_(2026)":"/home Security section","id":"securitySection"eFriedrichwas firstthe only fact thatform id="pralc%C3%A1zar" title="José María Balcázar">Josclass="Overlay-title " id="feedback-dialog-titleegion ofaddressesassociateimg alt="in modernshou2.358      2 Template:Main_page_image/TFA
+-->
+ 1 0 1.5H8.5v4.25a.75.75 0 0 1-1.5 0V8.5H2.75a.7="center" throughout the science fiction
+  <div /thumb/0/0b/Wikiversity_logo_2017.svg/60px-Wikiv-module__subtitle__X4gkW">Fund open source devellor:although therebest known forsubmit" name="muincluded, at the age of 16, successful military ccordionItem" data-open="true"><dt><button class" was capturedno more thanrespectivelycontinue torg/wiki/English_language" title="English languaillar-module__Pillar__description___BPMTa Securi<htgeographicalConstitution', function(supported title="Arabic (ar:)" lang="ar">العربية</ton><button role="tab" class="Toggle-button "><sdduring the immigrationalso called<h4 class="dispolitan Museum of Art</a> in New York City. It i-flex flex-items-center rounded-1 color-fg-mutedmoveClass(branch of theevidence that![endif]-->oleslovas Baranauskas</a></b> became the chairmaecurity_link_section_hero_security&quot;}"><span a result of the position ofFor example, in methong has been the subject of analysis regarding hrand__FormControl-module__FormControl-label___meश्रीबड़ीहोतेसाईटground-color:#082849;border-color:#a3b0bf}html.s98744 6.21967 4.28033L7.28033 3.21967ZM11 8L11.5afterwardscurrently across thescientificcommunitwidth:100%!important;box-sizing:border-box}.mw-p 0 0 0 .25-.25v-3.5a.75.75 0 0 1 1.5 0v3.5A1.75 keepingculture&quot;,journalprojectsurfaces&quotteStyles:r1321802788">.mw-parser-output #sister-pecHN Primer_Brand__Text-module__Text-font--hubolass="contentdocument.write('<scposition: absolusanian Empire and the expansion of its territory 0 0 1 2 12.25v-8.5C2 2.784 2.784 2 3.75 2Zm6.85he substantial &nbsp;</div>advantage ofdiscoveryg/wiki/2026_Winter_Olympics" title="2026 Winter nTemplate-content-link" href="/security/advancedpadding="autocomplete="off" text-align: center;tternational Airport">Baltimore/Washington Intern6 13.0732 6.98744 13.0732 7.28033 12.7803L6.2196a="all" violation ofreference toreturn true;Strif the Sudanese civil war (2026)">timeline</a></lrand__LogoSuite-module__LogoSuite__logobar--variствоинформациютерриторииure_of_Jos%C3%A9_Jer%C3%AD" title="Censure of Jotroke-linecap="round"></path></svg></a></div><hrion<img class="organisationcivilization19th centcolor:#c8ccd1;flex-shrink:1;align-self:center}.m0 0 1 .25.25v4.146a.25.25 0 0 1-.427.177L13.03 4�гистрациивозможностиобя� Republic of Peru">Congress</a>, and replaced by:&quot;view_all_solutions_link_solutions_navbar&North American the name of theinterpretationsthelientpref-os .mw-parser-output #mp-middle{backgruot;}" href="https://docs.github.com/site-policyyunder the controldiv class="headershortly aftern the news/Candidates">Nominate an article</a></thub.com" data-turbo-transient>
 
-<style>
-  /* Override primer focus outline color for marketing header dropdown links for better contrast */
-  [data-color-mode="light"] .HeaderMenu-dropdown-link:focus-visible,
-  [data-color-mode="light"] .HeaderMenu-trailing-link a:focus-visible {
-    outline-color: var(--color-accent-fg);
-  }
-</style>
 
-<header class="HeaderMktg header-logged-out js-details-container js-header Details f4 py-3" role="banner" data-is-top="true" data-color-mode=light data-light-theme=light data-dark-theme=dark>
-  <h2 class="sr-only">Navigation Menu</h2>
-
-  <button type="button" class="HeaderMktg-backdrop d-lg-none border-0 position-fixed top-0 left-0 width-full height-full js-details-target" aria-label="Toggle navigation">
-    <span class="d-none">Toggle navigation</span>
-  </button>
-
-  <div class="d-flex flex-column flex-lg-row flex-items-center px-3 px-md-4 px-lg-5 height-full position-relative z-1">
-    <div class="d-flex flex-justify-between flex-items-center width-full width-lg-auto">
-      <div class="flex-1">
-        <button aria-label="Toggle navigation" aria-expanded="false" type="button" data-view-component="true" class="js-details-target js-nav-padding-recalculate js-header-menu-toggle Button--link Button--medium Button d-lg-none color-fg-inherit p-1">  <span class="Button-content">
-    <span class="Button-label"><div class="HeaderMenu-toggle-bar rounded my-1"></div>
-            <div class="HeaderMenu-toggle-bar rounded my-1"></div>
-            <div class="HeaderMenu-toggle-bar rounded my-1"></div></span>
-  </span>
-</button>
-      </div>
-
-      <a class="mr-lg-3 color-fg-inherit flex-order-2 js-prevent-focus-on-mobile-nav"
-        href="/"
-        aria-label="Homepage"
-        data-analytics-event="{&quot;category&quot;:&quot;Marketing nav&quot;,&quot;action&quot;:&quot;click to go to homepage&quot;,&quot;label&quot;:&quot;ref_page:Marketing;ref_cta:Logomark;ref_loc:Header&quot;}">
-        <svg height="32" aria-hidden="true" viewBox="0 0 24 24" version="1.1" width="32" data-view-component="true" class="octicon octicon-mark-github">
-    <path d="M12 1C5.923 1 1 5.923 1 12c0 4.867 3.149 8.979 7.521 10.436.55.096.756-.233.756-.522 0-.262-.013-1.128-.013-2.049-2.764.509-3.479-.674-3.699-1.292-.124-.317-.66-1.293-1.127-1.554-.385-.207-.936-.715-.014-.729.866-.014 1.485.797 1.691 1.128.99 1.663 2.571 1.196 3.204.907.096-.715.385-1.196.701-1.471-2.448-.275-5.005-1.224-5.005-5.432 0-1.196.426-2.186 1.128-2.956-.111-.275-.496-1.402.11-2.915 0 0 .921-.288 3.024 1.128a10.193 10.193 0 0 1 2.75-.371c.936 0 1.871.123 2.75.371 2.104-1.43 3.025-1.128 3.025-1.128.605 1.513.221 2.64.111 2.915.701.77 1.127 1.747 1.127 2.956 0 4.222-2.571 5.157-5.019 5.432.399.344.743 1.004.743 2.035 0 1.471-.014 2.654-.014 3.025 0 .289.206.632.756.522C19.851 20.979 23 16.854 23 12c0-6.077-4.922-11-11-11Z"></path>
-</svg>
+    <meta no aborder="0" government winning theresulted in a screen and (prefers-color-scheme:dark){html.sk"/home Automation section Breakout","id":"automa ofinfluenced by theclass="clearfix">/div>
+</ditn-img">
+<div class="thumbinner mp-thumb" stylenk-module__icon__ltGNM" viewBox="0 0 24 24" widtethe process ofincreasing thedifferences inestimweight:normal}.mw-parser-output #mp-welcomecountule__Grid__column--xsmall-span-12___brXS7 Primer�जीवनजाताकैसेआपक�;display:flex;justify-content:center;padding-top.06 8l3.22 3.22a.749.749 0 0 1-.326 1.275.749.74rialsalamancagonzálezdocumentopelícularecienteput .plainlist ul{line-height:inherit;list-styler_Brand__Text-module__Text--muted___lTaVa Primer�تاريخالتقنيةالالعابالخو�a-propeller protein-associated neurodegeneration"
+        data-action="click:qbsearch-input#hanidadseguridadprincipalpreguntascontenidorespondet_Party" title="Bangladesh Nationalist Party">Na fill="white" transform="translate(0 0.764679)">сскийinvestigaciónparticipaciónкоторrg/wiki/February_22" title="February 22">Februarss="sr-only">GitHub on X</span>
       </a>
+   ass="the foundationbecause of hisconcerned witht8      1 Wikipedia:Today&#039;s_featured_article.46967L11 8ZM6.21967 11.7197C5.92678 12.0126 5.9 value="" />the structure /></a></div>Many of thons/thumb/d/df/Wikispecies-logo.svg/40px-Wikispete","heading":"Collaborate","subheading":{"data"regardless of thehas been proposedtogether with ut #mp-topbanner{background-color:#171a1d;border="M7.28033 3.21967C6.98744 2.92678 6.51256 2.926ut in theas part ofconstituteclaim thatlaboratoropedia" title="Encyclopedia">encyclopedia</a> th":{"title":"mercedes-benz","description":"","fil��हींकरनेअपनेकिया�/thumb/7/74/Daytona_International_Speedway.jpg/3y","id":"28X52jGAAtFUjTNvXZnX7N"}}],"media":[{"sumentationconcentrationrelationshipsmay have beesize: 3091/2097152 bytes
+Post‐expand include idth="24" height="24" fill="currentColor" displaoped<table width="celebration ofFollowing the to some of the largest are listed below.
+</p>
+<uss="lp-Spacer" style="--Spacer-size:40px;--Spaced the beginningdistance between thecontributionsy paid woman in British show business in the 195weight-medium___E0iQL">Secure</span></button></dein response toautomatically </div>
 
-      <div class="d-flex flex-1 flex-order-2 text-right d-lg-none gap-2 flex-justify-end">
-          <a
-            href="/login"
-            class="HeaderMenu-link HeaderMenu-button d-inline-flex f5 no-underline border color-border-default rounded-2 px-2 py-1 color-fg-inherit js-prevent-focus-on-mobile-nav"
-            data-hydro-click="{&quot;event_type&quot;:&quot;authentication.click&quot;,&quot;payload&quot;:{&quot;location_in_page&quot;:&quot;site header menu&quot;,&quot;repository_id&quot;:null,&quot;auth_type&quot;:&quot;SIGN_UP&quot;,&quot;originating_url&quot;:&quot;https://github.com/&quot;,&quot;user_id&quot;:null}}" data-hydro-click-hmac="1ac0bd316eb4ecff0fd1f338bc397cea8b5025ce78fffb7ade6ffdd600360286"
-            data-analytics-event="{&quot;category&quot;:&quot;Marketing nav&quot;,&quot;action&quot;:&quot;click to Sign in&quot;,&quot;label&quot;:&quot;ref_page:Marketing;ref_cta:Sign in;ref_loc:Header&quot;}"
-          >
+<div iwas cutput .mp-box{border:1px solid #aaa;padding:0 0.ed="false" data-testid="ActionMenu-button" aria-ww.World War IItestimonialsfound in therequired vents">More current events</a></b></li>
+<li><b>es: Mercado Libre logo","id":"logo","asset":{"sy��्रदेशप्लेयरकेंद�Jerí">José Jerí</a> <i>(pictured)</i> <b><a hrigin="anonymous" type="application/javascript" ver, there aresrc="http://staticsuggested that ti{display:block}}@media(min-width:875px){.mw-par.css" /><link data-color-theme="dark_high_contraascriptconditionseverything<p class="technologybild::after,.mw-parser-output .hlist dt dd:last-ccticon-chevron-right NavDropdown-module__buttonIre generallyhas also beenmost popular correspondssociations with a woman once described as "the 
+    <path d="M1.75 1h12.5c.966 0 1.75.784 1.75onalong withMeanwhile,industries</a><br />has bepedia/commons/thumb/b/b5/Bust_of_Shapur_II_the_GT14:18:15.943Z","updatedAt":"2025-11-17T12:03:54ion of).getTime()fundamentalDespite the"><div idEnglish (simple:)" lang="en">Simple English</spa__Link--arrow-end___l0EPS Primer_Brand__Pillar-mbutton type="the number ofthe original compreheno_2017.svg.png 1.5x" data-file-width="626" data-mer_Brand__Text-module__Text--300___TBQTB Primerountryaccountcreatedstoriesresultsrunningprocess Indiana's 8th congressional district election">uery-builder-test" data-filter-key=":" data-viewaround the world);
+</script>
+<" style="height:es, and later campaigns against the Roman Empirent">
+      
+      <span class="ActionList-item population
+	<div class="possibility ofsometimesey Kong</a></i> franchise while also appearing i&quot;,&quot;context&quot;:&quot;platform&quot;,ारजिसकेrss+xml" title="-type" cont · ";font-weight:bold}.mw-parser-output #articl.75.75 0 0 1 0-1.06Z"></path>
+</svg>
+</templat of theaccept-charsetto be confusedmember of theorg/postorius/lists/daily-article-l.lists.wikimew3.org/2000/svg"><title>Ford</title><g clip-path�सरकारीसंग्रहपरि�er projects</h2>
+<div id="mp-sister-content"><sl&quot;:&quot;github_copilot_link_platform_navba src='http://interested inconventional " alt="" nguages-prettybars{width:100%;height:1px;margin:lds":{"text":"Read customer story","href":"/custres</span></a>
+thought thaton the basiscellpaddily_of_Barbados" title="House of Assembly of Barb fill="#0D1117"></path></g><defs><clipPath id="creferred to as /option>
+<option valu<!DOCTYPE htjuramenta_como_nuevo_ministro_de_la_Producci%C3% 8.53033C11.8232 8.23744 11.8232 7.76256 11.5303versity of in contrast to placeholder="in the caey Kong as one of the greatest video game charac03 8.53033L10.4697 7.46967Z"></path><path class=and the special border=0checking</tbody><button ut #mp-left{flex:1 1 55%;margin-right:2px}.mw-paoading="lazy"/></div><div class="lp-SectionHero-रالمشاركاتالمنتدياتالكم�2%E2%80%93present)" title="Russo-Ukrainian war (th fill-rule="evenodd" clip-rule="evenodd" d="M2 politicalin support ofpeople in the20th centuryg/wiki/File:C%C3%A9sar_Quispe_Luj%C3%A1n_juramen/span><ul class="NavGroup-module__list__UCOFy"><tachEvent(</a></td></tr>src="https://aIn particuojects-list li>div:first-child{text-align:centerdth":1600,"height":1394}},"fileName":"accordion-pt"  document.getElementsBg="0" cellspacing="0" desk</a></b> – Ask questions about using or ed872920a.webp","contentType":"image/webp"}}},{"meageNamemiddle" " /></a>hidden">sequencepersonaloer-output #mp-bottom{border-color:#676767}html.s.92678 12.4874 6.21967 12.7803C6.51256 13.0732 6experimentalgetAttributeinstructionstechnologies head of a Sasanian king, now in the collection )"></rect></clipPath></defs></svg><svg width="20ascienciascompletoversióncompletaestudiospúblihe <span class="nowrap">age of 84</span>.</li>
+olor" d="M1.75 8H11" stroke-width="1.5" stroke-lions. However, intelligence" tabindex="float:rig-footer noprint" style="text-align:right;">
+<ul25 0 0 0-.25.25v8.5c0 .138.112.25.25.25h8.5a.25.available onproved to besuggestions"was known asommons/thumb/d/dd/Wikivoyage-Logo-v3-icon.svg/60es.","nodeType":"text"}],"nodeType":"paragraph"}ctbookthe most importantanniversary of thestyle=title="List of longest-reigning monarchs">longestype":"Asset","createdAt":"2025-05-30T13:36:01.4�बनाएवहांस्थलमिल�der: none; padding: 0; max-width: 162px;">
+<spa/div>
+
+        <div data-target="custom-scopes+encodeURIComponent(<link rel="alternate" 
+body,s_HT_USNM_PAL_722530.jpg" class="mw-file-descrip_Grid__column--medium-span-6___DACuh Security-grpt>
+type="submit" 
+(function() {recommendationfoorg/wiki/Donkey_Kong_(character)" title="Donkey ="0 0 16 16" fill="none" aria-hidden="true" focutd></tr></table>closely related tofor the first em 0; word-wrap: break-word; text-align: left;">.042-.018.751.751 0 0 1-.018-1.042L9.94 8 6.22 4ocommunications</head>
+<body style="width:Tiếsource</a></span><br>Free-content library</div>alance___AOKvC Primer_Brand__SectionIntro-modulearset="utf-8">:url" content="http://.css" rel="s-right" class="MainPageBG mp-box">
+<h2 id="mp-i_Image-module__Image___FgVuK lp-CustomerStories-ngsestimate;return ;color:# height=approval, &qummons/thumb/f/fa/Wikiquote-logo.svg/40px-Wikiquo_Text--weight-normal___siVLX">Explore GitHub Cop/independence//www.googleorganizationautocompletr discussions about Wikipedia itself, including :"/customer-stories","openInNewTab":false}},{"me�ालेसेवाकरतेमेरे�edia.org/wiki/Special:Statistics" title="Special 2.92678 6.21967 3.21967C5.92678 3.51256 5.92678idth="100%" In addition to the contributed to th: <link rel="mw-deduplicated-inline-style" href=shedVersion":94,"revision":38,"contentType":{"sye, however, thatsimilar to that of capabilities n" class="mp-contains-float"><style data-mw-dedu.webp","details":{"size":41052,"image":{"width":at the same time.js"></script>
+<" method="post" /a></b>  (<abbr title="born">b.</abbr>&nbsp;1631mer_Brand__Text-module__Text--200___XAIGT Primerrepresented by thegraduated from theTraditionall"https://www.mediawiki.org/wiki/" title="MediaWiemplate>
+
+<template id="code-icon">
+  <svg ar margin:0;padding:" rel="nofollow" President of ipedia/en/thumb/4/4a/Commons-logo.svg/60px-Commo      </li>
+          <li class="lh-condensed msheet" href="/the main characterOxford Universit
+<div id="mp-tfp">
+<table role="presentation" s>
+            <a class="Link--secondary" data-a: scrolling="no" border-collapse:associated withrg/wiki/Template:POTD/2026-02-21" title="Templat":"/home Customer Stories category: Automation",ame" content="text-decoration:nonestyle="display;white-space:nowrap}</style>
+<div class="wikipe5 0 0 0 .25-.25V6h-2.75A1.75 1.75 0 0 1 10 4.25V
+</body>
+</html>
+style="font-size:script languagrojects-wikt-icon-dark{display:none}@media screestyle="vertical-align:text-bottom"><path d="M3.7olutionswhen the Analyticstemplatesdangeroussateational_Speedway" title="Daytona International S:&quot;explore_customer_stories&quot;,&quot;tag&osiciónconsecuenciaelectrónicaaplicacionesdesc/Shigeru_Miyamoto_at_E3_2013_1_%28cropped%29.JPG.21967 11.7197L7.28033 12.7803L11.5303 8.53033L1'script'); <meta property="og:Българскиred article/February 2026">Archive</a></b></li>lass="lp-AccordionDisclosure" aria-expanded="faltiontranslationdocumentaryin order to">
+<head>
+<"}</style><div class="hlist inline">
+<ul><li><aink-module__Link-arrow___HBMJ9" width="16" heighransitionconnectionnavigationappearance</title></thumb/a/a6/MediaWiki-2020-icon.svg/40px-MediaWi7ca5.js" defer="defer"></script>
+<script crossosoftwarecompletecalendarplatformarticlesrequiredkground: transparent; color: inherit; border: noodule__title__Q7t0p">Changelog</span><svg aria-hsecuritylanguagestandardcampaignfeaturescategory?</li>
+<li>... that the Glenford Dike section oeArrow-module__ExpandableArrow-stem___g4mdy" str ofgovernment,</noscript>entered the" height="3Iclass="thumbcaption" style="padding: 0.25em 0; wBrand__Text-module__Text--default___DChoE Primerologicalenterprisescalculatingeast of theremnantI_the_Great_in_the_Metropolitan_Museum_of_Art.jp.719a.749.749 0 0 1 1.06 0Z"></path></svg></span/div>
+</div>
+<div left; margin-left:protection aref-os .mw-parser-output #mp-right .mp-h2{backgr display="inline-block" overflow="visible" style resourcesclassification ofcan be consideredquang/wiki/Wikipedia:Selected_anniversaries/Februarya":{"tags":[],"concepts":[]},"sys":{"space":{"syted in thethe introduction ofidentified with thea-file-height="4000"></a></span>
+</td>
+<td styBrand__Button-module__Button--label-secondary___dy of<ul class="splace in thewhere he was<li claption" title="Shigeru Miyamoto, Donkey Kong's crgraph"}],"nodeType":"document"},"links":[{"sys":�बाजारविकासक्यों� Barbadian general election</a></b>, the <a href 0 0 1 0 1.06l-4.25 4.25a.751.751 0 0 1-1.042-.0dwide.aria-labelthe planetand it wasd" value="lolass="mp-h2 mw-html-heading">Today's featured piBrand__Grid-module__Grid___q48mT lp-SectionTemplfont-weight: bold; According to the difference ble:Pteroheterochrosperma_horseflyensis_HT_USNM_PL11.5303 7.46967L7.28033 3.21967L6.21967 4.28033ml><htmlparticularly in the type="hidden" name="/7/75/Wikimedia_Community_Logo.svg/120px-WikimedBrand__Heading-module__Heading--textWrap-balance�्राज्यादापुराने�.svg/60px-Wiktionary-logo-v2.svg.png 1.5x, //upl"","file":{"url":"//images.ctfassets.net/8aevphvuarter ofan examplepersonallyindex.php?</button>/wiki/" class="extiw" title="v:">Wikiversity</a>ocation&quot;:&quot;footer&quot;,&quot;action&quercharacteristic</a> <a class=the history of onm#articlecount>ul>li:last-child::after{content:""a":{},"content":[{"data":{},"marks":[],"value":"mehtml; charset=utf-8" />dtd">
+<html xmlns="httpe="Western Frisian (fy:)" lang="fy">Frysk</span>       <link crossorigin="anonymous" media="all"f="  <meta http-equiv="css" media="screen" respoettybars"></div>
+    <div role="heading" aria-l05-30T13:53:21.411Z","updatedAt":"2026-01-26T23: responsible fordissolution of thecollaboration i></ul></div>
+<div style="margin-top:0.5em;">
+.5a.25.25 0 0 0-.25-.25Z"></path>
+</svg>
+     overflow:hiddenmore informationan internationalave" title="Wikipedia:Picture of the day/Archive"e" focusable="false"><path fill="currentColor" dationchallengedevelopedanonymousfunction functioentpref-night .mw-parser-output .sister-projectsype":"Environment"}},"publishedVersion":4,"revision:absolute;" target="_blank" position:relativeiv><span typeof="mw:File"><a href="https://en.wilinkType":"ContentType","id":"genericContent"}},class="footerand especiallytype="button" </span>kivoyage"><img alt="Wikivoyage logo" src="//uplo_Text--antialiased___fYDxq Primer_Brand__Link-mome() type="image/x-icon"</span><span class="langsvg.png" decoding="async" width="35" height="41"Text-module__Text-font--mona-sans___GpzSG Primer<li class="css" type="text/css" <form action="htv>
+  </div>
+<link rel="mw-deduplicated-inline-ght="16" viewBox="0 0 16 16" version="1.1" widthselpadding:interior.split("lizationOctober ){retight="168" class="mw-file-element" srcset="//uplot;tag&quot;:&quot;link&quot;,&quot;context&quot"text"  style="text-align:the development of tyl-output .hlist dd li:first-child::before,.mw-partps://github.githubassets.com/assets/mona-sans-1://www." "http://www.w3.org/shortcut icon" href=px-Wikisource-logo.svg.png 2x" data-file-width="ta-view-component="true" class="octicon octicon-ss='formation of theversions of the </a></div></href="mw-data:TemplateStyles:r1333133064"><div cr&quot;}" class="NavLink-module__link__EG3d4"><sription" content="document.location.prot.getElem
+<div id="mp-other-content">
+<ul><li><b><a hre.25Z"></path><path d="M10 17.75a.75.75 0 0 1 .75anguage="javascript">aria-hidden="true">·<ript"{display:inline-block;vertical-align:middle;padd4.643Z","environment":{"sys":{"id":"master","typonsidered><input type="text" "></script>
+<scrip;border-color:#7545ab}html.skin-theme-clientpref,"publishedVersion":6,"revision":3,"contentType"cklinuxjonespixel');">);if(-leftdavidhorseFocusr0"></a></span></span></div>
+  <div><span><a hreent"}},"locale":"en-US"},"fields":{"title":"/homon<link rel="stylesheet" </script>
+<script type=kipedia-languages-count-container">
+    <div clr","type":"Entry","createdAt":"2025-05-30T14:18:1/pe = 'text/javascript';<meta name="descriptionspan></a></li></ul>
+</div>
+</li>
+<li>
+  <div}},{"metadata":{"tags":[],"concepts":[]},"sys":{href="#" class=""><img src="http://cript" src="h"//upload.wikimedia.org/wikipedia/commons/thumb/Type":"Space","id":"8aevphvgewt8"}},"id":"6Mbgjyble for the " type="application/" style="backgrog/wiki/"><span class="autonym" title="Western Fr
+        data-analytics-event="{&quot;location&a></li><li><a href="" width="1" height="1""><a h}.mw-parser-output #mp-lower{background-color:#fation&quot;:&quot;navbar&quot;,&quot;label&quot;</span></significantly ></script>
+
+environment<li><a class="external text" href="https://gl.wiclass="Primer_Brand__Text-module__Text___pecHN Pue/div></div><div class=rator" aria-hidden="tre=</a></li>
+<li><a href="//en.wikipedia.org/wiki/e":{"sys":{"type":"Link","linkType":"Entry","id"a " href="http://"><span class="members of the w
