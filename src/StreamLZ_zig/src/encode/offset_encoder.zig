@@ -14,8 +14,8 @@
 //!      so these are Zig-port infrastructure for future High parity.
 
 const std = @import("std");
-const hist_mod = @import("ByteHistogram.zig");
-const entropy_enc = @import("entropy_encoder.zig");
+const hist_mod = @import("entropy/ByteHistogram.zig");
+const entropy_enc = @import("entropy/entropy_encoder.zig");
 const cost_coeffs = @import("cost_coefficients.zig");
 const bw_mod = @import("../io/bit_writer.zig");
 const lz_constants = @import("../format/streamlz_constants.zig");

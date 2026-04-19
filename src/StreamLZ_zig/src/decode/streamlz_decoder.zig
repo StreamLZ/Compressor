@@ -11,8 +11,8 @@ const std = @import("std");
 const frame = @import("../format/frame_format.zig");
 const block_header = @import("../format/block_header.zig");
 const constants = @import("../format/streamlz_constants.zig");
-const fast = @import("fast_lz_decoder.zig");
-const high = @import("high_lz_decoder.zig");
+const fast = @import("fast/fast_lz_decoder.zig");
+const high = @import("high/high_lz_decoder.zig");
 const parallel = @import("decompress_parallel.zig");
 
 /// Extra bytes the decoder is allowed to write past `dst_len`.

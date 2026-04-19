@@ -15,7 +15,7 @@
 //! that the Fast decoder takes advantage of).
 
 const std = @import("std");
-const constants = @import("../format/streamlz_constants.zig");
+const constants = @import("../../format/streamlz_constants.zig");
 const huffman = @import("huffman_decoder.zig");
 const tans = @import("tans_decoder.zig");
 

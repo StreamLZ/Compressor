@@ -17,9 +17,9 @@ const std = @import("std");
 const constants = @import("../format/streamlz_constants.zig");
 const frame = @import("../format/frame_format.zig");
 const block_header = @import("../format/block_header.zig");
-const fast = @import("fast_lz_decoder.zig");
-const high = @import("high_lz_decoder.zig");
-const entropy = @import("entropy_decoder.zig");
+const fast = @import("fast/fast_lz_decoder.zig");
+const high = @import("high/high_lz_decoder.zig");
+const entropy = @import("entropy/entropy_decoder.zig");
 const FastLzTable = fast.FastLzTable;
 const HighLzTable = high.HighLzTable;
 

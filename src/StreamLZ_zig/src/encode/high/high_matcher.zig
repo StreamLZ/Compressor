@@ -3,8 +3,8 @@
 //! Used by: High codec (L6-L11)
 
 const std = @import("std");
-const lz_constants = @import("../format/streamlz_constants.zig");
-const match_eval = @import("match_eval.zig");
+const lz_constants = @import("../../format/streamlz_constants.zig");
+const match_eval = @import("../match_eval.zig");
 const high_types = @import("high_types.zig");
 const mls_mod = @import("managed_match_len_storage.zig");
 

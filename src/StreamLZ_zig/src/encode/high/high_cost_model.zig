@@ -4,10 +4,10 @@
 //! The `IsMatchLongEnough` predicate lives in `high_matcher.zig`.
 
 const std = @import("std");
-const lz_constants = @import("../format/streamlz_constants.zig");
-const hist_mod = @import("ByteHistogram.zig");
+const lz_constants = @import("../../format/streamlz_constants.zig");
+const hist_mod = @import("../entropy/ByteHistogram.zig");
 const high_types = @import("high_types.zig");
-const offset_encoder = @import("offset_encoder.zig");
+const offset_encoder = @import("../offset_encoder.zig");
 
 const ByteHistogram = hist_mod.ByteHistogram;
 const Token = high_types.Token;

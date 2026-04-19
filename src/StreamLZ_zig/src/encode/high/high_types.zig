@@ -6,8 +6,8 @@
 //! avoid circular imports.
 
 const std = @import("std");
-const lz_constants = @import("../format/streamlz_constants.zig");
-const hist_mod = @import("ByteHistogram.zig");
+const lz_constants = @import("../../format/streamlz_constants.zig");
+const hist_mod = @import("../entropy/ByteHistogram.zig");
 
 const ByteHistogram = hist_mod.ByteHistogram;
 

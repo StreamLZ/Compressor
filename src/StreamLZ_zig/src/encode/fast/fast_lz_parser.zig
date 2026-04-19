@@ -18,10 +18,10 @@
 const std = @import("std");
 const fast_constants = @import("fast_constants.zig");
 const FastMatchHasher = @import("fast_match_hasher.zig").FastMatchHasher;
-const match_hasher = @import("match_hasher.zig");
+const match_hasher = @import("../match_hasher.zig");
 const writer_mod = @import("FastStreamWriter.zig");
 const token_writer = @import("fast_token_writer.zig");
-const ptr_math = @import("../io/ptr_math.zig");
+const ptr_math = @import("../../io/ptr_math.zig");
 
 const FastStreamWriter = writer_mod.FastStreamWriter;
 const MatchHasher2x = match_hasher.MatchHasher2x;

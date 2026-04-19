@@ -30,8 +30,8 @@
 
 const std = @import("std");
 const hist_mod = @import("ByteHistogram.zig");
-const bw_mod = @import("../io/bit_writer.zig");
-const cost_coeffs = @import("cost_coefficients.zig");
+const bw_mod = @import("../../io/bit_writer.zig");
+const cost_coeffs = @import("../cost_coefficients.zig");
 
 const ByteHistogram = hist_mod.ByteHistogram;
 const BitWriter64Forward = bw_mod.BitWriter64Forward;
@@ -1131,7 +1131,7 @@ test "tansInitTable runs without panicking on a small histogram" {
 }
 
 test "tANS roundtrip: 32 bytes of 'abab' (2-symbol sparse path)" {
-    const tans_dec = @import("../decode/tans_decoder.zig");
+    const tans_dec = @import("../../decode/entropy/tans_decoder.zig");
     var src: [32]u8 = undefined;
     for (&src, 0..) |*b, i| b.* = @intCast('a' + (i % 2));
 
@@ -1156,7 +1156,7 @@ test "tANS roundtrip: 32 bytes of 'abab' (2-symbol sparse path)" {
 }
 
 test "tANS roundtrip: 256 bytes of 'abc' repeating (3-symbol sparse)" {
-    const tans_dec = @import("../decode/tans_decoder.zig");
+    const tans_dec = @import("../../decode/entropy/tans_decoder.zig");
     var src: [256]u8 = undefined;
     for (&src, 0..) |*b, i| b.* = @intCast('a' + (i % 3));
 
@@ -1181,7 +1181,7 @@ test "tANS roundtrip: 256 bytes of 'abc' repeating (3-symbol sparse)" {
 }
 
 test "tANS roundtrip: 512 bytes of varied English text (Golomb-Rice path)" {
-    const tans_dec = @import("../decode/tans_decoder.zig");
+    const tans_dec = @import("../../decode/entropy/tans_decoder.zig");
     const pattern = "The quick brown fox jumps over the lazy dog. ";
     var src: [512]u8 = undefined;
     var i: usize = 0;
@@ -1209,7 +1209,7 @@ test "tANS roundtrip: 512 bytes of varied English text (Golomb-Rice path)" {
 
 /// Roundtrip a single byte chunk through the tANS encoder and decoder.
 fn tansRoundtripChunk(allocator: std.mem.Allocator, src: []const u8) !void {
-    const tans_dec = @import("../decode/tans_decoder.zig");
+    const tans_dec = @import("../../decode/entropy/tans_decoder.zig");
     var histo: ByteHistogram = .{};
     histo.countBytes(src);
 

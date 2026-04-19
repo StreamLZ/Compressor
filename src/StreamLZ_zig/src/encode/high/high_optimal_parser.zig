@@ -22,14 +22,14 @@
 //! own; fixture-based byte-exact checks come next.
 
 const std = @import("std");
-const lz_constants = @import("../format/streamlz_constants.zig");
-const match_eval = @import("match_eval.zig");
+const lz_constants = @import("../../format/streamlz_constants.zig");
+const match_eval = @import("../match_eval.zig");
 const mls_mod = @import("managed_match_len_storage.zig");
 const high_types = @import("high_types.zig");
 const high_matcher = @import("high_matcher.zig");
 const high_cost_model = @import("high_cost_model.zig");
 const high_encoder = @import("high_encoder.zig");
-const hist_mod = @import("ByteHistogram.zig");
+const hist_mod = @import("../entropy/ByteHistogram.zig");
 
 const LengthAndOffset = mls_mod.LengthAndOffset;
 const ManagedMatchLenStorage = mls_mod.ManagedMatchLenStorage;
@@ -274,6 +274,91 @@ fn collectStatistics(
         cost_out,
         chunk_type_out,
     );
+}
+
+/// Phase 3: Backward token extraction.
+///
+/// Walks the DP state chain from the best final position back to
+/// `chunk_start`, emitting tokens in reverse order, then reverses
+/// the token list in place and appends it to `lz_token_array`.
+/// Returns the number of tokens written, or `null` when the token
+/// array overflows (caller should bail out).
+fn backwardExtract(
+    states: [*]State,
+    max_offset: usize,
+    last_state_index: usize,
+    chunk_start: usize,
+    tokens_begin: []Token,
+    lz_token_array: *TokenArray,
+    lz_tokens: []Token,
+) ?usize {
+    var out_offs: usize = max_offset;
+    var num_tokens: usize = 0;
+    var state_cur_idx: usize = last_state_index;
+
+    while (out_offs != chunk_start) {
+        const state_cur = &states[state_cur_idx];
+        const qrm: u32 = @bitCast(state_cur.quick_recent_match_len_lit_len);
+        if (qrm != 0) {
+            const extra_ml: usize = qrm >> 8;
+            const extra_lit: usize = qrm & 0xFF;
+            out_offs -= extra_ml + extra_lit;
+            if (num_tokens < tokens_begin.len) {
+                tokens_begin[num_tokens] = .{
+                    .recent_offset0 = state_cur.recent_offs0,
+                    .offset = 0,
+                    .match_len = @intCast(extra_ml),
+                    .lit_len = @intCast(extra_lit),
+                };
+                num_tokens += 1;
+            }
+        }
+        const lit_len_sub: usize = @intCast(state_cur.lit_len);
+        const match_len_sub: usize = @intCast(state_cur.match_len);
+        if (out_offs < lit_len_sub + match_len_sub) break;
+        out_offs -= lit_len_sub + match_len_sub;
+        const prev_idx: usize = @intCast(state_cur.prev_state);
+        const state_prev = &states[prev_idx];
+        const recent0: i32 = state_cur.recent_offs0;
+        const recent_index_opt = high_matcher.getRecentOffsetIndex(state_prev, recent0);
+        const off_field: i32 = if (recent_index_opt) |ri| -@as(i32, ri) else recent0;
+        if (num_tokens < tokens_begin.len) {
+            tokens_begin[num_tokens] = .{
+                .recent_offset0 = state_prev.recent_offs0,
+                .lit_len = state_cur.lit_len,
+                .match_len = state_cur.match_len,
+                .offset = off_field,
+            };
+            num_tokens += 1;
+        }
+        state_cur_idx = prev_idx;
+    }
+
+    // Reverse the backward-walked token list in place.
+    if (num_tokens > 1) {
+        var lo: usize = 0;
+        var hi: usize = num_tokens - 1;
+        while (lo < hi) : ({
+            lo += 1;
+            hi -= 1;
+        }) {
+            const tmp = tokens_begin[lo];
+            tokens_begin[lo] = tokens_begin[hi];
+            tokens_begin[hi] = tmp;
+        }
+    }
+
+    // Append this chunk's tokens to the full lz_token_array.
+    if (lz_token_array.size + num_tokens > lz_token_array.capacity) {
+        return null;
+    }
+    @memcpy(
+        lz_tokens[lz_token_array.size .. lz_token_array.size + num_tokens],
+        tokens_begin[0..num_tokens],
+    );
+    lz_token_array.size += num_tokens;
+
+    return num_tokens;
 }
 
 /// Optimal parser entry point. Performs the 3-phase DP + backward
@@ -979,71 +1064,15 @@ pub fn optimal(
             }
 
             // ── Phase 2: Backward token extraction ──
-            var out_offs: usize = max_offset;
-            var num_tokens: usize = 0;
-            var state_cur_idx: usize = last_state_index;
-
-            while (out_offs != chunk_start) {
-                const state_cur = &states[state_cur_idx];
-                const qrm: u32 = @bitCast(state_cur.quick_recent_match_len_lit_len);
-                if (qrm != 0) {
-                    const extra_ml: usize = qrm >> 8;
-                    const extra_lit: usize = qrm & 0xFF;
-                    out_offs -= extra_ml + extra_lit;
-                    if (num_tokens < tokens_capacity) {
-                        tokens_begin[num_tokens] = .{
-                            .recent_offset0 = state_cur.recent_offs0,
-                            .offset = 0,
-                            .match_len = @intCast(extra_ml),
-                            .lit_len = @intCast(extra_lit),
-                        };
-                        num_tokens += 1;
-                    }
-                }
-                const lit_len_sub: usize = @intCast(state_cur.lit_len);
-                const match_len_sub: usize = @intCast(state_cur.match_len);
-                if (out_offs < lit_len_sub + match_len_sub) break;
-                out_offs -= lit_len_sub + match_len_sub;
-                const prev_idx: usize = @intCast(state_cur.prev_state);
-                const state_prev = &states[prev_idx];
-                const recent0: i32 = state_cur.recent_offs0;
-                const recent_index_opt = high_matcher.getRecentOffsetIndex(state_prev, recent0);
-                const off_field: i32 = if (recent_index_opt) |ri| -@as(i32, ri) else recent0;
-                if (num_tokens < tokens_capacity) {
-                    tokens_begin[num_tokens] = .{
-                        .recent_offset0 = state_prev.recent_offs0,
-                        .lit_len = state_cur.lit_len,
-                        .match_len = state_cur.match_len,
-                        .offset = off_field,
-                    };
-                    num_tokens += 1;
-                }
-                state_cur_idx = prev_idx;
-            }
-
-            // Reverse the backward-walked token list in place.
-            if (num_tokens > 1) {
-                var lo: usize = 0;
-                var hi: usize = num_tokens - 1;
-                while (lo < hi) : ({
-                    lo += 1;
-                    hi -= 1;
-                }) {
-                    const tmp = tokens_begin[lo];
-                    tokens_begin[lo] = tokens_begin[hi];
-                    tokens_begin[hi] = tmp;
-                }
-            }
-
-            // Append this chunk's tokens to the full lz_token_array.
-            if (lz_token_array.size + num_tokens > lz_token_array.capacity) {
-                return null;
-            }
-            @memcpy(
-                lz_tokens[lz_token_array.size .. lz_token_array.size + num_tokens],
-                tokens_begin[0..num_tokens],
-            );
-            lz_token_array.size += num_tokens;
+            const num_tokens = backwardExtract(
+                states.ptr,
+                max_offset,
+                last_state_index,
+                chunk_start,
+                tokens_begin,
+                &lz_token_array,
+                lz_tokens,
+            ) orelse return null;
 
             if (reached_end) break;
 

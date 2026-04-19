@@ -18,10 +18,10 @@
 //!     via a comptime parameter, so each path is branch-free internally.
 
 const std = @import("std");
-const constants = @import("../format/streamlz_constants.zig");
-const copy = @import("../io/copy_helpers.zig");
-const ptr_math = @import("../io/ptr_math.zig");
-const entropy = @import("entropy_decoder.zig");
+const constants = @import("../../format/streamlz_constants.zig");
+const copy = @import("../../io/copy_helpers.zig");
+const ptr_math = @import("../../io/ptr_math.zig");
+const entropy = @import("../entropy/entropy_decoder.zig");
 
 pub const DecodeError = error{
     BadMode,

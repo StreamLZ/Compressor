@@ -19,9 +19,9 @@ const std = @import("std");
 const block_header = @import("../format/block_header.zig");
 const constants = @import("../format/streamlz_constants.zig");
 const pdm = @import("../format/parallel_decode_metadata.zig");
-const fast = @import("fast_lz_decoder.zig");
-const high = @import("high_lz_decoder.zig");
-const high_runs = @import("high_lz_token_executor.zig");
+const fast = @import("fast/fast_lz_decoder.zig");
+const high = @import("high/high_lz_decoder.zig");
+const high_runs = @import("high/high_lz_token_executor.zig");
 
 pub const DecodeError = error{
     Truncated,

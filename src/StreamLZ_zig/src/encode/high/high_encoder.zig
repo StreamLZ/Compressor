@@ -9,14 +9,14 @@
 //! each stream sequentially so interleaving would destroy cache behaviour.
 
 const std = @import("std");
-const lz_constants = @import("../format/streamlz_constants.zig");
-const hist_mod = @import("ByteHistogram.zig");
-const entropy_enc = @import("entropy_encoder.zig");
-const offset_enc = @import("offset_encoder.zig");
-const cost_coeffs = @import("cost_coefficients.zig");
+const lz_constants = @import("../../format/streamlz_constants.zig");
+const hist_mod = @import("../entropy/ByteHistogram.zig");
+const entropy_enc = @import("../entropy/entropy_encoder.zig");
+const offset_enc = @import("../offset_encoder.zig");
+const cost_coeffs = @import("../cost_coefficients.zig");
 const high_types = @import("high_types.zig");
-const copy = @import("../io/copy_helpers.zig");
-const ptr_math = @import("../io/ptr_math.zig");
+const copy = @import("../../io/copy_helpers.zig");
+const ptr_math = @import("../../io/ptr_math.zig");
 
 const ByteHistogram = hist_mod.ByteHistogram;
 const HighStreamWriter = high_types.HighStreamWriter;

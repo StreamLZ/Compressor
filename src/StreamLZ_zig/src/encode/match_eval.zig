@@ -8,7 +8,7 @@
 
 const std = @import("std");
 
-const fast_parser = @import("fast_lz_parser.zig");
+const fast_parser = @import("fast/fast_lz_parser.zig");
 const LengthAndOffset = fast_parser.LengthAndOffset;
 
 pub const CompareLengthAndOffset = LengthAndOffset;

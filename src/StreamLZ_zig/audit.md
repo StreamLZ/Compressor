@@ -1104,8 +1104,8 @@ It is not a C# port. It is a Zig codebase. It should read like one.
 | 1 | Delete `bit_writer_64.zig`, fix u5/u6 mismatch | **DONE** | Deleted file, updated tans_encoder + offset_encoder to import `bit_writer.zig` |
 | 2 | Delete three stub files | **DONE** | `high_lz_encoder.zig`, `multi_array_huffman_encoder.zig`, `optimal_parser.zig` deleted |
 | 3 | Remove env-var debug prints → comptime flags | **DONE** | `SLZ_TOKEN_TRACE` → `trace_tokens`, `SLZ_COST_TRACE` → `trace_cost` |
-| 4 | Split `streamlz_encoder.zig` (~10 files) | **SKIPPED** | Windows FFI extracted to `platform/memory_query.zig`. Full 10-way split rejected — trades file navigation for directory navigation without net clarity gain. The file is large but coherent as a single compress pipeline. |
-| 5 | Split `optimal()` into three phases | **SKIPPED** | It's a single DP algorithm; splitting it into separate files makes the forward-DP / backward-extract relationship harder to follow, not easier. The function is long but linear. |
+| 4 | Split `streamlz_encoder.zig` | **DONE** | 5-way split: `streamlz_encoder.zig` (667 lines, public API), `fast_framed.zig`, `high_framed.zig`, `compress_parallel.zig`. Down from 2636 lines. |
+| 5 | Split `optimal()` into phases | **DONE** | Extracted `backwardExtract()` (~80 lines). `optimal()` reduced from ~820 to ~764 lines. Forward DP stays as one function (shared mutable state). |
 | 6 | Rename `count_bytes` → `countBytes`, delete duplicate | **DONE** | Renamed method, deleted `countBytesHistogram`, updated all call sites |
 | 7 | Merge inline match-eval helpers with `match_eval.zig` | **SKIPPED** | The copies have different type signatures (`usize` vs `isize` offsets, `i32` vs `u32` lengths) tuned to their respective codec hot loops. Not true duplicates — merging would require type coercion in the hot path. Comment updated to explain the real reason they're separate. |
 | 8 | Delete `_ = parameter;` suppressions | **DONE** | Fixed `dict_size` (var→const), deleted dead `bits_per_sym_width`, removed unused `start_position` param. Legitimate API-compat suppressions (`_ = level`, `_ = dst_ptr_end`, etc.) left in place with comments. |
@@ -1118,7 +1118,7 @@ It is not a C# port. It is a Zig codebase. It should read like one.
 
 | # | Issue | Status |
 |---|-------|--------|
-| [1] | Split into ~10 files | **SKIPPED** — see #4 above |
+| [1] | Split into ~10 files | **DONE** — 5-way split (not 10): `fast_framed.zig`, `high_framed.zig`, `compress_parallel.zig` + dispatcher. 2636→667 lines. |
 | [2] | Extract Windows FFI | **DONE** — `platform/memory_query.zig` with Windows + Linux + macOS support |
 | [3] | Dead `level` parameter in `calculateMaxThreads` | **PENDING** — kept for forward-compat; removing would break callers who pass it |
 | [4] | Error set leaks `HashBitsOutOfRange` | **DONE** — removed from public error set, translated at call sites |
@@ -1231,7 +1231,7 @@ It is not a C# port. It is a Zig codebase. It should read like one.
 
 | Proposed change | Status |
 |----------------|--------|
-| 50 → 105 file restructure | **SKIPPED** — trades file navigation for directory navigation. Added "Used by" headers to every encode/ file instead. See auditBrief.md "DON'T DO" section. |
+| 50 → 105 file restructure | **DONE** (partial) — created `encode/fast/`, `encode/high/`, `encode/entropy/`, `decode/fast/`, `decode/high/`, `decode/entropy/` subdirectories. 20 encoder + 7 decoder files moved. Split `streamlz_encoder.zig` 5-way. Not the full 105-file manifest but achieves the clarity goal. |
 | `streamlz_constants.zig` split into 8 files | **SKIPPED** — organized with section dividers, 128 lines total. |
 | `cli/` subdirectory with per-command files | **SKIPPED** — `main.zig` is 742 lines, manageable. |
 | `tests/` directory | **SKIPPED** — Zig test discovery constraint. |
@@ -1261,3 +1261,7 @@ It is not a C# port. It is a Zig codebase. It should read like one.
 | `high_encoder` `alignUpPtr` dedup + `encodeLiteralStream` extraction | **DONE** |
 | `high_cost_model` `updateStats` switch refactor | **DONE** |
 | `copy_helpers` header updated, `alignPointer` is canonical | **DONE** |
+| `encode/` subdirectories: `fast/`, `high/`, `entropy/` | **DONE** |
+| `decode/` subdirectories: `fast/`, `high/`, `entropy/` | **DONE** |
+| `streamlz_encoder.zig` 5-way split (2636→667 lines) | **DONE** |
+| `optimal()` backward-extract phase extraction | **DONE** |

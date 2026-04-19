@@ -22,9 +22,9 @@
 //!     from spending time on positions it would never consult.
 
 const std = @import("std");
-const lz_constants = @import("../format/streamlz_constants.zig");
-const match_hasher = @import("match_hasher.zig");
-const match_eval = @import("match_eval.zig");
+const lz_constants = @import("../../format/streamlz_constants.zig");
+const match_hasher = @import("../match_hasher.zig");
+const match_eval = @import("../match_eval.zig");
 const mls_mod = @import("managed_match_len_storage.zig");
 
 const MatchHasher16Dual = match_hasher.MatchHasher16Dual;

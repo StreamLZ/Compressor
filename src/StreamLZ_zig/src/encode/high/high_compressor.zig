@@ -20,15 +20,15 @@
 //!   - step 32 (F3): `optimal` (DP parser)
 
 const std = @import("std");
-const lz_constants = @import("../format/streamlz_constants.zig");
+const lz_constants = @import("../../format/streamlz_constants.zig");
 const high_types = @import("high_types.zig");
 const high_encoder = @import("high_encoder.zig");
 const high_fast_parser = @import("high_greedy_parser.zig");
 const high_optimal_parser = @import("high_optimal_parser.zig");
-const match_hasher = @import("match_hasher.zig");
+const match_hasher = @import("../match_hasher.zig");
 const mls_mod = @import("managed_match_len_storage.zig");
-const entropy_enc = @import("entropy_encoder.zig");
-const cost_coeffs = @import("cost_coefficients.zig");
+const entropy_enc = @import("../entropy/entropy_encoder.zig");
+const cost_coeffs = @import("../cost_coefficients.zig");
 
 pub const EncodeFlags = enum(u32) {
     none = 0,

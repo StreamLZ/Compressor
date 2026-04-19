@@ -1,8 +1,30 @@
-# Decompress benchmarks
+# StreamLZ Zig Benchmarks
 
 Intel Ultra 9 285K (Arrow Lake-S), 24 cores, Windows 11.
-Zig 0.15.2 `ReleaseFast -Dcpu=native`. C# ReleaseFast via `StreamLZ.Cli -db -r 10`.
-**Single-threaded pure decompress** on both sides:
+Zig 0.15.2 `ReleaseFast -Dcpu=native`.
+
+## After audit cleanup (2026-04-18)
+
+Post-audit numbers on enwik8 (100 MB). `benchc -l N -r 5`. Parallel
+decompress (default thread count). Compress + decompress + round-trip.
+
+| Level | Ratio | Compress MB/s | Decompress MB/s |
+|-------|------:|-----:|-------:|
+| L1  | 58.6% |  93.4 | 18,580 |
+| L3  | 56.5% |  83.2 | 18,800 |
+| L5  | 43.4% |  38.8 |  9,275 |
+| L6  | 31.4% |  74.8 | 11,552 |
+| L8  | 31.0% |  38.8 | 11,934 |
+
+All round-trips: PASS. No regression from audit changes (file renames,
+subdirectory moves, encoder split, optimal() refactor, extern struct
+removal, error set narrowing, ptr_math helper).
+
+---
+
+## Historical benchmarks
+
+### Single-threaded decompress comparison (Zig vs C#)
 
 - Zig: `streamlz bench` loads the fixture into memory once, warms up with
   one untimed decode, then takes 30 timed runs via `std.time.Timer`.

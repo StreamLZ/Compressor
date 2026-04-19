@@ -13,9 +13,9 @@
 //! loads first); see the comment on that function.
 
 const std = @import("std");
-const constants = @import("../format/streamlz_constants.zig");
-const copy = @import("../io/copy_helpers.zig");
-const ptr_math = @import("../io/ptr_math.zig");
+const constants = @import("../../format/streamlz_constants.zig");
+const copy = @import("../../io/copy_helpers.zig");
+const ptr_math = @import("../../io/ptr_math.zig");
 const high = @import("high_lz_decoder.zig");
 
 // Keep this in sync with decode/streamlz_decoder.zig::safe_space.

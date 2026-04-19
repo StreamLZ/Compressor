@@ -27,7 +27,7 @@
 
 const std = @import("std");
 const fast_constants = @import("fast_constants.zig");
-const lz_constants = @import("../format/streamlz_constants.zig");
+const lz_constants = @import("../../format/streamlz_constants.zig");
 
 /// Output of a single sub-chunk encode. The parser fills these six streams,
 /// then `assembleRaw` / `assembleEntropy` serializes them into the dst buffer.

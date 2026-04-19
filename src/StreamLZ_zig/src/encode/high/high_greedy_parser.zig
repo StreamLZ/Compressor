@@ -14,13 +14,13 @@
 //!   L4     → numLazy = 2  (two lazy steps)
 
 const std = @import("std");
-const lz_constants = @import("../format/streamlz_constants.zig");
-const match_eval = @import("match_eval.zig");
+const lz_constants = @import("../../format/streamlz_constants.zig");
+const match_eval = @import("../match_eval.zig");
 const mls_mod = @import("managed_match_len_storage.zig");
 const high_types = @import("high_types.zig");
 const high_matcher = @import("high_matcher.zig");
 const high_encoder = @import("high_encoder.zig");
-const hasher_mod = @import("match_hasher.zig");
+const hasher_mod = @import("../match_hasher.zig");
 
 const LengthAndOffset = mls_mod.LengthAndOffset;
 const HighRecentOffs = high_types.HighRecentOffs;

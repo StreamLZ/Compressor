@@ -20,12 +20,12 @@
 const std = @import("std");
 const fast_constants = @import("fast_constants.zig");
 const FastMatchHasher = @import("fast_match_hasher.zig").FastMatchHasher;
-const match_hasher = @import("match_hasher.zig");
+const match_hasher = @import("../match_hasher.zig");
 const writer_mod = @import("FastStreamWriter.zig");
 const parser = @import("fast_lz_parser.zig");
 const token_writer = @import("fast_token_writer.zig");
-const entropy_enc = @import("entropy_encoder.zig");
-const byte_hist = @import("ByteHistogram.zig");
+const entropy_enc = @import("../entropy/entropy_encoder.zig");
+const byte_hist = @import("../entropy/ByteHistogram.zig");
 const cost_model = @import("fast_cost_model.zig");
 
 const MatchHasher2 = match_hasher.MatchHasher2;
@@ -828,8 +828,8 @@ pub fn encodeSubChunkEntropyChain(
 // ────────────────────────────────────────────────────────────
 
 const testing = std.testing;
-const decoder = @import("../decode/fast_lz_decoder.zig");
-const lz_constants = @import("../format/streamlz_constants.zig");
+const decoder = @import("../../decode/fast/fast_lz_decoder.zig");
+const lz_constants = @import("../../format/streamlz_constants.zig");
 
 /// Wrap a raw-encoded sub-chunk in the 3-byte outer header and decode it.
 /// Returns the decoded bytes via `out`.

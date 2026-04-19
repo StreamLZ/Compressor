@@ -3,7 +3,7 @@
 //! Shared constants and small helpers for the Fast encoder.
 
 const std = @import("std");
-const lz_constants = @import("../format/streamlz_constants.zig");
+const lz_constants = @import("../../format/streamlz_constants.zig");
 
 /// Minimum source length below which compression is skipped (returned as-is).
 pub const min_source_length: usize = 128;

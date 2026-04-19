@@ -8,7 +8,7 @@
 //! via `extractLaoFromMls`.
 
 const std = @import("std");
-const match_eval = @import("match_eval.zig");
+const match_eval = @import("../match_eval.zig");
 
 /// (length, offset) pair. Offset is the
 /// backward distance to the match source (always positive for hash-based

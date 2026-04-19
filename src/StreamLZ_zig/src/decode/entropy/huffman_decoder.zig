@@ -17,7 +17,7 @@
 //!     stream before decoding two symbols from it.
 
 const std = @import("std");
-const constants = @import("../format/streamlz_constants.zig");
+const constants = @import("../../format/streamlz_constants.zig");
 const brl = @import("bit_reader_lite.zig");
 
 // Re-export shared types so existing callers (entropy_decoder.zig) that

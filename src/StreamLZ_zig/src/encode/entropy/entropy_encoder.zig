@@ -225,7 +225,7 @@ pub fn encodeArrayU8CompactHeader(
 // ────────────────────────────────────────────────────────────
 
 const testing = std.testing;
-const entropy_dec = @import("../decode/entropy_decoder.zig");
+const entropy_dec = @import("../../decode/entropy/entropy_decoder.zig");
 
 test "encodeArrayU8Memcpy + decoder roundtrip" {
     const src = "Hello, world! This is a small string.";
@@ -252,7 +252,7 @@ test "encodeArrayU8 with tANS picks compressed path for compressible data" {
     // production call sites (the default for L9). At `speed_tradeoff = 1.0`
     // the tANS speed-penalty would exceed the memcpy budget and force
     // the encoder into memcpy fallback.
-    const cost_coeffs = @import("cost_coefficients.zig");
+    const cost_coeffs = @import("../cost_coefficients.zig");
     const real_speed_tradeoff = cost_coeffs.speedTradeoffForHigh(cost_coeffs.default_space_speed_tradeoff_bytes);
     const n = try encodeArrayU8(
         testing.allocator,
