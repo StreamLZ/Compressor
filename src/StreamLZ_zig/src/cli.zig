@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const frame = @import("format/frame_format.zig");
 const decoder = @import("decode/streamlz_decoder.zig");
 const encoder = @import("encode/streamlz_encoder.zig");
+const dict_mod = @import("dict/dictionary.zig");
 
 const version_string = "0.0.0-phase3a";
 
@@ -26,6 +27,8 @@ const Args = struct {
     threads: u32,
     input: ?[]const u8,
     output: ?[]const u8,
+    dict_name: ?[]const u8 = null, // -D name or path
+    no_dict: bool = false, // --no-dict disables auto-detection
 };
 
 fn parseArgs(raw: []const []const u8, w: *std.Io.Writer) Args {
@@ -102,6 +105,16 @@ fn parseArgs(raw: []const []const u8, w: *std.Io.Writer) Args {
             if (i + 1 >= raw.len) die(w, "error: -o requires a value\n");
             i += 1;
             result.output = raw[i];
+            continue;
+        }
+        if (eql(arg, "-D")) {
+            if (i + 1 >= raw.len) die(w, "error: -D requires a dictionary name or path\n");
+            i += 1;
+            result.dict_name = raw[i];
+            continue;
+        }
+        if (eql(arg, "--no-dict")) {
+            result.no_dict = true;
             continue;
         }
         // Starts with '-' but not recognized
@@ -206,6 +219,8 @@ fn printUsage(w: *std.Io.Writer) !void {
         \\  -r <runs>       Benchmark runs (default: 3 for -b, 10 for -db)
         \\  -t <threads>    Threads (0=auto, default: 0)
         \\  -o <file>       Output file
+        \\  -D <name|path>  Dictionary (built-in: json, html, text, xml, css, js)
+        \\  --no-dict       Disable auto-detected dictionary
         \\  -V, --version   Print version
         \\  -h, --help      Print help
         \\
@@ -337,9 +352,32 @@ fn runCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !voi
     };
     defer allocator.free(dst);
 
+    // Dictionary resolution: explicit -D flag, or auto-detect by extension.
+    var dict_data: ?[]const u8 = null;
+    var dict_id: ?u32 = null;
+    if (args.dict_name) |name| {
+        if (dict_mod.findByName(name)) |d| {
+            dict_data = d.data;
+            dict_id = d.id;
+            try w.print("  dictionary: {s} (built-in, {d} bytes)\n", .{ d.name, d.data.len });
+        } else {
+            try w.print("error: unknown dictionary '{s}'\n", .{name});
+            try w.flush();
+            std.process.exit(2);
+        }
+    } else if (!args.no_dict) {
+        if (dict_mod.findByExtension(in_path)) |d| {
+            dict_data = d.data;
+            dict_id = d.id;
+            try w.print("  dictionary: {s} (auto-detected, {d} bytes)\n", .{ d.name, d.data.len });
+        }
+    }
+
     const written = encoder.compressFramed(allocator, src, dst, .{
         .level = level,
         .num_threads = args.threads,
+        .dictionary = dict_data,
+        .dictionary_id = dict_id,
     }) catch |err| {
         try w.print("error: compression failed: {s}\n", .{@errorName(err)});
         try w.flush();

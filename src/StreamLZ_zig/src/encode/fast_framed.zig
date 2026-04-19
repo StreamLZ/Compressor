@@ -71,6 +71,7 @@ pub fn compressFramedOne(
         .level = codec_level,
         .block_size = opts.block_size,
         .content_size = if (opts.include_content_size) @as(u64, @intCast(src.len)) else null,
+        .dictionary_id = opts.dictionary_id,
     });
     pos += hdr_len;
 

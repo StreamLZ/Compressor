@@ -126,6 +126,15 @@ pub const Options = struct {
     /// The sidecar is ~0.3-1% of compressed size and has no impact on
     /// compression ratio of the main payload.
     emit_parallel_decode_metadata: bool = true,
+
+    /// External dictionary bytes to prepend as match-finder preload.
+    /// The encoder treats these as prior output that the decoder will
+    /// also have. When non-null, the frame header's dictionary_id field
+    /// is set to `dictionary_id`.
+    dictionary: ?[]const u8 = null,
+    /// Dictionary ID written into the frame header. Built-in IDs are
+    /// 1-255; custom dictionaries use IDs >= 0x1000_0000.
+    dictionary_id: ?u32 = null,
 };
 
 /// Resolved per-input parameters derived from `Options` + heuristics.
