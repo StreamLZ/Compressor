@@ -253,6 +253,9 @@ pub fn compressFramedHigh(
         // the match finder picks up extra matches.
         const local_dict_size: usize = if (mapping.codec_level >= 9 and !self_contained) 128 * 1024 * 1024 else 64 * 1024 * 1024;
 
+        const dict_wnd = opts.dictionary orelse &[_]u8{};
+        const dict_len_wnd = dict_wnd.len;
+
         var src_off: usize = 0;
         while (src_off < src.len) {
             const block_bytes: usize = @min(src.len - src_off, frame_block_size);
@@ -261,10 +264,24 @@ pub fn compressFramedHigh(
             const dict_bytes: usize = @min(raw_dict_bytes, dict_cap);
             const window_start: usize = src_off - dict_bytes;
             const window_len: usize = dict_bytes + block_bytes;
-            const window_slice: []const u8 = src[window_start..][0..window_len];
+            const base_window: []const u8 = src[window_start..][0..window_len];
 
-            // Fresh cost-model state per frame block (matches the
-            // per-`CompressBlock` LzCoder instantiation).
+            // For the first frame block, prepend external dictionary
+            // to the match finder window. Subsequent blocks carry
+            // prior output as their sliding window dictionary.
+            const use_ext_dict = src_off == 0 and dict_len_wnd > 0;
+            var combined_wnd: ?[]u8 = null;
+            const window_slice: []const u8 = if (use_ext_dict) blk: {
+                const buf = allocator.alloc(u8, dict_len_wnd + window_len) catch return error.OutOfMemory;
+                @memcpy(buf[0..dict_len_wnd], dict_wnd);
+                @memcpy(buf[dict_len_wnd..], base_window);
+                combined_wnd = buf;
+                break :blk buf;
+            } else base_window;
+            defer if (combined_wnd) |buf| allocator.free(buf);
+
+            const effective_dict_bytes: usize = dict_bytes + (if (use_ext_dict) dict_len_wnd else 0);
+
             cross_block_state = .{};
 
             try compressOneFrameBlockWindowed(
@@ -273,12 +290,12 @@ pub fn compressFramedHigh(
                 &hasher,
                 mapping,
                 window_slice,
-                dict_bytes,
+                effective_dict_bytes,
                 block_bytes,
                 dst,
                 &pos,
-                src,
-                src_off,
+                if (use_ext_dict) window_slice else src,
+                if (use_ext_dict) effective_dict_bytes else src_off,
             );
 
             src_off += block_bytes;
