@@ -1145,3 +1145,48 @@ which is L6-L8), accepting the ratio cost.
    with larger group sizes (e.g., 16 chunks = 4 MB per group instead
    of 4 chunks = 1 MB). Already works with the existing decoder.
    Trades ratio for parallelism at a user-chosen granularity.
+
+---
+
+## Two-pass stats seeding for L10-L11 (zstd btultra2 style) (2026-04-19)
+
+**Context**: zstd's `--ultra` level 22 uses a two-pass strategy
+(`ZSTD_btultra2`) where the first block is compressed twice — the first
+pass collects frequency statistics, discards the output, and the second
+pass recompresses with better-calibrated entropy tables. zstd claims
+~0.5% ratio gain for 2x CPU cost on the first block.
+
+**What zstd does differently at ultra levels**:
+- 128 MB window (vs StreamLZ's 64 MB)
+- Two-pass stats seeding on first block
+- Long Distance Matching (LDM) with dedicated hash table
+- No offset-cost penalty in cost model (optLevel=2)
+- searchLog=9 (512 BT4 probes vs StreamLZ's 128)
+- minMatch=3 (vs StreamLZ's 4)
+
+**What we tried**: Force the existing outer loop (which re-runs the
+optimal parser when chunk type mismatches) to always run twice on the
+first sub-chunk when `codec_level >= 7` (L10-L11). The first iteration
+collects accurate frequency histograms from the full DP parse; the
+second iteration uses those histograms to seed the cost model.
+
+**Results** (enwik8 100 MB, single-threaded):
+
+| Level | Baseline | Two-pass | Delta |
+|-------|----------|----------|-------|
+| L9 (codec_level=5) | 28,335,062 | 28,335,062 | 0 (not triggered) |
+| L10 (codec_level=7) | 28,193,894 | 28,189,497 | -4,397 (-0.016%) |
+| L11 (codec_level=9) | 26,903,621 | 26,903,185 | -436 (-0.002%) |
+
+**Why so small**: StreamLZ's `collectStatistics` greedy pre-pass
+already provides reasonable initial frequency histograms before the
+optimal parser runs. The optimal parser also updates stats
+incrementally after each 32 KB chunk (`updateStats` + `makeCostModel`),
+so the cost model adapts quickly. The cold-start penalty that zstd's
+two-pass addresses (crude predefined baselines like `{4,2,1,1,...}`)
+doesn't exist in StreamLZ because the greedy pre-pass provides
+data-derived stats from the start.
+
+**Disposition**: Reverted. The ~0.01% ratio gain doesn't justify 2x
+CPU cost on the first block. StreamLZ's greedy pre-pass already
+captures most of the benefit that zstd's two-pass provides.
