@@ -9,12 +9,15 @@ const version_string = "0.0.0-phase3a";
 
 // ─── Argument parsing ────────────────────────────────────────────────
 
+const trainer = @import("dict/trainer.zig");
+
 const Mode = enum {
     compress,
     decompress,
     bench, // compress + decompress benchmark
     bench_decompress, // decompress-only benchmark (-db)
     bench_all, // all levels L1-L11 (-ba)
+    train, // dictionary training
     info,
     version,
     help,
@@ -80,7 +83,10 @@ fn parseArgs(raw: []const []const u8, w: *std.Io.Writer) Args {
         }
         if (eql(arg, "-i")) {
             result.mode = .info;
-
+            continue;
+        }
+        if (eql(arg, "--train")) {
+            result.mode = .train;
             continue;
         }
         if (eql(arg, "-l")) {
@@ -188,6 +194,7 @@ pub fn run() !void {
         .bench_decompress => try runBenchDecompress(allocator, w, args),
         .bench_all => try runBenchAll(allocator, w, args),
         .info => try runInfo(allocator, w, args),
+        .train => try runTrain(allocator, w, args),
     }
 }
 
@@ -212,6 +219,7 @@ fn printUsage(w: *std.Io.Writer) !void {
         \\  -b              Benchmark (compress + decompress, verify round-trip)
         \\  -db             Decompress benchmark (input is pre-compressed .slz file)
         \\  -ba             Bench all levels L1-L11 (compress only, shows ratio table)
+        \\  --train         Train a dictionary from input files (-o dict.bin file1 file2 ...)
         \\  -i              Info (dump SLZ1 frame header + block list)
         \\
         \\Options:
@@ -837,4 +845,116 @@ fn runInfo(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !void {
     try w.print("  total blocks:    {d}\n", .{block_index});
     try w.print("  total decomp:    {d} bytes\n", .{total_decompressed});
     try w.print("  trailing bytes:  {d}\n", .{data.len -| pos});
+}
+
+// ─── Train ─────────────────────────────────────────────────────────
+
+fn runTrain(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !void {
+    const in_path = requireInput(args, w);
+    const out_path = args.output orelse "dictionary.bin";
+    const dict_size: usize = 32768;
+
+    // Read all files from the input directory as training samples.
+    var dir = std.fs.cwd().openDir(in_path, .{ .iterate = true }) catch |err| {
+        try w.print("error: cannot open directory '{s}': {s}\n", .{ in_path, @errorName(err) });
+        try w.flush();
+        std.process.exit(1);
+    };
+    defer dir.close();
+
+    var samples: std.ArrayList([]const u8) = .{};
+    defer {
+        for (samples.items) |s| allocator.free(s);
+        samples.deinit(allocator);
+    }
+
+    var total_bytes: usize = 0;
+    var file_count: usize = 0;
+    var iter = dir.iterate();
+    while (iter.next() catch null) |entry| {
+        if (entry.kind != .file) continue;
+        const file = dir.openFile(entry.name, .{}) catch continue;
+        defer file.close();
+        const data = file.readToEndAlloc(allocator, 64 * 1024 * 1024) catch continue;
+        if (data.len < 16) {
+            allocator.free(data);
+            continue;
+        }
+        try samples.append(allocator, data);
+        total_bytes += data.len;
+        file_count += 1;
+    }
+
+    if (file_count == 0) {
+        try w.print("error: no usable files found in '{s}'\n", .{in_path});
+        try w.flush();
+        std.process.exit(1);
+    }
+
+    try w.print("training: {d} files, {d:.1} KB total\n", .{
+        file_count,
+        @as(f64, @floatFromInt(total_bytes)) / 1024.0,
+    });
+
+    var timer = try std.time.Timer.start();
+    var result = trainer.train(allocator, samples.items, .{
+        .dict_size = dict_size,
+    }) catch |err| {
+        try w.print("error: training failed: {s}\n", .{@errorName(err)});
+        try w.flush();
+        std.process.exit(1);
+    };
+    defer result.deinit();
+    const train_ms = @as(f64, @floatFromInt(timer.read())) / 1_000_000.0;
+
+    // Write dictionary.
+    const out_file = std.fs.cwd().createFile(out_path, .{}) catch |err| {
+        try w.print("error: cannot create '{s}': {s}\n", .{ out_path, @errorName(err) });
+        try w.flush();
+        std.process.exit(1);
+    };
+    defer out_file.close();
+    out_file.writeAll(result.dict) catch |err| {
+        try w.print("error: cannot write '{s}': {s}\n", .{ out_path, @errorName(err) });
+        try w.flush();
+        std.process.exit(1);
+    };
+
+    try w.print("trained: {d} bytes dictionary -> {s}  ({d:.0} ms)\n", .{
+        result.dict.len,
+        out_path,
+        train_ms,
+    });
+
+    // Quick quality check: compress each sample with and without dictionary.
+    var total_no_dict: usize = 0;
+    var total_with_dict: usize = 0;
+    for (samples.items) |sample| {
+        if (sample.len < 64) continue;
+        const bound = encoder.compressBound(sample.len);
+        const comp_buf = allocator.alloc(u8, bound) catch continue;
+        defer allocator.free(comp_buf);
+
+        const no_dict_size = encoder.compressFramed(allocator, sample, comp_buf, .{
+            .level = 3,
+        }) catch continue;
+        total_no_dict += no_dict_size;
+
+        const with_dict_size = encoder.compressFramed(allocator, sample, comp_buf, .{
+            .level = 3,
+            .dictionary = result.dict,
+            .dictionary_id = 0x10000001,
+        }) catch continue;
+        total_with_dict += with_dict_size;
+    }
+
+    if (total_no_dict > 0) {
+        const improvement = @as(f64, @floatFromInt(total_no_dict)) - @as(f64, @floatFromInt(total_with_dict));
+        const pct = improvement / @as(f64, @floatFromInt(total_no_dict)) * 100.0;
+        try w.print("quality: no_dict={d} bytes, with_dict={d} bytes ({d:.2}% improvement)\n", .{
+            total_no_dict,
+            total_with_dict,
+            pct,
+        });
+    }
 }
