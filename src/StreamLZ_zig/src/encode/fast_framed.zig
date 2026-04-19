@@ -247,7 +247,7 @@ pub fn compressFramedOne(
         const block_start: usize = pos;
         // For SC mode, EVERY block is a keyframe (independently decodable).
         // Keyframe when sc || first block in frame.
-        const keyframe = self_contained or src_off == 0;
+        const keyframe = self_contained or src_off == dict_len;
 
         // ── Write 2-byte block header (compressed) ──────────────────────
         if (pos + 2 > dst.len) return error.DestinationTooSmall;
@@ -286,7 +286,7 @@ pub fn compressFramedOne(
 
         while (sub_off < block_src_len) {
             const round_bytes: usize = @min(block_src_len - sub_off, fast_constants.sub_chunk_size);
-            const sub_src: []const u8 = src[src_off + sub_off ..][0..round_bytes];
+            const sub_src: []const u8 = effective_src[src_off + sub_off ..][0..round_bytes];
 
             const round_f: f32 = @floatFromInt(round_bytes);
             const sub_memset_cost: f32 =

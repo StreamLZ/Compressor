@@ -627,7 +627,7 @@ fn decompressCompressedBlock(
 
     while (dst_remaining > 0) {
         const dst_off = dst_off_inout.*;
-        const at_chunk_boundary = (dst_off & (constants.chunk_size - 1)) == 0;
+        const at_chunk_boundary = ((dst_off - sc_start_dst_off) & (constants.chunk_size - 1)) == 0;
 
         if (at_chunk_boundary or internal_hdr == null) {
             if (src_pos + 2 > block_src.len) return error.Truncated;
