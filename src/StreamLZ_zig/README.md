@@ -7,8 +7,7 @@ reference, and is the focal point for **decompress-side performance work** —
 the project's primary goal is fast decompression on consumer x86 (Arrow Lake / Zen 4 / Zen 5),
 not maximum compression ratio.
 
-This file is the canonical state-of-the-port document. It supersedes the older
-`STATUS.md` / `PARITY.md` / `BENCHMARKS.md` triple. Read this first.
+This file is the canonical state-of-the-port document. Read this first.
 
 ---
 
@@ -39,6 +38,8 @@ The CLI binary is `zig-out/bin/streamlz.exe` after `zig build -Doptimize=Release
 zig build -Doptimize=ReleaseFast               # release binary
 zig build -Doptimize=ReleaseFast -Dstrip=false # release + symbols (for VTune)
 zig build test --summary all                   # run unit tests
+zig build safe                                 # ReleaseSafe (runtime safety checks)
+zig build fuzz                                 # fuzz harness for decompressor
 ```
 
 The build defaults to `x86_64_v3` baseline (Haswell-and-later) for AMD/Intel
@@ -46,13 +47,13 @@ portability — earlier `-Dcpu=native` builds compiled with AVX-512 instructions
 that crashed on Ryzen 3800x. Override with `-Dcpu=native` if you want
 host-specific tuning.
 
-The test suite passes **276/276** unit tests. The fixture suite (`fixture_tests` +
+The test suite passes **282/282** unit tests. The fixture suite (`fixture_tests` +
 `encode_fixture_tests`) decodes 140 corpus files and round-trips 100 encode
 fixtures byte-exact against the C# reference. The fixture corpus lives under
 `fixtures/{raw,slz}` (gitignored); generate with `scripts/gen_fixtures.sh` and
 set `STREAMLZ_FIXTURES_DIR=./fixtures` before `zig build test` to enable it.
 
-> Known quirk: the test process occasionally exits with code 3 after all 276
+> Known quirk: the test process occasionally exits with code 3 after all 282
 > tests have already reported pass. The pass count is the source of truth;
 > the exit-code anomaly is a Zig stdlib teardown issue not yet diagnosed.
 
@@ -174,10 +175,9 @@ with long matches, so the per-thread decoder hot loop runs efficient
 straight-line work. JSON drops back toward 8 GB/s at L4 where the match
 graph is denser per KB. Compress-side v2 overhead is small (~10-15% over v1
 for the closure walker + sidecar emit). Round-trip passes at every level on
-every input. **L5 is still serial** — its lazy chain parser produces ~10×
-more closure tokens per block than greedy L1-L4, so an always-on sidecar
-would dominate compressed size; a per-block trigger is the likely path
-forward.
+every input. **L5 parallel decode has landed** (1.9× speedup, 10 ms on enwik8) using a
+larger sidecar (~1.2 MB) with cross-chunk source bytes at recursive
+transitive depth >= 1, filtered to 16-chunk slice boundaries.
 
 ---
 
@@ -185,63 +185,79 @@ forward.
 
 ```
 src/StreamLZ_zig/
-  build.zig                       Zig 0.15.2 build, default -mcpu x86_64_v3
+  build.zig                       Zig 0.15.2 build
   build.zig.zon
   README.md                       (this file)
-  FailedExperiments.md            (referenced — see Investigations)
-  fixtures/{raw,slz}              fixture corpus (gitignored, run gen_fixtures.sh)
+  BENCHMARKS.md                   historical + post-audit numbers
+  audit.md                        code audit with status tracker
+  FailedExperiments.md
+  fixtures/{raw,slz}              fixture corpus (gitignored)
   scripts/gen_fixtures.sh
   src/
-    main.zig                      CLI dispatcher: compress, decompress,
-                                  bench, benchc, info, analyze
+    main.zig                      CLI dispatcher
+    streamlz.zig                  public library API (re-exports)
+    fuzz_decompress.zig           fuzz harness (zig build fuzz)
     format/
-      streamlz_constants.zig      magic numbers, chunk sizes, table parameters
-      frame_format.zig            SLZ1 outer frame + 8-byte block header
-      block_header.zig            internal 2-byte block hdr + 4-byte chunk hdr
+      streamlz_constants.zig      centralized constants
+      frame_format.zig            SLZ1 frame + block headers
+      block_header.zig            internal 2-byte + 4-byte chunk headers
+      parallel_decode_metadata.zig  sidecar wire format
     io/
-      bit_reader.zig              MSB-first bit reader, fwd + bwd refill
-      bit_writer.zig              4 bit-writer variants
-      bit_writer_64.zig           64-bit forward + backward bit writers
-      copy_helpers.zig            copy64, copy16, copy16Add, wildCopy16
-                                  (SIMD-backed via @Vector(16, u8))
+      BitReader.zig               MSB-first bit reader
+      bit_writer.zig              4 bit-writer variants (with debug bounds)
+      copy_helpers.zig            SIMD copy helpers + alignment
+      ptr_math.zig                signed-offset pointer arithmetic
+    platform/
+      memory_query.zig            OS memory query (Windows/Linux/macOS)
     decode/
-      streamlz_decoder.zig        framed decompress, parallel-dispatch entry,
-                                  decompressStream + sliding window + XXH32
-      decompress_parallel.zig     std.Thread.Pool dispatch for SC + two-phase
-      fast_lz_decoder.zig         L1-L5 codec hot loop
-      high_lz_decoder.zig         L6-L11 codec entry + readLzTable
-      high_lz_process_runs.zig    L6-L11 token resolve (Type 0 + Type 1)
-      entropy_decoder.zig         tANS / Huffman / RLE / recursive dispatch
-      huffman_decoder.zig         canonical Huffman 11-bit LUT, 3-stream parallel
-      tans_decoder.zig            tANS table decode + LUT init + 5-state decode
-      cleanness_analyzer.zig      sidecar builder + DAG analyzer (parallel decode)
+      streamlz_decoder.zig        framed decompress + DecompressContext
+      decompress_parallel.zig     parallel dispatch (SC + two-phase + sidecar)
+      cross_chunk_analyzer.zig    sidecar builder + DAG analyzer
+      fixture_tests.zig           test-only: fixture roundtrips
+      fast/
+        fast_lz_decoder.zig       L1-L5 codec hot loop
+      high/
+        high_lz_decoder.zig       L6-L11 codec entry
+        high_lz_token_executor.zig  L6-L11 token resolve
+      entropy/
+        entropy_decoder.zig       tANS / Huffman / RLE dispatch
+        huffman_decoder.zig       canonical Huffman 11-bit LUT
+        tans_decoder.zig          tANS 5-state decode
+        bit_reader_lite.zig       shared Golomb-Rice infrastructure
     encode/
-      streamlz_encoder.zig        framed compress, Fast L1-L5 + compressFramedHigh
-      fast_constants.zig          level mapping + min-match-length table
-      fast_match_hasher.zig       single-entry Fibonacci hash
-      fast_stream_writer.zig      6-stream output buffer
-      fast_token_writer.zig       Fast cmd encoding helpers
-      fast_lz_parser.zig          greedy + lazy chain parser
-      fast_lz_encoder.zig         sub-chunk encoders (raw / entropy / chain)
+      streamlz_encoder.zig        public compress API (~667 lines)
+      fast_framed.zig             Fast codec frame builder
+      high_framed.zig             High codec frame builder
+      compress_parallel.zig       parallel compress dispatch
+      cost_coefficients.zig       empirical timing coefficients
+      match_eval.zig              shared match evaluation helpers
+      match_hasher.zig            MatchHasher family (bucket-based)
+      offset_encoder.zig          LZ offset encoding pipeline
       text_detector.zig           text-probability heuristic
-      cost_model.zig              decode-time cost estimates
-      cost_coefficients.zig       memset-cost + speed-tradeoff scaling
-      byte_histogram.zig          ByteHistogram + getCostApproxCore
-      match_hasher.zig            MatchHasher1/2x/4/4Dual/16Dual family
-      match_eval.zig              countMatchingBytes / getLazyScore / etc.
-      managed_match_len_storage.zig  MLS + VarLen codec
-      match_finder.zig            hash-based finder (SIMD probe + dual prefetch)
-      match_finder_bt4.zig        binary-tree finder for L11
-      offset_encoder.zig          OffsetEncoder + writeLzOffsetBits
-      entropy_encoder.zig         encodeArrayU8 + tANS + memcpy fallback
-      tans_encoder.zig            tANS encoder
-      high_types.zig              Token, State, Stats, CostModel, RecentOffs
-      high_matcher.zig            isMatchLongEnough, recent-offset slot matching
-      high_cost_model.zig         per-symbol cost calculation
-      high_encoder.zig            HighEncoderContext, addToken, assemble output
-      high_fast_parser.zig        greedy / 1-lazy / 2-lazy for L6-L8
-      high_optimal_parser.zig     forward DP + backward extraction (L9+)
-      high_compressor.zig         setupEncoder + level dispatch
+      encode_fixture_tests.zig    test-only: encode roundtrips
+      fast/
+        fast_lz_encoder.zig       sub-chunk encoders (raw/entropy)
+        fast_lz_parser.zig        greedy + lazy chain parser
+        FastStreamWriter.zig      6-stream output buffer
+        fast_match_hasher.zig     single-entry Fibonacci hash
+        fast_token_writer.zig     Fast cmd encoding helpers
+        fast_constants.zig        level mapping + min-match table
+        fast_cost_model.zig       decode-time cost estimates
+      high/
+        high_compressor.zig       level dispatch + setup
+        high_encoder.zig          stream writer + assemble output
+        high_optimal_parser.zig   forward DP + backward extraction
+        high_greedy_parser.zig    greedy/lazy for L6-L8
+        high_matcher.zig          match ranking
+        high_types.zig            Token, State, Stats, CostModel
+        high_cost_model.zig       per-symbol cost calculation
+        managed_match_len_storage.zig  MLS + VarLen codec
+        match_finder.zig          hash-based finder (SIMD probe)
+        match_finder_bt4.zig      binary-tree finder for L11
+      entropy/
+        entropy_encoder.zig       encodeArrayU8 + tANS + memcpy
+        tans_encoder.zig          tANS encoder
+        ByteHistogram.zig         byte frequency histogram
 ```
 
 The decode side has zero dependencies on the encode side; either can be vendored
@@ -427,7 +443,7 @@ The single-thread tuning frontier is largely closed.
 ### Cleanness analyzer (`streamlz analyze`)
 
 A diagnostic-only token-dependency-DAG analyzer lives in
-`src/decode/cleanness_analyzer.zig`. It walks an `.slz` file's LZ tokens, builds
+`src/decode/cross_chunk_analyzer.zig`. It walks an `.slz` file's LZ tokens, builds
 the per-byte dependency DAG, and reports:
 - Total match tokens
 - Critical path depth (longest dependency chain)
@@ -479,10 +495,11 @@ For anyone modifying the hot loops:
    bytes at the end of each frame block. After decoding all chunks, overwrite
    first 8 bytes of every chunk except chunk 0 with those tail bytes.
 
-6. **`comptime mode: LiteralMode`** in `fast_lz_decoder.processModeImpl`
-   generates two specialized functions (delta-literal vs raw-literal). Zig
-   replacement for C#'s `ILiteralMode` interface trick. Unambiguous win for
-   branch-free hot loops because there's only one callsite per specialization.
+6. **`comptime mode: LiteralMode`** in `decode/fast/fast_lz_decoder.zig`
+   (`processModeImpl`) generates two specialized functions (delta-literal vs
+   raw-literal). Zig replacement for C#'s `ILiteralMode` interface trick.
+   Unambiguous win for branch-free hot loops because there's only one callsite
+   per specialization.
 
 7. **Default build target `x86_64_v3`.** Set in `build.zig` so binaries are
    portable across modern Intel and AMD x86_64 hosts. AVX-512 instructions
