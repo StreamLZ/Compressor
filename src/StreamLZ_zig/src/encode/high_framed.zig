@@ -121,7 +121,7 @@ pub fn compressFramedHigh(
     const num_blocks: usize = if (can_compress) ((src.len + lz_constants.chunk_size - 1) / lz_constants.chunk_size) else 0;
     const resolved_threads: u32 = blk: {
         if (opts.num_threads >= 1) break :blk opts.num_threads;
-        break :blk calculateMaxThreads(src.len, opts.level);
+        break :blk calculateMaxThreads(src.len);
     };
     const can_parallel_sc: bool =
         can_compress and

@@ -464,6 +464,15 @@ work (e.g., comparing dependency density across encoders or input types).
 
 ---
 
+## Pointer safety
+
+- `[]u8` slices at all public API boundaries.
+- `[*]u8` raw pointers for struct fields that advance through a buffer (hot-loop iterators).
+- Every raw pointer stored in a struct field has a matching `std.debug.assert` that validates bounds in Debug / ReleaseSafe builds -- zero cost in ReleaseFast.
+- See `io/bit_writer.zig` `initBounded` for the canonical pattern.
+
+---
+
 ## Key invariants worth knowing
 
 For anyone modifying the hot loops:

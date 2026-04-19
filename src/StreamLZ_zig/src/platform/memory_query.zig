@@ -82,11 +82,7 @@ pub fn totalAvailableMemoryBytes() u64 {
 ///
 /// The `src_len` parameter is the estimate for shared memory
 /// overhead (estimated as `srcLen`).
-/// `level` is accepted for forward compatibility but not
-/// currently used — per-thread memory is estimated with a level-
-/// independent constant.
-pub fn calculateMaxThreads(src_len: usize, level: u8) u32 {
-    _ = level; // reserved for future level-dependent estimate
+pub fn calculateMaxThreads(src_len: usize) u32 {
     const cpu: u32 = @intCast(std.Thread.getCpuCount() catch 1);
     const total_memory: u64 = totalAvailableMemoryBytes();
     if (total_memory == 0) return @max(@as(u32, 1), cpu);
@@ -112,15 +108,15 @@ test "calculateMaxThreads: returns at least 1" {
     // Any non-negative input must yield a positive thread count —
     // a caller passing the result directly into the parallel
     // dispatch should never see 0.
-    const n = calculateMaxThreads(0, 9);
+    const n = calculateMaxThreads(0);
     try testing.expect(n >= 1);
-    const m = calculateMaxThreads(1024 * 1024, 9);
+    const m = calculateMaxThreads(1024 * 1024);
     try testing.expect(m >= 1);
 }
 
 test "calculateMaxThreads: doesn't exceed CPU count" {
     const cpu: u32 = @intCast(std.Thread.getCpuCount() catch 1);
-    const n = calculateMaxThreads(1024, 6);
+    const n = calculateMaxThreads(1024);
     try testing.expect(n <= cpu);
 }
 
@@ -130,7 +126,7 @@ test "calculateMaxThreads: scales down with huge src_len" {
     // 1. We can't observe this directly without knowing the host's
     // total_memory, so we test with src_len == usize max, which
     // guarantees `memory_budget <= shared_mem` on any host.
-    const n = calculateMaxThreads(std.math.maxInt(usize) / 2, 9);
+    const n = calculateMaxThreads(std.math.maxInt(usize) / 2);
     try testing.expect(n >= 1);
 }
 

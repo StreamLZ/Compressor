@@ -48,6 +48,9 @@ pub const CompressError = error{
     DestinationTooSmall,
 } || std.mem.Allocator.Error || fast_enc.EncodeError || std.Thread.SpawnError;
 
+/// When the allocator cannot satisfy a single-piece compress, the encoder
+/// automatically splits the input into concatenated self-contained frames.
+/// The decompressor handles this transparently.
 pub const Options = struct {
     /// User level 1–5 supported by the Fast encoder. (L6–L11 High codec
     /// lands in a later phase.)

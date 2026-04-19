@@ -361,8 +361,588 @@ fn backwardExtract(
     return num_tokens;
 }
 
+/// Result of a single DP + encode pass, returned by `optimalOnePass`.
+const OnePassResult = struct {
+    /// Encoded byte count from `encodeTokenArray`, or 0 on encode failure.
+    encoded_length: usize,
+    /// Bit cost reported by the encoder.
+    cost: f32,
+    /// Chunk type chosen by the encoder.
+    chunk_type: i32,
+    /// True when `encodeTokenArray` returned an error.
+    encode_failed: bool,
+    /// True when the token array overflowed during backward extraction.
+    token_overflow: bool,
+};
+
+/// Inner DP pass: forward DP + backward token extraction + encode.
+///
+/// Runs one full optimal-parse pass over the source with the
+/// pre-configured `cost_model` and `stats`. Returns the encode
+/// result without any outer-loop retry logic.
+///
+/// IMPORTANT: Do NOT modify the forward-DP or backward-extraction
+/// loops in this function — they are extremely codegen-sensitive.
+fn optimalOnePass(
+    ctx: *const HighEncoderContext,
+    source: [*]const u8,
+    src_size: i32,
+    start_pos: i32,
+    cost_model: *CostModel,
+    stats: *Stats,
+    states: []State,
+    lz_token_array: *TokenArray,
+    lz_tokens: []Token,
+    tokens_begin: []Token,
+    lit_indexes: ?[*]i32,
+    match_table: []const LengthAndOffset,
+    tmp_dst_buf: []u8,
+    src_len_usize: usize,
+    initial_copy_bytes: i32,
+    state_width: usize,
+    max_literal_run_trials: i32,
+    length_long_enough_thres: usize,
+    sc: bool,
+    sc_pos_in_chunk: i32,
+    dict_size: u32,
+    window_base: [*]const u8,
+    min_match_length: i32,
+    src_end_safe: [*]const u8,
+) OnePassResult {
+    for (0..state_width * src_len_usize + 1) |i| {
+        states[i].best_bit_count = std.math.maxInt(i32);
+    }
+
+    lz_token_array.size = 0;
+    var chunk_start: usize = @intCast(initial_copy_bytes);
+
+    // Initial state.
+    states[state_width * chunk_start].init();
+
+    while (chunk_start < src_len_usize - 16) {
+        var lit_bits_since_prev: i32 = 0;
+        var prev_offset: usize = chunk_start;
+
+        var chunk_end: usize = chunk_start + max_bytes_per_round;
+        if (chunk_end >= src_len_usize - 32) chunk_end = src_len_usize - 16;
+
+        var max_offset: usize = chunk_start + min_bytes_per_round;
+        if (max_offset >= src_len_usize - 32) max_offset = src_len_usize - 16;
+
+        const bits_for_offset_8: i32 = @intCast(high_cost_model.bitsForOffset(cost_model, 8));
+
+        if (state_width > 1) {
+            // Initialize the additional state columns.
+            var i: usize = 1;
+            while (i < state_width) : (i += 1) {
+                var j: usize = 0;
+                while (j < state_width) : (j += 1) {
+                    states[state_width * (chunk_start + i) + j].best_bit_count = std.math.maxInt(i32);
+                }
+            }
+            var j2: usize = 1;
+            while (j2 < state_width) : (j2 += 1) {
+                states[state_width * chunk_start + j2].best_bit_count = std.math.maxInt(i32);
+            }
+
+            if (max_offset - chunk_start > state_width) {
+                var k: usize = 1;
+                while (k < state_width) : (k += 1) {
+                    states[(chunk_start + k) * state_width + k] = states[(chunk_start + k - 1) * state_width + k - 1];
+                    const extra_bits: i32 = @intCast(high_cost_model.bitsForLiteral(
+                        source,
+                        chunk_start + k - 1,
+                        states[chunk_start * state_width].recent_offs0,
+                        cost_model,
+                    ));
+                    states[(chunk_start + k) * state_width + k].best_bit_count += extra_bits;
+                }
+                if (lit_indexes) |li| li[chunk_start + state_width - 1] = @intCast(state_width - 1);
+            } else {
+                chunk_start = src_len_usize - 16;
+            }
+        }
+
+        // ── Phase 1: Forward DP ──
+        var pos: usize = chunk_start;
+        while (max_offset <= chunk_end) {
+            if (pos == src_len_usize - 16) {
+                max_offset = pos;
+                break;
+            }
+
+            const src_cur: [*]const u8 = source + pos;
+            const u32_at_cur: u32 = std.mem.readInt(u32, src_cur[0..4], .little);
+
+            if (state_width == 1) {
+                if (pos != prev_offset) {
+                    const extra_bits: i32 = @intCast(high_cost_model.bitsForLiteral(
+                        source,
+                        pos - 1,
+                        states[prev_offset].recent_offs0,
+                        cost_model,
+                    ));
+                    lit_bits_since_prev += extra_bits;
+                    const cur_bits = states[pos].best_bit_count;
+                    if (cur_bits != std.math.maxInt(i32)) {
+                        const prev_bits = states[prev_offset].best_bit_count + lit_bits_since_prev;
+                        const lit_run_len: i32 = @intCast(pos - prev_offset);
+                        if (cur_bits < prev_bits + @as(i32, @intCast(high_cost_model.bitsForLiteralLength(cost_model, lit_run_len)))) {
+                            prev_offset = pos;
+                            lit_bits_since_prev = 0;
+                            if (pos >= max_offset) {
+                                max_offset = pos;
+                                break;
+                            }
+                        }
+                    }
+                }
+            } else {
+                if (pos >= max_offset) {
+                    var tmp_cur_offset: usize = 0;
+                    var best_bits: i32 = std.math.maxInt(i32);
+                    var i: usize = 0;
+                    while (i < state_width) : (i += 1) {
+                        if (states[state_width * pos + i].best_bit_count < best_bits) {
+                            best_bits = states[state_width * pos + i].best_bit_count;
+                            const li_val: usize = if (lit_indexes) |li| @intCast(li[pos]) else 0;
+                            const sub: usize = if (i != state_width - 1) i else li_val;
+                            tmp_cur_offset = pos - sub;
+                        }
+                    }
+                    if (tmp_cur_offset >= max_offset) {
+                        max_offset = tmp_cur_offset;
+                        break;
+                    }
+                }
+                const cur = &states[state_width * pos + state_width - 1];
+                if (cur.best_bit_count != std.math.maxInt(i32)) {
+                    const li_val: i32 = if (lit_indexes) |li| li[pos] else 0;
+                    const extra_bits: i32 = @intCast(high_cost_model.bitsForLiteral(
+                        source,
+                        pos,
+                        cur.recent_offs0,
+                        cost_model,
+                    ));
+                    const bits2 = cur.best_bit_count + extra_bits;
+                    if (bits2 < states[state_width * pos + 2 * state_width - 1].best_bit_count) {
+                        states[state_width * pos + 2 * state_width - 1] = cur.*;
+                        states[state_width * pos + 2 * state_width - 1].best_bit_count = bits2;
+                        if (lit_indexes) |li| li[pos + 1] = li_val + 1;
+                    }
+                }
+            }
+
+            // Extract matches from the match table.
+            var match_arr: [8]LengthAndOffset = @splat(.{ .length = 0, .offset = 0 });
+            var match_found_offset_bits: [8]i32 = @splat(0);
+            var num_match: usize = 0;
+            const sc_max_back: i64 = if (sc) @intCast(sc_pos_in_chunk + @as(i32, @intCast(pos))) else std.math.maxInt(i64);
+
+            var lao_index: usize = 0;
+            while (lao_index < 4) : (lao_index += 1) {
+                // The varlen encoding stores large unsigned values in i32 fields,
+                // so @bitCast is needed. The extractor now guarantees remaining
+                // slots are zeroed, so no garbage reaches this cast.
+                var lao_ml: u32 = @bitCast(match_table[4 * pos + lao_index].length);
+                var lao_offs: u32 = @bitCast(match_table[4 * pos + lao_index].offset);
+                if (lao_ml < @as(u32, @intCast(min_match_length))) break;
+                const remaining: usize = @intFromPtr(src_end_safe) - @intFromPtr(src_cur);
+                lao_ml = @min(lao_ml, @as(u32, @intCast(remaining)));
+                if (lao_offs >= dict_size) continue;
+                if (@as(i64, lao_offs) > sc_max_back) continue;
+
+                if (lao_offs < 8) {
+                    const tt = lao_offs;
+                    while (lao_offs < 8) lao_offs += tt;
+                    const back_dist: usize = @intFromPtr(src_cur) - @intFromPtr(window_base);
+                    if (lao_offs > @as(u32, @intCast(back_dist))) continue;
+                    if (@as(i64, lao_offs) > sc_max_back) continue;
+                    const extended = match_eval.getMatchLengthQuickMin4(src_cur, @intCast(lao_offs), src_end_safe, u32_at_cur);
+                    lao_ml = @intCast(extended);
+                    if (lao_ml < @as(u32, @intCast(min_match_length))) continue;
+                }
+
+                if (high_matcher.checkMatchValidLength(lao_ml, lao_offs)) {
+                    match_arr[num_match].length = @intCast(lao_ml);
+                    match_arr[num_match].offset = @intCast(lao_offs);
+                    match_found_offset_bits[num_match] = @intCast(high_cost_model.bitsForOffset(cost_model, lao_offs));
+                    num_match += 1;
+                }
+            }
+
+            // Also check offset 8.
+            if (8 <= sc_max_back) {
+                const length8 = match_eval.getMatchLengthQuickMin3(src_cur, 8, src_end_safe, u32_at_cur);
+                if (@as(i32, @intCast(length8)) >= min_match_length and num_match < 8) {
+                    match_arr[num_match].length = @intCast(length8);
+                    match_arr[num_match].offset = 8;
+                    match_found_offset_bits[num_match] = bits_for_offset_8;
+                    num_match += 1;
+                }
+            }
+
+            // For each literal-run length + match candidate, propagate DP states.
+            var best_length_so_far: usize = 0;
+            const lits_since_prev: i32 = @intCast(pos - prev_offset);
+            var lowest_cost_from_any_lazy_trial: i32 = std.math.maxInt(i32);
+
+            var lazy: i32 = 0;
+            while (lazy <= max_literal_run_trials) : (lazy += 1) {
+                var literal_run_length: i32 = undefined;
+                var total_bits: i32 = undefined;
+                var prev_state: usize = undefined;
+
+                if (state_width == 1) {
+                    literal_run_length = if (lazy == max_literal_run_trials and lits_since_prev > max_literal_run_trials)
+                        lits_since_prev
+                    else
+                        lazy;
+                    if (@as(i64, @intCast(pos)) - @as(i64, literal_run_length) < @as(i64, @intCast(chunk_start))) break;
+                    prev_state = pos - @as(usize, @intCast(literal_run_length));
+                    total_bits = states[prev_state].best_bit_count;
+                    if (total_bits == std.math.maxInt(i32)) continue;
+                    if (literal_run_length == lits_since_prev) {
+                        total_bits += lit_bits_since_prev;
+                    } else {
+                        total_bits += @intCast(high_cost_model.bitsForLiterals(
+                            source,
+                            pos - @as(usize, @intCast(literal_run_length)),
+                            @intCast(literal_run_length),
+                            states[prev_state].recent_offs0,
+                            cost_model,
+                        ));
+                    }
+                } else {
+                    if (lazy < state_width) {
+                        prev_state = state_width * pos + @as(usize, @intCast(lazy));
+                        total_bits = states[prev_state].best_bit_count;
+                        if (total_bits == std.math.maxInt(i32)) continue;
+                        const li_val: i32 = if (lit_indexes) |li| li[pos] else 0;
+                        literal_run_length = if (lazy == @as(i32, @intCast(state_width - 1))) li_val else lazy;
+                    } else {
+                        literal_run_length = lazy - 1;
+                        if (@as(i64, @intCast(pos)) - @as(i64, literal_run_length) < @as(i64, @intCast(chunk_start))) break;
+                        prev_state = state_width * (pos - @as(usize, @intCast(literal_run_length)));
+                        total_bits = states[prev_state].best_bit_count;
+                        if (total_bits == std.math.maxInt(i32)) continue;
+                        total_bits += @intCast(high_cost_model.bitsForLiterals(
+                            source,
+                            pos - @as(usize, @intCast(literal_run_length)),
+                            @intCast(literal_run_length),
+                            states[prev_state].recent_offs0,
+                            cost_model,
+                        ));
+                    }
+                }
+
+                var length_field: i32 = literal_run_length;
+                if (literal_run_length >= 3) {
+                    length_field = 3;
+                    total_bits += @intCast(high_cost_model.bitsForLiteralLength(cost_model, literal_run_length));
+                }
+
+                var recent_best_length: i32 = 0;
+
+                // Recent offsets.
+                var ridx: u2 = 0;
+                while (ridx < recent_offset_count) : (ridx += 1) {
+                    const offs = states[prev_state].getRecentOffs(ridx);
+                    if (@as(i64, offs) > sc_max_back) continue;
+                    const recent_ml_raw = match_eval.getMatchLengthQuick(src_cur, offs, src_end_safe, u32_at_cur);
+                    const recent_ml: i32 = @intCast(recent_ml_raw);
+                    if (recent_ml <= recent_best_length) continue;
+                    recent_best_length = recent_ml;
+                    max_offset = @max(max_offset, pos + @as(usize, @intCast(recent_ml)));
+                    const full_bits = total_bits + high_cost_model.bitsForToken(
+                        cost_model,
+                        recent_ml,
+                        @intCast(pos - @as(usize, @intCast(literal_run_length))),
+                        ridx,
+                        length_field,
+                    );
+                    updateStatesZ(pos, full_bits, literal_run_length, recent_ml, ridx, prev_state, states.ptr, source, offs, state_width, cost_model, lit_indexes, true);
+
+                    if (recent_ml > 2 and recent_ml < @as(i32, @intCast(length_long_enough_thres))) {
+                        var trial_ml: i32 = 2;
+                        while (trial_ml < recent_ml) : (trial_ml += 1) {
+                            const bits_sub = total_bits + high_cost_model.bitsForToken(
+                                cost_model,
+                                trial_ml,
+                                @intCast(pos - @as(usize, @intCast(literal_run_length))),
+                                ridx,
+                                length_field,
+                            );
+                            updateStatesZ(pos, bits_sub, literal_run_length, trial_ml, ridx, prev_state, states.ptr, source, offs, state_width, cost_model, lit_indexes, true);
+                        }
+                    }
+
+                    // Recent0 after 1-2 literals.
+                    if (pos + @as(usize, @intCast(recent_ml)) + 4 < src_len_usize - 16) {
+                        var num_lazy: i32 = 1;
+                        while (num_lazy <= 2) : (num_lazy += 1) {
+                            const trial_ptr = src_cur + @as(usize, @intCast(recent_ml + num_lazy));
+                            const trial_len_raw = match_eval.getMatchLengthMin2(trial_ptr, offs, src_end_safe);
+                            const trial_len: i32 = @intCast(trial_len_raw);
+                            if (trial_len != 0) {
+                                const cost2 = full_bits +
+                                    @as(i32, @intCast(high_cost_model.bitsForLiterals(
+                                        source,
+                                        pos + @as(usize, @intCast(recent_ml)),
+                                        @intCast(num_lazy),
+                                        offs,
+                                        cost_model,
+                                    ))) +
+                                    high_cost_model.bitsForToken(cost_model, trial_len, @intCast(pos + @as(usize, @intCast(recent_ml))), 0, num_lazy);
+                                max_offset = @max(max_offset, pos + @as(usize, @intCast(recent_ml + trial_len + num_lazy)));
+                                _ = updateState(
+                                    (pos + @as(usize, @intCast(recent_ml + trial_len + num_lazy))) * state_width,
+                                    cost2,
+                                    literal_run_length,
+                                    recent_ml,
+                                    ridx,
+                                    prev_state,
+                                    num_lazy | (trial_len << 8),
+                                    states.ptr,
+                                    true,
+                                );
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                best_length_so_far = @max(best_length_so_far, @as(usize, @intCast(recent_best_length)));
+                if (best_length_so_far >= length_long_enough_thres) break;
+
+                if (total_bits < lowest_cost_from_any_lazy_trial) {
+                    lowest_cost_from_any_lazy_trial = total_bits;
+
+                    // Walk the match candidates.
+                    var matchidx: usize = 0;
+                    while (matchidx < num_match) : (matchidx += 1) {
+                        const max_ml = match_arr[matchidx].length;
+                        const moffs = match_arr[matchidx].offset;
+                        if (max_ml <= recent_best_length) break;
+                        const after_match: usize = pos + @as(usize, @intCast(max_ml));
+                        best_length_so_far = @max(best_length_so_far, @as(usize, @intCast(max_ml)));
+                        max_offset = @max(max_offset, after_match);
+                        const bits_with_off = total_bits + match_found_offset_bits[matchidx];
+                        const full_bits = bits_with_off + high_cost_model.bitsForToken(
+                            cost_model,
+                            max_ml,
+                            @intCast(pos - @as(usize, @intCast(literal_run_length))),
+                            @intCast(recent_offset_count),
+                            length_field,
+                        );
+                        updateStatesZ(pos, full_bits, literal_run_length, max_ml, moffs, prev_state, states.ptr, source, moffs, state_width, cost_model, lit_indexes, false);
+
+                        if (max_ml > min_match_length and max_ml < @as(i32, @intCast(length_long_enough_thres))) {
+                            var trial_ml: i32 = min_match_length;
+                            while (trial_ml < max_ml) : (trial_ml += 1) {
+                                const bits_sub = bits_with_off + high_cost_model.bitsForToken(
+                                    cost_model,
+                                    trial_ml,
+                                    @intCast(pos - @as(usize, @intCast(literal_run_length))),
+                                    @intCast(recent_offset_count),
+                                    length_field,
+                                );
+                                updateStatesZ(pos, bits_sub, literal_run_length, trial_ml, moffs, prev_state, states.ptr, source, moffs, state_width, cost_model, lit_indexes, false);
+                            }
+                        }
+
+                        // Recent0 after 1-2 literals for new-offset matches too.
+                        if (after_match + 4 < src_len_usize - 16) {
+                            var num_lazy: i32 = 1;
+                            while (num_lazy <= 2) : (num_lazy += 1) {
+                                const trial_ptr = src_cur + @as(usize, @intCast(max_ml + num_lazy));
+                                const trial_len_raw = match_eval.getMatchLengthMin2(trial_ptr, moffs, src_end_safe);
+                                const trial_len: i32 = @intCast(trial_len_raw);
+                                if (trial_len != 0) {
+                                    const cost2 = full_bits +
+                                        @as(i32, @intCast(high_cost_model.bitsForLiterals(
+                                            source,
+                                            after_match,
+                                            @intCast(num_lazy),
+                                            moffs,
+                                            cost_model,
+                                        ))) +
+                                        high_cost_model.bitsForToken(cost_model, trial_len, @intCast(after_match), 0, num_lazy);
+                                    max_offset = @max(max_offset, after_match + @as(usize, @intCast(trial_len + num_lazy)));
+                                    _ = updateState(
+                                        (after_match + @as(usize, @intCast(trial_len + num_lazy))) * state_width,
+                                        cost2,
+                                        literal_run_length,
+                                        max_ml,
+                                        moffs,
+                                        prev_state,
+                                        num_lazy | (trial_len << 8),
+                                        states.ptr,
+                                        false,
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Long-match skip.
+            if (best_length_so_far >= length_long_enough_thres) {
+                const current_end: usize = best_length_so_far + pos;
+                if (max_offset == current_end) {
+                    max_offset = current_end;
+                    prev_offset = current_end;
+                    break;
+                }
+                if (state_width == 1) {
+                    lit_bits_since_prev = 0;
+                    prev_offset = current_end;
+                } else {
+                    const recent_offs0_local = states[current_end * state_width].recent_offs0;
+                    var i: usize = 1;
+                    while (i < state_width) : (i += 1) {
+                        states[(current_end + i) * state_width + i] = states[(current_end + i - 1) * state_width + i - 1];
+                        const extra_bits: i32 = @intCast(high_cost_model.bitsForLiteral(
+                            source,
+                            current_end + i - 1,
+                            recent_offs0_local,
+                            cost_model,
+                        ));
+                        states[(current_end + i) * state_width + i].best_bit_count += extra_bits;
+                    }
+                    if (lit_indexes) |li| li[current_end + state_width - 1] = @intCast(state_width - 1);
+                }
+                pos = current_end - 1;
+            }
+
+            pos += 1;
+        }
+
+        // ── Best-final selection (reached end of chunk/block) ──
+        var last_state_index: usize = state_width * max_offset;
+        const reached_end: bool = max_offset >= src_len_usize - 18;
+        var final_lz_offset: usize = max_offset;
+
+        if (reached_end) {
+            var best_bits: i32 = std.math.maxInt(i32);
+            if (state_width == 1) {
+                var final_offs: usize = @max(chunk_start, if (prev_offset >= 8) prev_offset - 8 else 0);
+                while (final_offs < src_len_usize) : (final_offs += 1) {
+                    const bits = states[final_offs].best_bit_count;
+                    if (bits == std.math.maxInt(i32)) continue;
+                    const extra: i32 = @intCast(high_cost_model.bitsForLiterals(
+                        source,
+                        final_offs,
+                        src_len_usize - final_offs,
+                        states[final_offs].recent_offs0,
+                        cost_model,
+                    ));
+                    const total = bits + extra;
+                    if (total < best_bits) {
+                        best_bits = total;
+                        final_lz_offset = final_offs;
+                        last_state_index = final_offs;
+                    }
+                }
+            } else {
+                var final_offs: usize = @max(chunk_start, if (max_offset >= 8) max_offset - 8 else 0);
+                while (final_offs < src_len_usize) : (final_offs += 1) {
+                    var idx: usize = 0;
+                    while (idx < state_width) : (idx += 1) {
+                        const bits = states[state_width * final_offs + idx].best_bit_count;
+                        if (bits == std.math.maxInt(i32)) continue;
+                        const litidx: usize = if (idx == state_width - 1)
+                            (if (lit_indexes) |li| @intCast(li[final_offs]) else 0)
+                        else
+                            idx;
+                        if (final_offs < litidx) continue;
+                        const offs: usize = final_offs - litidx;
+                        if (offs < chunk_start) continue;
+                        const extra: i32 = @intCast(high_cost_model.bitsForLiterals(
+                            source,
+                            final_offs,
+                            src_len_usize - final_offs,
+                            states[state_width * final_offs + idx].recent_offs0,
+                            cost_model,
+                        ));
+                        const total = bits + extra;
+                        if (total < best_bits) {
+                            best_bits = total;
+                            final_lz_offset = offs;
+                            last_state_index = state_width * final_offs + idx;
+                        }
+                    }
+                }
+            }
+            max_offset = final_lz_offset;
+        }
+
+        // ── Phase 2: Backward token extraction ──
+        const num_tokens = backwardExtract(
+            states.ptr,
+            max_offset,
+            last_state_index,
+            chunk_start,
+            tokens_begin,
+            lz_token_array,
+            lz_tokens,
+        ) orelse return .{
+            .encoded_length = 0,
+            .cost = std.math.inf(f32),
+            .chunk_type = -1,
+            .encode_failed = false,
+            .token_overflow = true,
+        };
+
+        if (reached_end) break;
+
+        // ── Phase 3: Stats update ──
+        high_cost_model.updateStats(stats, source, chunk_start, tokens_begin[0..num_tokens]);
+        high_cost_model.makeCostModel(stats, cost_model);
+        chunk_start = max_offset;
+    }
+
+    // ── Encode the full accumulated token array ──
+    var cost: f32 = std.math.inf(f32);
+    var tmp_ct: i32 = -1;
+    const n_enc = high_encoder.encodeTokenArray(
+        ctx,
+        source,
+        src_size,
+        tmp_dst_buf.ptr,
+        tmp_dst_buf[tmp_dst_buf.len..].ptr,
+        start_pos,
+        lz_tokens[0..lz_token_array.size],
+        stats,
+        &cost,
+        &tmp_ct,
+    ) catch {
+        return .{
+            .encoded_length = 0,
+            .cost = std.math.inf(f32),
+            .chunk_type = -1,
+            .encode_failed = true,
+            .token_overflow = false,
+        };
+    };
+
+    return .{
+        .encoded_length = n_enc,
+        .cost = cost,
+        .chunk_type = tmp_ct,
+        .encode_failed = false,
+        .token_overflow = false,
+    };
+}
+
 /// Optimal parser entry point. Performs the 3-phase DP + backward
 /// extraction + outer-loop rematch for L8+.
+///
+/// The outer loop handles cost-model seeding, cross-block stats
+/// carry, and chunk-type mismatch re-runs (up to twice for L8+).
+/// The inner DP pass lives in `optimalOnePass`.
 ///
 /// Returns the compressed byte count on success, or `null` when
 /// compression isn't beneficial (the caller should emit uncompressed).
@@ -560,11 +1140,11 @@ pub fn optimal(
         min_match_length = @intCast(@max(opts.min_match_length, 3));
     }
 
-    var outer_loop_index_mut: u32 = 0;
-    // Cross-block stats carry: if the caller plumbed a `HighCrossBlockState`,
-    // read the previous block's stats as a seed for `rescaleAddStats`.
-    // stores these in `lzcoder.SymbolStatisticsScratch` + `lzcoder.LastChunkType`;
-    // without plumbing this, multi-block streams diverge byte-exact parity.
+    // ── Cross-block stats carry ──
+    // If the caller plumbed a `HighCrossBlockState`, read the previous
+    // block's stats as a seed for `rescaleAddStats`. C# stores these in
+    // `lzcoder.SymbolStatisticsScratch` + `lzcoder.LastChunkType`; without
+    // plumbing this, multi-block streams diverge byte-exact parity.
     var prev_stats: ?Stats = null;
     var last_chunk_type: i32 = -1;
     if (ctx.cross_block) |cb| {
@@ -575,7 +1155,9 @@ pub fn optimal(
     }
 
     // ── Outer loop: re-run up to twice for L8+ ──
+    var outer_loop_index_mut: u32 = 0;
     while (true) {
+        // ── Cost-model seeding ──
         cost_model.chunk_type = chunk_type_out.*;
         cost_model.sub_or_copy_mask = if (chunk_type_out.* != 1) -1 else 0;
         cost_model.decode_cost_per_token = opts.decode_cost_per_token;
@@ -593,532 +1175,59 @@ pub fn optimal(
         cost_model.offs_encode_type = stats.offs_encode_type;
         high_cost_model.makeCostModel(&stats, &cost_model);
 
-        for (0..state_width * src_len_usize + 1) |i| {
-            states[i].best_bit_count = std.math.maxInt(i32);
-        }
-
-        lz_token_array.size = 0;
-        var chunk_start: usize = @intCast(initial_copy_bytes);
-
-        // Initial state.
-        states[state_width * chunk_start].init();
-
-        while (chunk_start < src_len_usize - 16) {
-            var lit_bits_since_prev: i32 = 0;
-            var prev_offset: usize = chunk_start;
-
-            var chunk_end: usize = chunk_start + max_bytes_per_round;
-            if (chunk_end >= src_len_usize - 32) chunk_end = src_len_usize - 16;
-
-            var max_offset: usize = chunk_start + min_bytes_per_round;
-            if (max_offset >= src_len_usize - 32) max_offset = src_len_usize - 16;
-
-            const bits_for_offset_8: i32 = @intCast(high_cost_model.bitsForOffset(&cost_model, 8));
-
-            if (state_width > 1) {
-                // Initialize the additional state columns.
-                var i: usize = 1;
-                while (i < state_width) : (i += 1) {
-                    var j: usize = 0;
-                    while (j < state_width) : (j += 1) {
-                        states[state_width * (chunk_start + i) + j].best_bit_count = std.math.maxInt(i32);
-                    }
-                }
-                var j2: usize = 1;
-                while (j2 < state_width) : (j2 += 1) {
-                    states[state_width * chunk_start + j2].best_bit_count = std.math.maxInt(i32);
-                }
-
-                if (max_offset - chunk_start > state_width) {
-                    var k: usize = 1;
-                    while (k < state_width) : (k += 1) {
-                        states[(chunk_start + k) * state_width + k] = states[(chunk_start + k - 1) * state_width + k - 1];
-                        const extra_bits: i32 = @intCast(high_cost_model.bitsForLiteral(
-                            source,
-                            chunk_start + k - 1,
-                            states[chunk_start * state_width].recent_offs0,
-                            &cost_model,
-                        ));
-                        states[(chunk_start + k) * state_width + k].best_bit_count += extra_bits;
-                    }
-                    if (lit_indexes) |li| li[chunk_start + state_width - 1] = @intCast(state_width - 1);
-                } else {
-                    chunk_start = src_len_usize - 16;
-                }
-            }
-
-            // ── Phase 1: Forward DP ──
-            var pos: usize = chunk_start;
-            while (max_offset <= chunk_end) {
-                if (pos == src_len_usize - 16) {
-                    max_offset = pos;
-                    break;
-                }
-
-                const src_cur: [*]const u8 = source + pos;
-                const u32_at_cur: u32 = std.mem.readInt(u32, src_cur[0..4], .little);
-
-                if (state_width == 1) {
-                    if (pos != prev_offset) {
-                        const extra_bits: i32 = @intCast(high_cost_model.bitsForLiteral(
-                            source,
-                            pos - 1,
-                            states[prev_offset].recent_offs0,
-                            &cost_model,
-                        ));
-                        lit_bits_since_prev += extra_bits;
-                        const cur_bits = states[pos].best_bit_count;
-                        if (cur_bits != std.math.maxInt(i32)) {
-                            const prev_bits = states[prev_offset].best_bit_count + lit_bits_since_prev;
-                            const lit_run_len: i32 = @intCast(pos - prev_offset);
-                            if (cur_bits < prev_bits + @as(i32, @intCast(high_cost_model.bitsForLiteralLength(&cost_model, lit_run_len)))) {
-                                prev_offset = pos;
-                                lit_bits_since_prev = 0;
-                                if (pos >= max_offset) {
-                                    max_offset = pos;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    if (pos >= max_offset) {
-                        var tmp_cur_offset: usize = 0;
-                        var best_bits: i32 = std.math.maxInt(i32);
-                        var i: usize = 0;
-                        while (i < state_width) : (i += 1) {
-                            if (states[state_width * pos + i].best_bit_count < best_bits) {
-                                best_bits = states[state_width * pos + i].best_bit_count;
-                                const li_val: usize = if (lit_indexes) |li| @intCast(li[pos]) else 0;
-                                const sub: usize = if (i != state_width - 1) i else li_val;
-                                tmp_cur_offset = pos - sub;
-                            }
-                        }
-                        if (tmp_cur_offset >= max_offset) {
-                            max_offset = tmp_cur_offset;
-                            break;
-                        }
-                    }
-                    const cur = &states[state_width * pos + state_width - 1];
-                    if (cur.best_bit_count != std.math.maxInt(i32)) {
-                        const li_val: i32 = if (lit_indexes) |li| li[pos] else 0;
-                        const extra_bits: i32 = @intCast(high_cost_model.bitsForLiteral(
-                            source,
-                            pos,
-                            cur.recent_offs0,
-                            &cost_model,
-                        ));
-                        const bits2 = cur.best_bit_count + extra_bits;
-                        if (bits2 < states[state_width * pos + 2 * state_width - 1].best_bit_count) {
-                            states[state_width * pos + 2 * state_width - 1] = cur.*;
-                            states[state_width * pos + 2 * state_width - 1].best_bit_count = bits2;
-                            if (lit_indexes) |li| li[pos + 1] = li_val + 1;
-                        }
-                    }
-                }
-
-                // Extract matches from the match table.
-                var match_arr: [8]LengthAndOffset = @splat(.{ .length = 0, .offset = 0 });
-                var match_found_offset_bits: [8]i32 = @splat(0);
-                var num_match: usize = 0;
-                const sc_max_back: i64 = if (sc) @intCast(sc_pos_in_chunk + @as(i32, @intCast(pos))) else std.math.maxInt(i64);
-
-                var lao_index: usize = 0;
-                while (lao_index < 4) : (lao_index += 1) {
-                    // The varlen encoding stores large unsigned values in i32 fields,
-                    // so @bitCast is needed. The extractor now guarantees remaining
-                    // slots are zeroed, so no garbage reaches this cast.
-                    var lao_ml: u32 = @bitCast(match_table[4 * pos + lao_index].length);
-                    var lao_offs: u32 = @bitCast(match_table[4 * pos + lao_index].offset);
-                    if (lao_ml < @as(u32, @intCast(min_match_length))) break;
-                    const remaining: usize = @intFromPtr(src_end_safe) - @intFromPtr(src_cur);
-                    lao_ml = @min(lao_ml, @as(u32, @intCast(remaining)));
-                    if (lao_offs >= dict_size) continue;
-                    if (@as(i64, lao_offs) > sc_max_back) continue;
-
-                    if (lao_offs < 8) {
-                        const tt = lao_offs;
-                        while (lao_offs < 8) lao_offs += tt;
-                        const back_dist: usize = @intFromPtr(src_cur) - @intFromPtr(window_base);
-                        if (lao_offs > @as(u32, @intCast(back_dist))) continue;
-                        if (@as(i64, lao_offs) > sc_max_back) continue;
-                        const extended = match_eval.getMatchLengthQuickMin4(src_cur, @intCast(lao_offs), src_end_safe, u32_at_cur);
-                        lao_ml = @intCast(extended);
-                        if (lao_ml < @as(u32, @intCast(min_match_length))) continue;
-                    }
-
-                    if (high_matcher.checkMatchValidLength(lao_ml, lao_offs)) {
-                        match_arr[num_match].length = @intCast(lao_ml);
-                        match_arr[num_match].offset = @intCast(lao_offs);
-                        match_found_offset_bits[num_match] = @intCast(high_cost_model.bitsForOffset(&cost_model, lao_offs));
-                        num_match += 1;
-                    }
-                }
-
-                // Also check offset 8.
-                if (8 <= sc_max_back) {
-                    const length8 = match_eval.getMatchLengthQuickMin3(src_cur, 8, src_end_safe, u32_at_cur);
-                    if (@as(i32, @intCast(length8)) >= min_match_length and num_match < 8) {
-                        match_arr[num_match].length = @intCast(length8);
-                        match_arr[num_match].offset = 8;
-                        match_found_offset_bits[num_match] = bits_for_offset_8;
-                        num_match += 1;
-                    }
-                }
-
-                // For each literal-run length + match candidate, propagate DP states.
-                var best_length_so_far: usize = 0;
-                const lits_since_prev: i32 = @intCast(pos - prev_offset);
-                var lowest_cost_from_any_lazy_trial: i32 = std.math.maxInt(i32);
-
-                var lazy: i32 = 0;
-                while (lazy <= max_literal_run_trials) : (lazy += 1) {
-                    var literal_run_length: i32 = undefined;
-                    var total_bits: i32 = undefined;
-                    var prev_state: usize = undefined;
-
-                    if (state_width == 1) {
-                        literal_run_length = if (lazy == max_literal_run_trials and lits_since_prev > max_literal_run_trials)
-                            lits_since_prev
-                        else
-                            lazy;
-                        if (@as(i64, @intCast(pos)) - @as(i64, literal_run_length) < @as(i64, @intCast(chunk_start))) break;
-                        prev_state = pos - @as(usize, @intCast(literal_run_length));
-                        total_bits = states[prev_state].best_bit_count;
-                        if (total_bits == std.math.maxInt(i32)) continue;
-                        if (literal_run_length == lits_since_prev) {
-                            total_bits += lit_bits_since_prev;
-                        } else {
-                            total_bits += @intCast(high_cost_model.bitsForLiterals(
-                                source,
-                                pos - @as(usize, @intCast(literal_run_length)),
-                                @intCast(literal_run_length),
-                                states[prev_state].recent_offs0,
-                                &cost_model,
-                            ));
-                        }
-                    } else {
-                        if (lazy < state_width) {
-                            prev_state = state_width * pos + @as(usize, @intCast(lazy));
-                            total_bits = states[prev_state].best_bit_count;
-                            if (total_bits == std.math.maxInt(i32)) continue;
-                            const li_val: i32 = if (lit_indexes) |li| li[pos] else 0;
-                            literal_run_length = if (lazy == @as(i32, @intCast(state_width - 1))) li_val else lazy;
-                        } else {
-                            literal_run_length = lazy - 1;
-                            if (@as(i64, @intCast(pos)) - @as(i64, literal_run_length) < @as(i64, @intCast(chunk_start))) break;
-                            prev_state = state_width * (pos - @as(usize, @intCast(literal_run_length)));
-                            total_bits = states[prev_state].best_bit_count;
-                            if (total_bits == std.math.maxInt(i32)) continue;
-                            total_bits += @intCast(high_cost_model.bitsForLiterals(
-                                source,
-                                pos - @as(usize, @intCast(literal_run_length)),
-                                @intCast(literal_run_length),
-                                states[prev_state].recent_offs0,
-                                &cost_model,
-                            ));
-                        }
-                    }
-
-                    var length_field: i32 = literal_run_length;
-                    if (literal_run_length >= 3) {
-                        length_field = 3;
-                        total_bits += @intCast(high_cost_model.bitsForLiteralLength(&cost_model, literal_run_length));
-                    }
-
-                    var recent_best_length: i32 = 0;
-
-                    // Recent offsets.
-                    var ridx: u2 = 0;
-                    while (ridx < recent_offset_count) : (ridx += 1) {
-                        const offs = states[prev_state].getRecentOffs(ridx);
-                        if (@as(i64, offs) > sc_max_back) continue;
-                        const recent_ml_raw = match_eval.getMatchLengthQuick(src_cur, offs, src_end_safe, u32_at_cur);
-                        const recent_ml: i32 = @intCast(recent_ml_raw);
-                        if (recent_ml <= recent_best_length) continue;
-                        recent_best_length = recent_ml;
-                        max_offset = @max(max_offset, pos + @as(usize, @intCast(recent_ml)));
-                        const full_bits = total_bits + high_cost_model.bitsForToken(
-                            &cost_model,
-                            recent_ml,
-                            @intCast(pos - @as(usize, @intCast(literal_run_length))),
-                            ridx,
-                            length_field,
-                        );
-                        updateStatesZ(pos, full_bits, literal_run_length, recent_ml, ridx, prev_state, states.ptr, source, offs, state_width, &cost_model, lit_indexes, true);
-
-                        if (recent_ml > 2 and recent_ml < @as(i32, @intCast(length_long_enough_thres))) {
-                            var trial_ml: i32 = 2;
-                            while (trial_ml < recent_ml) : (trial_ml += 1) {
-                                const bits_sub = total_bits + high_cost_model.bitsForToken(
-                                    &cost_model,
-                                    trial_ml,
-                                    @intCast(pos - @as(usize, @intCast(literal_run_length))),
-                                    ridx,
-                                    length_field,
-                                );
-                                updateStatesZ(pos, bits_sub, literal_run_length, trial_ml, ridx, prev_state, states.ptr, source, offs, state_width, &cost_model, lit_indexes, true);
-                            }
-                        }
-
-                        // Recent0 after 1-2 literals.
-                        if (pos + @as(usize, @intCast(recent_ml)) + 4 < src_len_usize - 16) {
-                            var num_lazy: i32 = 1;
-                            while (num_lazy <= 2) : (num_lazy += 1) {
-                                const trial_ptr = src_cur + @as(usize, @intCast(recent_ml + num_lazy));
-                                const trial_len_raw = match_eval.getMatchLengthMin2(trial_ptr, offs, src_end_safe);
-                                const trial_len: i32 = @intCast(trial_len_raw);
-                                if (trial_len != 0) {
-                                    const cost2 = full_bits +
-                                        @as(i32, @intCast(high_cost_model.bitsForLiterals(
-                                            source,
-                                            pos + @as(usize, @intCast(recent_ml)),
-                                            @intCast(num_lazy),
-                                            offs,
-                                            &cost_model,
-                                        ))) +
-                                        high_cost_model.bitsForToken(&cost_model, trial_len, @intCast(pos + @as(usize, @intCast(recent_ml))), 0, num_lazy);
-                                    max_offset = @max(max_offset, pos + @as(usize, @intCast(recent_ml + trial_len + num_lazy)));
-                                    _ = updateState(
-                                        (pos + @as(usize, @intCast(recent_ml + trial_len + num_lazy))) * state_width,
-                                        cost2,
-                                        literal_run_length,
-                                        recent_ml,
-                                        ridx,
-                                        prev_state,
-                                        num_lazy | (trial_len << 8),
-                                        states.ptr,
-                                        true,
-                                    );
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    best_length_so_far = @max(best_length_so_far, @as(usize, @intCast(recent_best_length)));
-                    if (best_length_so_far >= length_long_enough_thres) break;
-
-                    if (total_bits < lowest_cost_from_any_lazy_trial) {
-                        lowest_cost_from_any_lazy_trial = total_bits;
-
-                        // Walk the match candidates.
-                        var matchidx: usize = 0;
-                        while (matchidx < num_match) : (matchidx += 1) {
-                            const max_ml = match_arr[matchidx].length;
-                            const moffs = match_arr[matchidx].offset;
-                            if (max_ml <= recent_best_length) break;
-                            const after_match: usize = pos + @as(usize, @intCast(max_ml));
-                            best_length_so_far = @max(best_length_so_far, @as(usize, @intCast(max_ml)));
-                            max_offset = @max(max_offset, after_match);
-                            const bits_with_off = total_bits + match_found_offset_bits[matchidx];
-                            const full_bits = bits_with_off + high_cost_model.bitsForToken(
-                                &cost_model,
-                                max_ml,
-                                @intCast(pos - @as(usize, @intCast(literal_run_length))),
-                                @intCast(recent_offset_count),
-                                length_field,
-                            );
-                            updateStatesZ(pos, full_bits, literal_run_length, max_ml, moffs, prev_state, states.ptr, source, moffs, state_width, &cost_model, lit_indexes, false);
-
-                            if (max_ml > min_match_length and max_ml < @as(i32, @intCast(length_long_enough_thres))) {
-                                var trial_ml: i32 = min_match_length;
-                                while (trial_ml < max_ml) : (trial_ml += 1) {
-                                    const bits_sub = bits_with_off + high_cost_model.bitsForToken(
-                                        &cost_model,
-                                        trial_ml,
-                                        @intCast(pos - @as(usize, @intCast(literal_run_length))),
-                                        @intCast(recent_offset_count),
-                                        length_field,
-                                    );
-                                    updateStatesZ(pos, bits_sub, literal_run_length, trial_ml, moffs, prev_state, states.ptr, source, moffs, state_width, &cost_model, lit_indexes, false);
-                                }
-                            }
-
-                            // Recent0 after 1-2 literals for new-offset matches too.
-                            if (after_match + 4 < src_len_usize - 16) {
-                                var num_lazy: i32 = 1;
-                                while (num_lazy <= 2) : (num_lazy += 1) {
-                                    const trial_ptr = src_cur + @as(usize, @intCast(max_ml + num_lazy));
-                                    const trial_len_raw = match_eval.getMatchLengthMin2(trial_ptr, moffs, src_end_safe);
-                                    const trial_len: i32 = @intCast(trial_len_raw);
-                                    if (trial_len != 0) {
-                                        const cost2 = full_bits +
-                                            @as(i32, @intCast(high_cost_model.bitsForLiterals(
-                                                source,
-                                                after_match,
-                                                @intCast(num_lazy),
-                                                moffs,
-                                                &cost_model,
-                                            ))) +
-                                            high_cost_model.bitsForToken(&cost_model, trial_len, @intCast(after_match), 0, num_lazy);
-                                        max_offset = @max(max_offset, after_match + @as(usize, @intCast(trial_len + num_lazy)));
-                                        _ = updateState(
-                                            (after_match + @as(usize, @intCast(trial_len + num_lazy))) * state_width,
-                                            cost2,
-                                            literal_run_length,
-                                            max_ml,
-                                            moffs,
-                                            prev_state,
-                                            num_lazy | (trial_len << 8),
-                                            states.ptr,
-                                            false,
-                                        );
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Long-match skip.
-                if (best_length_so_far >= length_long_enough_thres) {
-                    const current_end: usize = best_length_so_far + pos;
-                    if (max_offset == current_end) {
-                        max_offset = current_end;
-                        prev_offset = current_end;
-                        break;
-                    }
-                    if (state_width == 1) {
-                        lit_bits_since_prev = 0;
-                        prev_offset = current_end;
-                    } else {
-                        const recent_offs0_local = states[current_end * state_width].recent_offs0;
-                        var i: usize = 1;
-                        while (i < state_width) : (i += 1) {
-                            states[(current_end + i) * state_width + i] = states[(current_end + i - 1) * state_width + i - 1];
-                            const extra_bits: i32 = @intCast(high_cost_model.bitsForLiteral(
-                                source,
-                                current_end + i - 1,
-                                recent_offs0_local,
-                                &cost_model,
-                            ));
-                            states[(current_end + i) * state_width + i].best_bit_count += extra_bits;
-                        }
-                        if (lit_indexes) |li| li[current_end + state_width - 1] = @intCast(state_width - 1);
-                    }
-                    pos = current_end - 1;
-                }
-
-                pos += 1;
-            }
-
-            // ── Best-final selection (reached end of chunk/block) ──
-            var last_state_index: usize = state_width * max_offset;
-            const reached_end: bool = max_offset >= src_len_usize - 18;
-            var final_lz_offset: usize = max_offset;
-
-            if (reached_end) {
-                var best_bits: i32 = std.math.maxInt(i32);
-                if (state_width == 1) {
-                    var final_offs: usize = @max(chunk_start, if (prev_offset >= 8) prev_offset - 8 else 0);
-                    while (final_offs < src_len_usize) : (final_offs += 1) {
-                        const bits = states[final_offs].best_bit_count;
-                        if (bits == std.math.maxInt(i32)) continue;
-                        const extra: i32 = @intCast(high_cost_model.bitsForLiterals(
-                            source,
-                            final_offs,
-                            src_len_usize - final_offs,
-                            states[final_offs].recent_offs0,
-                            &cost_model,
-                        ));
-                        const total = bits + extra;
-                        if (total < best_bits) {
-                            best_bits = total;
-                            final_lz_offset = final_offs;
-                            last_state_index = final_offs;
-                        }
-                    }
-                } else {
-                    var final_offs: usize = @max(chunk_start, if (max_offset >= 8) max_offset - 8 else 0);
-                    while (final_offs < src_len_usize) : (final_offs += 1) {
-                        var idx: usize = 0;
-                        while (idx < state_width) : (idx += 1) {
-                            const bits = states[state_width * final_offs + idx].best_bit_count;
-                            if (bits == std.math.maxInt(i32)) continue;
-                            const litidx: usize = if (idx == state_width - 1)
-                                (if (lit_indexes) |li| @intCast(li[final_offs]) else 0)
-                            else
-                                idx;
-                            if (final_offs < litidx) continue;
-                            const offs: usize = final_offs - litidx;
-                            if (offs < chunk_start) continue;
-                            const extra: i32 = @intCast(high_cost_model.bitsForLiterals(
-                                source,
-                                final_offs,
-                                src_len_usize - final_offs,
-                                states[state_width * final_offs + idx].recent_offs0,
-                                &cost_model,
-                            ));
-                            const total = bits + extra;
-                            if (total < best_bits) {
-                                best_bits = total;
-                                final_lz_offset = offs;
-                                last_state_index = state_width * final_offs + idx;
-                            }
-                        }
-                    }
-                }
-                max_offset = final_lz_offset;
-            }
-
-            // ── Phase 2: Backward token extraction ──
-            const num_tokens = backwardExtract(
-                states.ptr,
-                max_offset,
-                last_state_index,
-                chunk_start,
-                tokens_begin,
-                &lz_token_array,
-                lz_tokens,
-            ) orelse return null;
-
-            if (reached_end) break;
-
-            // ── Phase 3: Stats update ──
-            high_cost_model.updateStats(&stats, source, chunk_start, tokens_begin[0..num_tokens]);
-            high_cost_model.makeCostModel(&stats, &cost_model);
-            chunk_start = max_offset;
-        }
-
-        // ── Encode the full accumulated token array ──
-        cost = std.math.inf(f32);
-        var tmp_ct: i32 = -1;
-        const n_enc = high_encoder.encodeTokenArray(
+        // ── Run the inner DP + encode pass ──
+        const result = optimalOnePass(
             ctx,
             source,
             src_size,
-            tmp_dst_buf.ptr,
-            tmp_dst_buf[tmp_dst_buf.len..].ptr,
             start_pos,
-            lz_tokens[0..lz_token_array.size],
+            &cost_model,
             &stats,
-            &cost,
-            &tmp_ct,
-        ) catch {
-            // Encode failure — keep whatever bestLength we already have.
-            break;
-        };
-        if (cost >= best_cost) break;
+            states,
+            &lz_token_array,
+            lz_tokens,
+            tokens_begin,
+            lit_indexes,
+            match_table,
+            tmp_dst_buf,
+            src_len_usize,
+            initial_copy_bytes,
+            state_width,
+            max_literal_run_trials,
+            length_long_enough_thres,
+            sc,
+            sc_pos_in_chunk,
+            dict_size,
+            window_base,
+            min_match_length,
+            src_end_safe,
+        );
 
-        chunk_type_out.* = tmp_ct;
-        best_cost = cost;
-        best_length = n_enc;
-        if (n_enc > tmp_dst_size) return null;
-        @memcpy(dst[0..n_enc], tmp_dst_buf[0..n_enc]);
+        // Token overflow → bail out (caller should emit uncompressed).
+        if (result.token_overflow) return null;
+
+        // Encode failure → keep whatever best_length we already have.
+        if (result.encode_failed) break;
+
+        if (result.cost >= best_cost) break;
+
+        chunk_type_out.* = result.chunk_type;
+        best_cost = result.cost;
+        best_length = result.encoded_length;
+        if (result.encoded_length > tmp_dst_size) return null;
+        @memcpy(dst[0..result.encoded_length], tmp_dst_buf[0..result.encoded_length]);
 
         // Outer loop: for L8+, when the chosen chunk type disagrees with
         // the cost model's expected chunk type, re-run once with fresh
         // stats (last_chunk_type = -1). Otherwise break. Matches
         // `if (lzcoder.CompressionLevel < 8 || outerLoopIndex != 0 ||
         //     costModel.ChunkType == tmpChunkType) { save stats; break; }`.
-        if (ctx.compression_level < 8 or outer_loop_index_mut != 0 or cost_model.chunk_type == tmp_ct) {
+        if (ctx.compression_level < 8 or outer_loop_index_mut != 0 or cost_model.chunk_type == result.chunk_type) {
             // Persist this block's stats so the next block can seed
             // `rescaleAddStats` instead of cold-starting.
             if (ctx.cross_block) |cb| {
                 cb.prev_stats = stats;
-                cb.last_chunk_type = tmp_ct;
+                cb.last_chunk_type = result.chunk_type;
                 cb.has_prev = true;
             }
             break;
