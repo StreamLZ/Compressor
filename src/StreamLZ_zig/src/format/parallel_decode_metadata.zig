@@ -153,6 +153,18 @@ fn readVarint(src: []const u8) ParseError!VarintRead {
     return .{ .value = v, .consumed = pos };
 }
 
+/// Fast-path varint decode for the common 1-2 byte case (values 0-16383).
+/// Falls back to the generic loop for 3+ byte varints.
+inline fn readVarintFast(src: []const u8) ParseError!VarintRead {
+    if (src.len == 0) return error.Truncated;
+    const b0 = src[0];
+    if ((b0 & 0x80) == 0) return .{ .value = b0, .consumed = 1 };
+    if (src.len < 2) return error.Truncated;
+    const b1 = src[1];
+    if ((b1 & 0x80) == 0) return .{ .value = (@as(u64, b1) << 7) | (b0 & 0x7f), .consumed = 2 };
+    return readVarint(src); // fallback for 3+ byte varints
+}
+
 // ────────────────────────────────────────────────────────────
 //  Size computation
 // ────────────────────────────────────────────────────────────
@@ -325,11 +337,11 @@ pub fn parseBlockBody(src: []const u8, allocator: std.mem.Allocator) ParseError!
 
     var pos: usize = payload_header_size;
 
-    const nm = try readVarint(src[pos..]);
+    const nm = try readVarintFast(src[pos..]);
     pos += nm.consumed;
     const num_match_ops: usize = @intCast(nm.value);
 
-    const nr = try readVarint(src[pos..]);
+    const nr = try readVarintFast(src[pos..]);
     pos += nr.consumed;
     const num_literal_runs: usize = @intCast(nr.value);
 
@@ -339,15 +351,15 @@ pub fn parseBlockBody(src: []const u8, allocator: std.mem.Allocator) ParseError!
     var prev_target: u64 = 0;
     var i: usize = 0;
     while (i < num_match_ops) : (i += 1) {
-        const dt = try readVarint(src[pos..]);
+        const dt = try readVarintFast(src[pos..]);
         pos += dt.consumed;
         const target_start = prev_target + dt.value;
 
-        const off = try readVarint(src[pos..]);
+        const off = try readVarintFast(src[pos..]);
         pos += off.consumed;
         const src_start_u: u64 = target_start -| off.value;
 
-        const ln = try readVarint(src[pos..]);
+        const ln = try readVarintFast(src[pos..]);
         pos += ln.consumed;
 
         match_ops[i] = .{
@@ -358,14 +370,16 @@ pub fn parseBlockBody(src: []const u8, allocator: std.mem.Allocator) ParseError!
         prev_target = target_start;
     }
 
-    // First pass: tally total literal bytes so we can alloc once.
+    // Two-pass literal parsing: tally total byte count for a single
+    // allocation, then fill. The tally pass is pure varint decode with
+    // no allocation — fast and cache-friendly.
     var tally_pos = pos;
     var tally_total: usize = 0;
     var runs_left: usize = num_literal_runs;
     while (runs_left > 0) : (runs_left -= 1) {
-        const dp = try readVarint(src[tally_pos..]);
+        const dp = try readVarintFast(src[tally_pos..]);
         tally_pos += dp.consumed;
-        const rl = try readVarint(src[tally_pos..]);
+        const rl = try readVarintFast(src[tally_pos..]);
         tally_pos += rl.consumed;
         tally_pos += @intCast(rl.value);
         if (tally_pos > src.len) return error.Truncated;
@@ -375,16 +389,15 @@ pub fn parseBlockBody(src: []const u8, allocator: std.mem.Allocator) ParseError!
     const literal_bytes = try allocator.alloc(LiteralByte, tally_total);
     errdefer allocator.free(literal_bytes);
 
-    // Second pass: actually reconstruct the literal bytes.
     var prev_run_end: u64 = 0;
     var lit_idx: usize = 0;
     var r: usize = 0;
     while (r < num_literal_runs) : (r += 1) {
-        const dp = try readVarint(src[pos..]);
+        const dp = try readVarintFast(src[pos..]);
         pos += dp.consumed;
         const run_start = prev_run_end + dp.value;
 
-        const rl = try readVarint(src[pos..]);
+        const rl = try readVarintFast(src[pos..]);
         pos += rl.consumed;
         const run_len: usize = @intCast(rl.value);
 
@@ -423,6 +436,18 @@ test "varint roundtrip" {
         const r = try readVarint(buf[0..n]);
         try testing.expectEqual(v, r.value);
         try testing.expectEqual(n, r.consumed);
+    }
+}
+
+test "readVarintFast matches readVarint for all sizes" {
+    var buf: [16]u8 = undefined;
+    const cases = [_]u64{ 0, 1, 63, 127, 128, 255, 16383, 16384, 1 << 21, 1 << 32, std.math.maxInt(u64) };
+    for (cases) |v| {
+        const n = try writeVarint(&buf, v);
+        const slow = try readVarint(buf[0..n]);
+        const fast = try readVarintFast(buf[0..n]);
+        try testing.expectEqual(slow.value, fast.value);
+        try testing.expectEqual(slow.consumed, fast.consumed);
     }
 }
 

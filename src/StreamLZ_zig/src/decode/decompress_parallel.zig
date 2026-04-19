@@ -849,6 +849,10 @@ const FastL14Shared = struct {
     dst_start_off: usize,
     error_flag: std.atomic.Value(u32),
     captured_err: std.atomic.Value(u16),
+    /// Sidecar literal bytes (sorted by position, relative to frame
+    /// output start). Workers apply only the subset that falls within
+    /// their chunk range, eliminating the serial applySidecar bottleneck.
+    sidecar_literals: []const pdm.LiteralByte,
 };
 
 /// Decode a contiguous slice of chunks [start, end) within a Fast L1-L4
@@ -874,6 +878,37 @@ const FastL14Shared = struct {
 /// region, but that next slice's worker will restore its own guard,
 /// so the overcopy is harmless.
 fn fastL14WorkerFn(shared: *FastL14Shared, scratch: []u8, start: usize, end: usize) void {
+    // ── Apply sidecar literals for this worker's chunk range ─────────
+    // The literal_bytes array is sorted by position (ascending). We
+    // binary-search to find the sub-range that falls within this
+    // worker's output region, then scatter those bytes into dst.
+    // This distributes the formerly serial applySidecar work across
+    // all workers in parallel.
+    if (start < end and shared.sidecar_literals.len > 0) {
+        const first_chunk = shared.chunks[start];
+        const last_chunk = shared.chunks[end - 1];
+        const region_start: u64 = @intCast(first_chunk.dst_offset);
+        const region_end: u64 = @intCast(last_chunk.dst_offset + last_chunk.dst_size);
+        const lits = shared.sidecar_literals;
+
+        // Binary search: find first literal with position >= region_start.
+        var lo: usize = 0;
+        var hi: usize = lits.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (lits[mid].position < region_start) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        // Apply all literals in [region_start, region_end).
+        var li = lo;
+        while (li < lits.len and lits[li].position < region_end) : (li += 1) {
+            shared.dst[shared.dst_start_off + @as(usize, @intCast(lits[li].position))] = lits[li].byte_value;
+        }
+    }
+
     // Guard buffer: saves the first 64 bytes of this slice's first
     // chunk so they can be restored after potential overcopy from
     // the previous slice's last wildCopy16.
@@ -1051,14 +1086,10 @@ pub fn decompressFastL14Parallel(
         .dst_start_off = dst_start_off,
         .error_flag = std.atomic.Value(u32).init(0),
         .captured_err = std.atomic.Value(u16).init(0),
+        .sidecar_literals = sidecar.literal_bytes,
     };
 
-    // ── Apply sidecar ────────────────────────────────────────────────
-    applySidecar(dst, dst_start_off, decompressed_size, &sidecar);
-
-    // ── Single parallel pass (contiguous-slice) ──────────────────────
-    // Each worker saves/restores its boundary guard internally,
-    // so no separate overcopy repair pass is needed.
+    // Sidecar literals applied inside each worker (distributed across cores).
     dispatchWorkers(&shared, scratches, worker_count, aligned_slice, pool_opt);
     if (shared.error_flag.load(.monotonic) != 0) return reportWorkerError(&shared);
 

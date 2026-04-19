@@ -1018,8 +1018,15 @@ fn runBenchCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []con
     const comp_median_mbps = mb * 1000.0 / comp_median_ms;
     try w.print("  Compress median: {d:.0}ms ({d:.1} MB/s)\n\n", .{ comp_median_ms, comp_median_mbps });
 
-    // Warm-up decompress (parallel — matches what `-b` does for SC files).
-    _ = try decoder.decompressFramedParallelThreaded(allocator, compressed[0..comp_size], decompressed, num_threads);
+    // Persistent thread pool — spawned once, reused across all decompress runs.
+    var dec_ctx = if (num_threads > 0)
+        decoder.DecompressContext.initThreaded(allocator, num_threads)
+    else
+        decoder.DecompressContext.init(allocator);
+    defer dec_ctx.deinit();
+
+    // Warm-up decompress.
+    _ = try dec_ctx.decompress(compressed[0..comp_size], decompressed);
 
     // ── Decompress benchmark ──────────────────────────────────────────
     const dec_times = try allocator.alloc(u64, runs);
@@ -1027,7 +1034,7 @@ fn runBenchCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []con
     r = 0;
     while (r < runs) : (r += 1) {
         var timer = try std.time.Timer.start();
-        _ = try decoder.decompressFramedParallelThreaded(allocator, compressed[0..comp_size], decompressed, num_threads);
+        _ = try dec_ctx.decompress(compressed[0..comp_size], decompressed);
         dec_times[r] = timer.read();
         const run_ms = @as(f64, @floatFromInt(dec_times[r])) / 1_000_000.0;
         const run_mbps = mb * 1000.0 / run_ms;
@@ -1139,10 +1146,15 @@ fn runBench(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const []con
     };
     defer allocator.free(dst);
 
+    // Persistent thread pool — spawned once, reused across all decompress runs.
+    var dec_ctx = if (num_threads > 0)
+        decoder.DecompressContext.initThreaded(allocator, num_threads)
+    else
+        decoder.DecompressContext.init(allocator);
+    defer dec_ctx.deinit();
+
     // Warm-up: one untimed decode to page-fault the dst and prime the caches.
-    // Uses parallel decompress (matches what `-b` does for SC files and
-    // what production code paths take when an allocator is available).
-    _ = decoder.decompressFramedParallelThreaded(allocator, src, dst, num_threads) catch |err| {
+    _ = dec_ctx.decompress(src, dst) catch |err| {
         try w.print("error: decompression failed: {s}\n", .{@errorName(err)});
         try w.flush();
         std.process.exit(1);
@@ -1153,7 +1165,7 @@ fn runBench(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const []con
     var run: u32 = 0;
     while (run < runs) : (run += 1) {
         var timer = try std.time.Timer.start();
-        _ = try decoder.decompressFramedParallelThreaded(allocator, src, dst, num_threads);
+        _ = try dec_ctx.decompress(src, dst);
         const elapsed = timer.read();
         if (elapsed < best_ns) best_ns = elapsed;
         total_ns += elapsed;
