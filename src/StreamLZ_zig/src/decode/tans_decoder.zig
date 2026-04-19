@@ -1,6 +1,6 @@
 //! tANS (tabled asymmetric numeral system) decoder — 5-state interleaved.
 //!
-//! Port of src/StreamLZ/Decompression/Entropy/TansDecoder.cs.
+//!
 //!
 //! Three phases per block:
 //!   1. `decodeTable` — reads the symbol frequency table in either Golomb-
@@ -705,7 +705,7 @@ pub fn highDecodeTans(
         .state2 = state2,
         .state3 = state3,
         .state4 = state4,
-        // src_start / src_end here mirror the C# reference: they're the
+        // src_start / src_end here are the
         // post-table src position (BEFORE state-init advances src) and the
         // ORIGINAL src_end (before the backward-init decrement). The decode
         // hot loop's pointer bounds-check relies on this "outer" range, and

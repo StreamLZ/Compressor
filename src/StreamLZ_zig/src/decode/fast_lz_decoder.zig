@@ -1,6 +1,6 @@
 //! Fast/Turbo LZ decoder (user levels 1–5).
 //!
-//! Port of src/StreamLZ/Decompression/Fast/LzDecoder.cs. Two-phase design:
+//! Two-phase design:
 //!   1. `readLzTable`  — pulls the entropy-coded literal/command/offset streams
 //!      out of the compressed source into the scratch buffer, producing a
 //!      `FastLzTable` struct with pointers + lengths.

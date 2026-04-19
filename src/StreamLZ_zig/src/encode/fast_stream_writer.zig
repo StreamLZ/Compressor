@@ -1,6 +1,7 @@
 //! FastStreamWriter — the parallel-stream output buffer used by the Fast
 //! parser during a single sub-chunk encode. Port of `FastStreamWriter` in
 //! src/StreamLZ/Compression/Fast/Encoder.cs.
+//! Used by: Fast codec (L1-L5)
 //!
 //! The parser emits six streams in parallel:
 //!
@@ -89,7 +90,7 @@ pub const FastStreamWriter = struct {
         raw_literals_dst: ?[*]u8,
         use_delta_literals: bool,
     ) !FastStreamWriter {
-        // Match C# FastStreamWriter.Initialize sizing (with generous rounding).
+        // FastStreamWriter sizing (with generous rounding).
         const literal_size: usize = source_length + 8;
         const token_size: usize = source_length / 2 + 16;
         const off16_size: usize = source_length / 3 + 8; // number of u16s

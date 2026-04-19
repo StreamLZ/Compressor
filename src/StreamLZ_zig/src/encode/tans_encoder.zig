@@ -1,6 +1,7 @@
 //! tANS (tabled asymmetric numeral system) encoder — 5-state interleaved.
+//! Used by: Fast and High codecs
 //!
-//! Port of src/StreamLZ/Compression/Entropy/TansEncoder.cs. Produces a
+//! Produces a
 //! bit stream that `decode/tans_decoder.zig` can decode.
 //!
 //! Top-level entry: `encodeArrayU8Tans`, which:
@@ -29,7 +30,7 @@
 
 const std = @import("std");
 const hist_mod = @import("byte_histogram.zig");
-const bw_mod = @import("../io/bit_writer_64.zig");
+const bw_mod = @import("../io/bit_writer.zig");
 const cost_coeffs = @import("cost_coefficients.zig");
 
 const ByteHistogram = hist_mod.ByteHistogram;
@@ -294,7 +295,7 @@ pub fn tansNormalizeCounts(
 // ────────────────────────────────────────────────────────────
 
 /// Populates `te[0..256]` and `te_data[0..L]` from the normalized `weights`.
-/// Matches Tans_InitTable in the C# reference: weight-1 symbols live at the
+/// Weight-1 symbols live at the
 /// tail of te_data, multi-weight symbols are distributed across 4 pointer
 /// tracks so consecutive state transitions land on different lanes.
 pub fn tansInitTable(
@@ -565,7 +566,7 @@ pub fn tansEncodeBytes(
     var read_idx_plus1: usize = src_end_idx;
     if (read_idx_plus1 > 0) read_idx_plus1 -= 1;
 
-    // Process remainder symbols first (as the C# encoder does).
+    // Process remainder symbols first.
     var ri: usize = 10 - remainder;
     while (ri < 10) : (ri += 1) {
         const sym: u8 = src[read_idx_plus1];
@@ -657,7 +658,7 @@ pub fn tansEncodeBytes(
         backward.flush();
         forward.flush();
     }
-    // Write final states (mirror of C# Tans_EncodeBytes final-state block).
+    // Write final states.
     const mask_L: u32 = L - 1;
     const ltb_u5: u5 = @intCast(log_table_bits);
     backward.writeNoFlush(state4 & mask_L, ltb_u5);
@@ -809,11 +810,7 @@ pub fn tansEncodeTable(
                 p = sv;
             }
         }
-        const bits_per_sym_width: u32 = (32 - @clz(log_table_bits)) + 1 - 1;
-        // bits_per_sym = Log2(log_table_bits) + 1 — for log_table_bits in [8,11]
-        // → Log2 = 3, so bits_per_sym = 4.
         const bps: u32 = ilog2Round(log_table_bits) + 1;
-        _ = bits_per_sym_width;
         bw.writeNoFlush(delta_bits, @intCast(bps));
 
         // Write (count-1) delta/symbol pairs.
@@ -833,7 +830,7 @@ pub fn tansEncodeTable(
         return;
     }
 
-    // Golomb-Rice path — used for > 7 symbols. This mirrors the C# layout
+    // Golomb-Rice path — used for > 7 symbols. This matches the layout
     // closely. Written in two sub-passes: (1) compute range metadata and
     // weight classification, (2) emit the encoded bits.
     bw.writeNoFlush(1, 1);
@@ -998,8 +995,7 @@ pub fn encodeArrayU8Tans(
     );
     if (used_symbols <= 1) return error.TooFewSymbols;
 
-    // Speed-adjusted cost estimate. Port of C# `TansEncoder.EncodeArrayU8_tANS`
-    // (TansEncoder.cs:922). The caller seeds `cost_out.*` with the best-known
+    // Speed-adjusted cost estimate. The caller seeds `cost_out.*` with the best-known
     // alternative (typically `memcpy_cost = src.len + 3`); if the speed cost
     // alone already eats the remaining budget, tANS is not worth attempting.
     const src_len_minus_5: usize = src.len - 5;
@@ -1047,7 +1043,7 @@ pub fn encodeArrayU8Tans(
 
     const total_size: usize = table_bytes + payload_bytes;
     if (total_size + 8 > dst.len) return error.DestinationTooSmall;
-    // Mirrors C# `if (totalSize >= costLeft || totalSize + cost >= *costPtr)`:
+    //
     // both conditions must leave headroom vs the caller's budget.
     if (@as(i32, @intCast(total_size)) >= cost_left) return error.TansNotBeneficial;
     if (@as(f32, @floatFromInt(total_size)) + cost >= cost_out.*) return error.TansNotBeneficial;
@@ -1083,7 +1079,7 @@ pub fn encodeArrayU8Tans(
     @memcpy(dst[table_bytes..][0..body.backward_bytes], body.backward_start[0..body.backward_bytes]);
     @memcpy(dst[table_bytes + body.backward_bytes ..][0..body.forward_bytes], body.forward_start[0..body.forward_bytes]);
 
-    // Mirrors C# `*costPtr = cost + totalSize` — the reported cost is
+    // The reported cost is
     // the speed-adjusted overhead plus the actual encoded byte count, so
     // the caller's `cost < memcpyCost` check includes both terms.
     cost_out.* = cost + @as(f32, @floatFromInt(total_size));
@@ -1117,7 +1113,7 @@ test "doubleToUintRoundPow2" {
 
 test "tansNormalizeCounts sums to L exactly" {
     var histo: ByteHistogram = .{};
-    histo.count_bytes("aaaabbbccdee");
+    histo.countBytes("aaaabbbccdee");
     const L: u32 = 256;
     var weights: [256]u32 = @splat(0);
     const used = tansNormalizeCounts(&weights, L, &histo, 12, 256);
@@ -1129,7 +1125,7 @@ test "tansNormalizeCounts sums to L exactly" {
 
 test "tansInitTable runs without panicking on a small histogram" {
     var histo: ByteHistogram = .{};
-    histo.count_bytes("aaaabbbccdee");
+    histo.countBytes("aaaabbbccdee");
     var weights: [256]u32 = @splat(0);
     const L: u32 = 256;
     _ = tansNormalizeCounts(&weights, L, &histo, 12, 256);
@@ -1145,7 +1141,7 @@ test "tANS roundtrip: 32 bytes of 'abab' (2-symbol sparse path)" {
     for (&src, 0..) |*b, i| b.* = @intCast('a' + (i % 2));
 
     var histo: ByteHistogram = .{};
-    histo.count_bytes(&src);
+    histo.countBytes(&src);
 
     var dst: [512]u8 = @splat(0);
     var tans_cost: f32 = std.math.inf(f32);
@@ -1170,7 +1166,7 @@ test "tANS roundtrip: 256 bytes of 'abc' repeating (3-symbol sparse)" {
     for (&src, 0..) |*b, i| b.* = @intCast('a' + (i % 3));
 
     var histo: ByteHistogram = .{};
-    histo.count_bytes(&src);
+    histo.countBytes(&src);
 
     var dst: [2048]u8 = @splat(0);
     var tans_cost: f32 = std.math.inf(f32);
@@ -1197,7 +1193,7 @@ test "tANS roundtrip: 512 bytes of varied English text (Golomb-Rice path)" {
     while (i < src.len) : (i += 1) src[i] = pattern[i % pattern.len];
 
     var histo: ByteHistogram = .{};
-    histo.count_bytes(&src);
+    histo.countBytes(&src);
 
     var dst: [2048]u8 = @splat(0);
     var tans_cost: f32 = std.math.inf(f32);
@@ -1220,7 +1216,7 @@ test "tANS roundtrip: 512 bytes of varied English text (Golomb-Rice path)" {
 fn tansRoundtripChunk(allocator: std.mem.Allocator, src: []const u8) !void {
     const tans_dec = @import("../decode/tans_decoder.zig");
     var histo: ByteHistogram = .{};
-    histo.count_bytes(src);
+    histo.countBytes(src);
 
     const dst = try allocator.alloc(u8, src.len + 256);
     defer allocator.free(dst);

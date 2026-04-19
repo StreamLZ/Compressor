@@ -1,6 +1,6 @@
-//! Byte-value frequency histogram. Port of
-//! src/StreamLZ/Compression/ByteHistogram.cs (count-only subset used by the
+//! Byte-value frequency histogram (count-only subset used by the
 //! entropy encoder).
+//! Used by: Fast and High codecs
 
 const std = @import("std");
 
@@ -10,7 +10,7 @@ pub const ByteHistogram = struct {
 
     /// Counts occurrences of each byte in `src`. Clears first, so the
     /// returned histogram exactly describes `src`.
-    pub fn count_bytes(self: *ByteHistogram, src: []const u8) void {
+    pub fn countBytes(self: *ByteHistogram, src: []const u8) void {
         self.count = @splat(0);
         for (src) |b| self.count[b] += 1;
     }
@@ -31,7 +31,7 @@ pub const log2_lookup_table: [4097]u32 = blk: {
 };
 
 /// Approximate bit cost of encoding a histogram entropy-coded.
-/// Direct port of `ByteHistogram.GetCostApproxCore` (C#). Returns the
+/// Approximate entropy cost computation. Returns the
 /// estimated cost in bit-units (fixed-point, NOT bytes).
 pub fn getCostApproxCore(histo: []const u32, histo_sum: i32) u32 {
     if (histo_sum <= 1) return 40;
@@ -69,11 +69,6 @@ pub fn getCostApproxCore(histo: []const u32, histo_sum: i32) u32 {
     return @as(u32, @intCast(bit_usage_f >> 12)) + bit_usage + bit_usage_z + 5 * 8;
 }
 
-/// Counts byte frequencies into `histo` (cleared first).
-pub fn countBytesHistogram(histo: *[256]u32, src: []const u8) void {
-    histo.* = @splat(0);
-    for (src) |b| histo[b] += 1;
-}
 
 // ────────────────────────────────────────────────────────────
 //  Tests
@@ -83,7 +78,7 @@ const testing = std.testing;
 
 test "ByteHistogram counts byte frequencies" {
     var h: ByteHistogram = .{};
-    h.count_bytes("aaabbc");
+    h.countBytes("aaabbc");
     try testing.expectEqual(@as(u32, 3), h.count['a']);
     try testing.expectEqual(@as(u32, 2), h.count['b']);
     try testing.expectEqual(@as(u32, 1), h.count['c']);
@@ -92,8 +87,8 @@ test "ByteHistogram counts byte frequencies" {
 
 test "ByteHistogram resets on re-count" {
     var h: ByteHistogram = .{};
-    h.count_bytes("xxx");
-    h.count_bytes("y");
+    h.countBytes("xxx");
+    h.countBytes("y");
     try testing.expectEqual(@as(u32, 0), h.count['x']);
     try testing.expectEqual(@as(u32, 1), h.count['y']);
 }

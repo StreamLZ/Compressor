@@ -1,4 +1,5 @@
 //! Top-level StreamLZ framed compressor.
+//! Used by: both codecs, top-level dispatcher
 //!
 //! Produces an SLZ1-framed byte stream that `decode/streamlz_decoder.zig`
 //! can decompress. Format layered:
@@ -21,7 +22,7 @@ const frame = @import("../format/frame_format.zig");
 const block_header = @import("../format/block_header.zig");
 const lz_constants = @import("../format/streamlz_constants.zig");
 const pdm = @import("../format/parallel_decode_metadata.zig");
-const cleanness = @import("../decode/cleanness_analyzer.zig");
+const cleanness = @import("../decode/cross_chunk_analyzer.zig");
 const fast_constants = @import("fast_constants.zig");
 const FastMatchHasher = @import("fast_match_hasher.zig").FastMatchHasher;
 const match_hasher = @import("match_hasher.zig");
@@ -34,90 +35,18 @@ const EntropyOptions = entropy_enc.EntropyOptions;
 const MatchHasher2x = match_hasher.MatchHasher2x;
 const MatchHasher2 = match_hasher.MatchHasher2;
 
-/// Default dictionary size when the caller doesn't override. Matches C#
-/// `FastConstants.DefaultDictionarySize = 0x40000000` (1 GB).
+/// Default dictionary size when the caller doesn't override (1 GB).
 pub const default_dictionary_size: u32 = 0x40000000;
 
-/// Estimated memory consumption per parallel compress worker thread
-/// (40 MB). Mirrors C# `StreamLzConstants.PerThreadMemoryEstimate`.
-/// Used by `calculateMaxThreads` to cap the thread count so the
-/// total worker footprint stays within a fraction of available RAM.
-pub const per_thread_memory_estimate: u64 = 40 * 1024 * 1024;
-
-/// Fraction of total physical RAM that parallel compression is
-/// allowed to consume (60%). Matches C# `CalculateMaxThreads`.
-pub const memory_budget_pct: u64 = 60;
-
 // ────────────────────────────────────────────────────────────
-//  Platform-specific total-physical-memory query
+//  Platform-specific memory query (delegated to platform/)
 // ────────────────────────────────────────────────────────────
+const memory_query = @import("../platform/memory_query.zig");
 
-const MemoryStatusEx = extern struct {
-    dwLength: u32,
-    dwMemoryLoad: u32,
-    ullTotalPhys: u64,
-    ullAvailPhys: u64,
-    ullTotalPageFile: u64,
-    ullAvailPageFile: u64,
-    ullTotalVirtual: u64,
-    ullAvailVirtual: u64,
-    ullAvailExtendedVirtual: u64,
-};
-
-extern "kernel32" fn GlobalMemoryStatusEx(lpBuffer: *MemoryStatusEx) callconv(.winapi) std.os.windows.BOOL;
-
-/// Returns the total physical memory on the host, in bytes, or `0`
-/// when the query is unavailable / unsupported. Used by
-/// `calculateMaxThreads` as the input to the memory-budget cap.
-pub fn totalAvailableMemoryBytes() u64 {
-    switch (@import("builtin").os.tag) {
-        .windows => {
-            var ms: MemoryStatusEx = .{
-                .dwLength = @sizeOf(MemoryStatusEx),
-                .dwMemoryLoad = 0,
-                .ullTotalPhys = 0,
-                .ullAvailPhys = 0,
-                .ullTotalPageFile = 0,
-                .ullAvailPageFile = 0,
-                .ullTotalVirtual = 0,
-                .ullAvailVirtual = 0,
-                .ullAvailExtendedVirtual = 0,
-            };
-            if (GlobalMemoryStatusEx(&ms) == 0) return 0;
-            return ms.ullTotalPhys;
-        },
-        else => return 0, // Unsupported → no memory cap.
-    }
-}
-
-/// Dynamically calculates the maximum number of compression worker
-/// threads based on CPU count and available system memory. Mirrors
-/// C# `StreamLzCompressor.CalculateMaxThreads` at
-/// `StreamLzCompressor.cs:174`. Caps at 60% of total physical RAM.
-/// When the host's memory is unknown (non-Windows / query failure),
-/// falls back to just the CPU count.
-///
-/// The `src_len` parameter is the estimate for shared memory
-/// overhead (matches the C# `EstimateSharedMemory(srcLen) = srcLen`
-/// definition). `level` is accepted for API parity with C# but not
-/// currently used — per-thread memory is estimated with a level-
-/// independent constant.
-pub fn calculateMaxThreads(src_len: usize, level: u8) u32 {
-    _ = level; // reserved for future level-dependent estimate
-    const cpu: u32 = @intCast(std.Thread.getCpuCount() catch 1);
-    const total_memory: u64 = totalAvailableMemoryBytes();
-    if (total_memory == 0) return @max(@as(u32, 1), cpu);
-
-    const memory_budget: u64 = (total_memory * memory_budget_pct) / 100;
-    const shared_mem: u64 = src_len;
-    if (memory_budget <= shared_mem) return 1;
-    const available_for_threads: u64 = memory_budget - shared_mem;
-
-    const max_by_memory: u64 = available_for_threads / per_thread_memory_estimate;
-    if (max_by_memory == 0) return 1;
-    const max_by_memory_u32: u32 = @intCast(@min(max_by_memory, @as(u64, cpu)));
-    return @max(@as(u32, 1), max_by_memory_u32);
-}
+pub const per_thread_memory_estimate = memory_query.per_thread_memory_estimate;
+pub const memory_budget_pct = memory_query.memory_budget_pct;
+pub const totalAvailableMemoryBytes = memory_query.totalAvailableMemoryBytes;
+pub const calculateMaxThreads = memory_query.calculateMaxThreads;
 
 pub const CompressError = error{
     BadLevel,
@@ -139,12 +68,12 @@ pub const Options = struct {
     block_size: u32 = lz_constants.chunk_size,
 
     // ── CompressOptions parity fields ────────────────────────────────────
-    // Ported from `src/StreamLZ/Compression/CompressOptions.cs`. Most of
+    // Most of
     // these are plumbed here for API symmetry; the behavioral wiring lands
     // with subsequent parity steps (see the punch list in memory).
 
     /// Override the hash-table bit count (0 = adaptive). Matches
-    /// `CompressOptions.HashBits` in C#.
+    /// Override hash-table bit count (0 = adaptive).
     hash_bits: u32 = 0,
     /// Minimum match length override (0 = auto-derive from level + text
     /// detection). Values below 4 are ignored. Matches
@@ -192,7 +121,7 @@ pub const Options = struct {
 
     /// Worker thread count for parallel compress. `0` = auto (one per
     /// CPU core, capped by the memory-aware heuristic from step 40).
-    /// `1` forces the serial path. Matches C# `LzCoder.NumThreads`.
+    /// `1` forces the serial path.
     num_threads: u32 = 0,
 
     /// v2: emit a parallel-decode sidecar block alongside the Fast
@@ -209,14 +138,14 @@ const ResolvedParams = struct {
     engine_level: i32,
     use_entropy: bool,
     hash_bits: u6,
-    /// Passed to `FastMatchHasher.init` as the hash `k` parameter. C# applies
+    /// Passed to `FastMatchHasher.init` as the hash `k` parameter. Applies
     /// the text-detector bump here (6 for text, 4 otherwise). This affects
     /// the Fibonacci hash multiplier, NOT the parser's acceptance threshold.
     hasher_min_match_length: u32,
     /// Passed to the parser's `buildMinimumMatchLengthTable` and is the
-    /// acceptance threshold for match lengths. C# `FastParser.CompressGreedy`
+    /// acceptance threshold for match lengths. `FastParser.CompressGreedy`
     /// reads this from `opts.MinMatchLength` (default 0 → floor 4), so the
-    /// text bump DOES NOT apply. Diverging these matches C# behaviour.
+    /// text bump DOES NOT apply.
     parser_min_match_length: u32,
     dict_size: u32,
 };
@@ -225,7 +154,7 @@ fn resolveParams(src: []const u8, opts: Options) ResolvedParams {
     const mapped = fast_constants.mapLevel(opts.level);
     const eng = mapped.engine_level;
 
-    // C# Fast.Compressor.SetupEncoder computes a LOCAL minimumMatchLength that
+    // SetupEncoder computes a LOCAL minimumMatchLength that
     // starts at 4 and is bumped to 6 for text inputs. That local is passed to
     // `CreateFastHasher<T>.AllocateHash(hashBits, minimumMatchLength)` to pick
     // the Fibonacci hash multiplier (k=6 shifts differently than k=4).
@@ -236,7 +165,7 @@ fn resolveParams(src: []const u8, opts: Options) ResolvedParams {
         }
     }
 
-    // C# FastParser.CompressGreedy (line 375) computes `minimumMatchLength`
+    // FastParser.CompressGreedy computes `minimumMatchLength`
     // FRESHLY from `Math.Max(opts.MinMatchLength, 4)` and passes THIS value
     // to `BuildMinimumMatchLengthTable`. The text-detector bump is NOT
     // applied to the parser's acceptance threshold, only to the hasher's
@@ -266,24 +195,14 @@ fn resolveParams(src: []const u8, opts: Options) ResolvedParams {
     };
 }
 
-/// Direct port of C# BlockHeaderWriter.AreAllBytesEqual. Returns true when
-/// every byte in `data` is identical (or when len ≤ 1).
-inline fn areAllBytesEqual(data: []const u8) bool {
-    if (data.len <= 1) return true;
-    const first = data[0];
-    for (data[1..]) |b| {
-        if (b != first) return false;
-    }
-    return true;
-}
+const areAllBytesEqual = block_header.areAllBytesEqual;
 
-/// Returns the entropy option mask for a given user-level. Mirrors
-/// C# Fast.Compressor.SetupEncoder exactly:
-///   raw-coded levels (L1, L2) → SupportsShortMemset only
-///   lazy entropy levels (L5 only — engine 4) → full mask minus MultiArrayAdvanced
-///   greedy entropy levels (L3, L4 — engines 1, 2) → full mask minus MultiArrayAdvanced
-///     AND minus TANS AND minus MultiArray
-///     AND minus RLE/RLEEntropy (greedy path clears RLE bits at line 233)
+/// Returns the entropy option mask for a given user-level:
+///   raw-coded levels (L1, L2) -> SupportsShortMemset only
+///   lazy entropy levels (L5 only, engine 4) -> full mask minus MultiArrayAdvanced
+///   greedy entropy levels (L3, L4, engines 1, 2) -> full mask minus
+///     MultiArrayAdvanced AND minus TANS AND minus MultiArray
+///     AND minus RLE/RLEEntropy
 fn entropyOptionsForLevel(user_level: u8) EntropyOptions {
     const mapped = fast_constants.mapLevel(user_level);
     if (!mapped.use_entropy_coding) {
@@ -291,7 +210,7 @@ fn entropyOptionsForLevel(user_level: u8) EntropyOptions {
         return .{ .supports_short_memset = true };
     }
     const eng = mapped.engine_level;
-    // Entropy-coded mode. C# starts with 0xff and clears selected flags.
+    // Entropy-coded mode. Start with 0xff and clear selected flags.
     if (eng >= 5) {
         // level >= 5 branch: clear MultiArrayAdvanced only.
         return .{
@@ -313,7 +232,7 @@ fn entropyOptionsForLevel(user_level: u8) EntropyOptions {
         .supports_short_memset = true,
     };
     // Engine levels in {1, 2} → greedy/greedy-rehash parser branch at
-    // C# line 213, which additionally clears AllowRLE | AllowRLEEntropy.
+    // Additionally clear AllowRLE | AllowRLEEntropy.
     // Engine level 4 (user L5) → `level == 4` branch keeps RLE bits.
     if (eng != 3 and eng != 4) {
         opts.allow_rle = false;
@@ -336,7 +255,12 @@ pub fn compressBound(src_len: usize) usize {
     const sub_chunks: usize = (src_len + fast_constants.sub_chunk_size - 1) / fast_constants.sub_chunk_size;
     const per_sub_chunk_overhead: usize = 3 + 8 + 3 + 256; // sub hdr + initial 8 + lit hdr + assembly slack
     const sc_prefix_upper_bound: usize = chunk_count * 8; // (n-1)*8 ≤ n*8
-    return frame.max_header_size + 4 + chunk_count * (8 + 2 + 4) + sub_chunks * per_sub_chunk_overhead + src_len + 64 + sc_prefix_upper_bound;
+    // v2 parallel-decode sidecar: 8-byte outer block header + body.
+    // Body size is bounded by cross-chunk literal bytes + match ops;
+    // observed worst case is ~1.2% of decompressed size (L5 enwik8).
+    // Use 3% as conservative headroom.
+    const sidecar_headroom: usize = 8 + src_len / 32;
+    return frame.max_header_size + 4 + chunk_count * (8 + 2 + 4) + sub_chunks * per_sub_chunk_overhead + src_len + 64 + sc_prefix_upper_bound + sidecar_headroom;
 }
 
 /// Compress `src` into `dst` as an SLZ1 byte stream. Returns the
@@ -346,10 +270,9 @@ pub fn compressBound(src_len: usize) usize {
 /// On `error.OutOfMemory` from the single-shot path, automatically
 /// splits the input into smaller SELF-CONTAINED pieces and retries
 /// through a fallback size ladder (1 GB → 512 MB → 256 MB → 128 MB
-/// → 64 MB → 32 MB → 16 MB). Each piece is written as its own
+/// -> 64 MB -> 32 MB -> 16 MB). Each piece is written as its own
 /// complete SLZ1 frame; the decompressor iterates pieces in its
-/// `DecompressCore` loop. Mirrors C# `StreamLzCompressor.Compress`
-/// at `StreamLzCompressor.cs:97-147`. Phase 14 step 39 (D5).
+/// `DecompressCore` loop.
 pub fn compressFramed(
     allocator: std.mem.Allocator,
     src: []const u8,
@@ -434,18 +357,18 @@ fn compressFramedOne(
 ) CompressError!usize {
     // Levels 6-11 use the High codec (optimal parser + hash-based /
     // BT4 match finder). Fork here so the Fast path below stays
-    // byte-exact with C# for L1-L5.
+    // byte-exact for L1-L5.
     if (opts.level >= 6) {
         return compressFramedHigh(allocator, src, dst, opts);
     }
 
     // ── Frame header ────────────────────────────────────────────────────
     //
-    // C# StreamLZ.MapLevel (StreamLZ.cs:90) maps unified level (1-11) to
+    // MapLevel maps unified level (1-11) to
     // (codec, codecLevel). For Fast levels 1-5 the mapping is 1→1, 2→2,
     // 3→3, 4→5 (Fast 4 is skipped), 5→6. The STORED level in the frame
     // header is the codec-level, not the unified level. Replicate that so
-    // the written byte matches C# exactly.
+    // the written byte matches the format spec exactly.
     const codec_level: u8 = switch (opts.level) {
         1 => 1,
         2 => 2,
@@ -465,7 +388,7 @@ fn compressFramedOne(
 
     // ── Resolve per-input parameters ───────────────────────────────────
     const resolved = resolveParams(src, opts);
-    // Per-level engine hash-bit caps to match C# Fast.Compressor.SetupEncoder
+    // Per-level engine hash-bit caps
     // where `maxHashBits = level switch { -3=>13, -2=>14, -1=>16, 0|1=>17, 2=>19, _ => adaptive }`.
     const engine_level_cap: u6 = switch (resolved.engine_level) {
         -3 => 13,
@@ -478,7 +401,7 @@ fn compressFramedOne(
     const greedy_hash_bits: u6 = @min(resolved.hash_bits, engine_level_cap);
 
     // ── Allocate the persistent hasher(s) this level needs ────────────
-    // Matches C# `Fast.Compressor.SetupEncoder`:
+    //
     //   engine level ≤ -2  → FastMatchHasher<ushort>   (user L1)
     //   engine level ∈ {-1,1,2} → FastMatchHasher<uint>   (user L2, L3, L4)
     //   engine level == 4  → MatchHasher2 chain hasher (user L5)
@@ -517,21 +440,21 @@ fn compressFramedOne(
         resolved.use_entropy,
     );
     const parser_config: fast_enc.ParserConfig = .{
-        // Parser mmlt uses the UN-bumped value (C# reads opts.MinMatchLength
+        // Parser mmlt uses the UN-bumped value (reads opts.MinMatchLength
         // in FastParser.CompressGreedy regardless of the text bump).
         .minimum_match_length = resolved.parser_min_match_length,
         .dictionary_size = resolved.dict_size,
         .speed_tradeoff = speed_tradeoff,
     };
 
-    // Reset all hashers ONCE at the top of compressFramed, matching C#
+    // Reset all hashers ONCE at the top of compressFramed
     // `SetupEncoder` → `CreateFastHasher<T>.AllocateHash` which clears the
     // table once per CompressBlock_Fast call and then never re-clears.
     //
     // The greedy parser uses the hash table with positions stored in
     // WHOLE-INPUT coordinates (measured from src.ptr). Stale entries from
     // sub-chunk N−1 read during sub-chunk N give huge offsets that fail
-    // the `offset <= cursor - source_block_base` bound check — same as C#.
+    // the `offset <= cursor - source_block_base` bound check.
     if (greedy_hasher_u16) |*h| h.reset();
     if (greedy_hasher_u32) |*h| h.reset();
     if (chain_hasher) |*h| {
@@ -541,7 +464,7 @@ fn compressFramedOne(
     }
 
     // ── ONE frame block wraps all internal 256 KB chunks ───────────────
-    // Empty source: C# StreamLzFrameCompressor's stream-based Compress loop
+    // Empty source: the stream-based compress loop
     // never enters the body (`while (bytesRead > 0)`), so it writes only the
     // frame header + end mark and returns. Match that here to keep parity
     // on zero-byte inputs.
@@ -552,7 +475,7 @@ fn compressFramedOne(
         return pos;
     }
 
-    // C# StreamLzFrameCompressor calls StreamLZCompressor.Compress(pSrc, len, ...)
+    // The framed compressor calls the block compressor
     // which produces a single buffer of concatenated internal blocks, and
     // wraps the whole thing in ONE frame block header. Match that.
     const frame_block_hdr_pos: usize = pos;
@@ -562,14 +485,14 @@ fn compressFramedOne(
     const can_compress = src.len > fast_constants.min_source_length;
 
     // Self-contained mode: each 256 KB block is independently decodable.
-    // Port of C# `StreamLzCompressor.CompressOneBlock` and
+    // CompressOneBlock and
     // `AppendSelfContainedPrefixTable`. `two_phase` implies `self_contained`
-    // per C# `StreamLZCompressor.Compress` lines 90-95.
+    //
     const self_contained: bool = opts.self_contained or opts.two_phase;
     const sc_flag_bit: u8 = if (self_contained) 0x10 else 0;
     const two_phase_flag_bit: u8 = if (opts.two_phase) 0x20 else 0;
 
-    // Direct port of C# CompressBlocksSerial → CompressOneBlock → CompressChunk.
+    // CompressBlocksSerial -> CompressOneBlock -> CompressChunk.
     // Structure:
     //   per 256 KB block:
     //     if all-equal → 2-byte block hdr + 5-byte memset chunk hdr, done
@@ -604,7 +527,7 @@ fn compressFramedOne(
 
         const block_start: usize = pos;
         // For SC mode, EVERY block is a keyframe (independently decodable).
-        // Matches C# `CompressOneBlock` line 707: `bool keyframe = sc || (blockSrc == dictBase)`.
+        // Keyframe when sc || first block in frame.
         const keyframe = self_contained or src_off == 0;
 
         // ── Write 2-byte block header (compressed) ──────────────────────
@@ -616,7 +539,7 @@ fn compressFramedOne(
         pos += 2;
 
         // ── Block-level AreAllBytesEqual → memset chunk header ─────────
-        // Port of StreamLzCompressor.CompressOneBlock line 713-717.
+        //
         if (areAllBytesEqual(block_src)) {
             if (pos + 4 + 1 > dst.len) return error.DestinationTooSmall;
             const memset_hdr: u32 = lz_constants.chunk_size_mask | (@as(u32, 1) << lz_constants.chunk_type_shift);
@@ -635,7 +558,7 @@ fn compressFramedOne(
         const chunk_payload_start: usize = pos;
 
         // ── Iterate sub-chunks ─────────────────────────────────────────
-        // Port of StreamLzCompressor.CompressChunk. Per sub-chunk:
+        // Per sub-chunk:
         //   * < 32 bytes → raw-flag sub-chunk header + raw bytes
         //   * all-equal → EncodeArrayU8 (memcpy, no compressed flag)
         //   * else → LZ encode + cost-based 3-way decision
@@ -654,7 +577,7 @@ fn compressFramedOne(
 
             if (round_bytes >= 32) {
                 if (areAllBytesEqual(sub_src)) {
-                    // C# CompressChunk line 882-890: plain memcpy via
+                    // Plain memcpy via
                     // EncodeArrayU8. For Fast (tANS disabled) this falls
                     // through to a 3-byte BE memcpy header + raw bytes,
                     // which has the compressed flag CLEAR (size ≤ 18 bits).
@@ -687,17 +610,17 @@ fn compressFramedOne(
                 const lz_cost: f32 = result.cost + 3.0; // +3 for sub-chunk header
 
                 // ── Plain-Huffman trial encode (CheckPlainHuffman path) ──
-                // Port of StreamLzCompressor.CompressChunk line 920-942.
+                //
                 // For Fast with no tANS/Huffman, EncodeArrayU8 falls back to
                 // memcpy which always returns count+3 bytes (i.e., never
                 // beats raw), so plain_huff_cost is always invalidated.
                 // We still emit the same decision arm to stay byte-parity
-                // with C# in case the order of operations matters.
+                // in case the order of operations matters.
                 var plain_huff_cost: f32 = std.math.inf(f32);
                 if (check_plain_huffman) {
                     plain_huff_cost = @min(sub_memset_cost, lz_cost);
                     // EncodeArrayU8 memcpy returns count + 3. Check matches
-                    // C# `plainHuffN < 0 || plainHuffN >= roundBytes`.
+                    // plainHuffN < 0 || plainHuffN >= roundBytes.
                     const plain_huff_n: usize = round_bytes + 3;
                     if (plain_huff_n >= round_bytes) {
                         plain_huff_cost = std.math.inf(f32);
@@ -736,7 +659,7 @@ fn compressFramedOne(
                 } else {
                     // Plain-huffman won. Without a real Huffman encoder this
                     // path is unreachable (plain_huff_cost is always ∞) but
-                    // kept for structural parity with C#.
+                    //
                     pos = sub_hdr_pos;
                     if (pos + round_bytes + 3 > dst.len) return error.DestinationTooSmall;
                     dst[pos + 0] = @intCast((round_bytes >> 16) & 0xFF);
@@ -747,7 +670,7 @@ fn compressFramedOne(
                     total_cost += plain_huff_cost;
                 }
             } else {
-                // round_bytes < 32: too small to compress. C# line 984-989.
+                // round_bytes < 32: too small to compress.
                 if (pos + 3 + round_bytes > dst.len) return error.DestinationTooSmall;
                 const hdr: u32 = @as(u32, @intCast(round_bytes)) | lz_constants.chunk_header_compressed_flag;
                 dst[pos + 0] = @intCast((hdr >> 16) & 0xFF);
@@ -762,7 +685,7 @@ fn compressFramedOne(
         }
 
         // ── Block-level cost decision ──────────────────────────────────
-        // Port of StreamLzCompressor.CompressOneBlock line 728. Rewrite
+        // Rewrite
         // the whole block as uncompressed if either the compressed chunk
         // didn't shrink the payload OR its cost exceeded the block-level
         // memset cost.
@@ -802,7 +725,7 @@ fn compressFramedOne(
 
     // SC mode: append a prefix table of (num_chunks - 1) * 8 bytes at the
     // end of the frame block payload. Each entry holds the first 8 bytes of
-    // chunks 1..N-1 (the 0-fill + memcpy trick matches C#
+    // chunks 1..N-1 (the 0-fill + memcpy trick matches the format
     // `StreamLzCompressor.AppendSelfContainedPrefixTable` lines 407-426).
     // The parallel decompressor uses these to restore the corrupted first
     // 8 bytes of each per-worker-decoded chunk.
@@ -824,7 +747,7 @@ fn compressFramedOne(
 
     // Frame block fallback: if compressed total didn't beat uncompressed
     // (or input too small), rewrite the frame block as one uncompressed
-    // frame block (matching C# StreamLzFrameCompressor.Compress).
+    // frame block.
     const frame_block_compressed_size = pos - frame_block_start;
     if (!can_compress or frame_block_compressed_size >= src.len) {
         pos = frame_block_start;
@@ -976,7 +899,7 @@ const match_finder_bt4 = @import("match_finder_bt4.zig");
 const mls_mod = @import("managed_match_len_storage.zig");
 
 /// Unified-to-codec-level mapping for the High codec path. Mirrors
-/// C# `Slz.MapLevel` for unified levels 6-11.
+/// Map unified levels 6-11 to High-codec encoder parameters.
 const HighMapping = struct {
     codec_level: i32,
     self_contained: bool,
@@ -984,7 +907,7 @@ const HighMapping = struct {
 };
 
 fn mapHighLevel(user_level: u8) HighMapping {
-    // Matches C# `Slz.MapLevel` + `StreamLzCompressor.CompressInternal`:
+    //
     // codec_level >= 9 enables the BT4 match finder.
     return switch (user_level) {
         6 => .{ .codec_level = 5, .self_contained = true, .use_bt4 = false },
@@ -997,7 +920,7 @@ fn mapHighLevel(user_level: u8) HighMapping {
     };
 }
 
-/// Port of the High-codec slice of `StreamLzCompressor.Compress` /
+/// High-codec framed compressor --
 /// `CompressBlocksSerial` / `CompressOneBlock` / `CompressChunk`.
 /// Initial scope: serial, no SC prefix table emission (treats L6-L8
 /// as non-SC for now). Full SC parity layers on in a follow-up.
@@ -1030,21 +953,21 @@ fn compressFramedHigh(
     const sc_flag_bit: u8 = if (self_contained) 0x10 else 0;
 
     // ── High encoder context ───────────────────────────────────────────
-    // L5+ enables `export_tokens`. Entropy options per C# SetupEncoder:
+    // L5+ enables `export_tokens`. Entropy options:
     // start at 0xFF & ~MultiArrayAdvanced, then re-enable MultiArrayAdvanced
     // when level >= 7.
     var entropy_raw: u8 = 0xFF & ~@as(u8, 0b0100_0000); // clear MultiArrayAdvanced
     if (mapping.codec_level >= 7) entropy_raw |= 0b0100_0000;
-    // Cross-block stats scratch — the C# `lzcoder.SymbolStatisticsScratch`
-    // + `lzcoder.LastChunkType` plumbing. The optimal parser reads these
+    // Cross-block stats scratch — symbol statistics + last chunk type.
+    // The optimal parser reads these
     // at the start of each block and writes them back on success. Without
     // this, multi-block streams seed every block's cost model from cold
-    // and diverge from C# byte-exact.
+    // and diverge from byte-exact output.
     var cross_block_state: high_encoder.HighCrossBlockState = .{};
     const ctx: high_encoder.HighEncoderContext = .{
         .allocator = allocator,
         .compression_level = mapping.codec_level,
-        // C# `High.Compressor.SetupEncoder` (Compressor.cs:62):
+        // SetupEncoder:
         //   SpeedTradeoff = SpaceSpeedTradeoffBytes * Factor1 * Factor2
         // The Fast codec uses a different formula (scale * entropy_factor)
         // which would produce a speed_tradeoff ~5.6x too high here and
@@ -1053,7 +976,7 @@ fn compressFramedHigh(
             cost_coeffs.default_space_speed_tradeoff_bytes,
         ),
         .entropy_options = @bitCast(entropy_raw),
-        .encode_flags = 4, // export_tokens, per C# SetupEncoder line 75
+        .encode_flags = 4, // export_tokens
         .self_contained = self_contained,
         .cross_block = &cross_block_state,
     };
@@ -1088,7 +1011,7 @@ fn compressFramedHigh(
 
     // Parallel gating: non-SC parallel uses a global MLS (pre-computed
     // once). That path doesn't get the sliding-window treatment — it's
-    // a separate step to make parallel byte-exact with C#'s Parallel.For.
+    // a separate step to make parallel byte-exact with the serial path.
     const can_parallel_blocks: bool =
         can_compress and
         num_blocks > 1 and
@@ -1122,7 +1045,7 @@ fn compressFramedHigh(
     } else if (can_parallel_blocks) {
         // Parallel non-SC High: build one global MLS covering all of
         // `src`, then hand blocks out to worker threads. Not byte-exact
-        // with C# `Parallel.For` (range partitioner assigns blocks in a
+        // (range partitioner assigns blocks in a
         // different order), but reproducible across Zig runs.
         var global_mls = try mls_mod.ManagedMatchLenStorage.init(allocator, src.len + 1, 8.0);
         defer global_mls.deinit();
@@ -1157,14 +1080,12 @@ fn compressFramedHigh(
         );
     } else if (can_compress and mapping.codec_level >= 5 and !self_contained) {
         // ── Serial non-SC High: sliding-window frame-block loop ──────
-        // Port of the serial path in
-        // `StreamLzFrameCompressor.Compress` (StreamLzFrameCompressor.cs:182).
-        // Splits `src` into `frame_block_size`-sized reads and carries
+        // Serial path: splits `src` into `frame_block_size`-sized reads and carries
         // the tail of each read forward as a dictionary for the next
-        // read (bounded by `window_size`). Byte-exact against C# at
+        // read (bounded by `window_size`). Byte-exact at
         // any input size.
         //
-        // C# semantics note: each iteration of C#'s serial loop calls
+        // Semantics note: each iteration of the serial loop calls
         // `StreamLZCompressor.CompressBlock`, which instantiates a fresh
         // `LzCoder { LastChunkType = -1 }` per call. That means the
         // cross-block cost-model stats DO NOT carry between frame
@@ -1177,7 +1098,7 @@ fn compressFramedHigh(
             lz_constants.default_window_size; // 128 MB for L9/L10
         const window_size: usize = lz_constants.default_window_size;
 
-        // C# `StreamLzCompressor.CompressInternal` caps the effective
+        // CompressInternal caps the effective
         // dictionary passed to the match finder at
         //   `localDictSize - srcSize`
         // where `localDictSize = max(opts.MaxLocalDictionarySize, 64 MB)`
@@ -1185,8 +1106,8 @@ fn compressFramedHigh(
         // effective cap is `64 MB - block_bytes`. For L11 with 8 MB
         // blocks this is 56 MB; for L9/L10 with 128 MB blocks this
         // clamps to 0 (no cross-block reference). Without this cap,
-        // blocks beyond the cap see a larger preload than C# does and
-        // the match finder picks up matches C# would have missed.
+        // blocks beyond the cap see a larger preload and
+        // the match finder picks up extra matches.
         const local_dict_size: usize = 64 * 1024 * 1024;
 
         var src_off: usize = 0;
@@ -1199,7 +1120,7 @@ fn compressFramedHigh(
             const window_len: usize = dict_bytes + block_bytes;
             const window_slice: []const u8 = src[window_start..][0..window_len];
 
-            // Fresh cost-model state per frame block (matches C#'s
+            // Fresh cost-model state per frame block (matches the
             // per-`CompressBlock` LzCoder instantiation).
             cross_block_state = .{};
 
@@ -1284,8 +1205,7 @@ fn compressFramedHigh(
 }
 
 /// Compresses one frame-sized block with dict carry-over into `dst[pos..]`.
-/// Ports the body of the serial loop in `StreamLzFrameCompressor.Compress`
-/// (StreamLzFrameCompressor.cs:203-256): allocate per-block MLS, run match
+/// Allocate per-block MLS, run match
 /// finder on `window_slice` with `preload_size = dict_bytes`, iterate the
 /// 256 KB internal blocks, write the 8-byte frame block header, and fall
 /// back to an uncompressed frame block if the compressed payload didn't
@@ -1312,11 +1232,9 @@ fn compressOneFrameBlockWindowed(
     // Per-frame-block MLS. Size is `block_bytes + 1` because the MLS
     // stores matches for the NEW bytes only (preload positions are
     // inserted into the match finder's hash/tree but no matches are
-    // recorded for them). C# `CompressInternal` does exactly the same
-    // at StreamLzCompressor.cs:481-495.
+    // recorded for them).
     //
-    // `round_start_pos` is the UNCAPPED `srcIn - srcWindowBase` from
-    // C# (StreamLzCompressor.cs:483) — i.e., the absolute offset of
+    // `round_start_pos` is the uncapped absolute offset of
     // the new bytes from the start of the stream, NOT the post-cap
     // dict size. The optimal parser uses
     //   `mls_start = start_pos - round_start_pos`
@@ -1339,11 +1257,11 @@ fn compressOneFrameBlockWindowed(
     // Iterate the 256 KB internal blocks of this frame block's NEW bytes.
     // Pass the FULL `src` (not `window_slice`) so the optimal parser's
     // `start_pos = src_off + sub_off` is the absolute stream offset that
-    // matches C# `offset + (src - sourceStart)` from CompressChunk:899.
+    // matches `offset + (src - sourceStart)`.
     // With `mls.round_start_pos = src_off_abs`, this still gives the
     // block-relative MLS index: `start_pos - round_start_pos = inner_off
     // + sub_off`.
-    // Keyframe rule mirrors C# `CompressOneBlock` (StreamLzCompressor.cs:707):
+    // Keyframe rule:
     //   `bool keyframe = sc || (blockSrc == dictBase)`
     // where `dictBase = srcIn - dictSize_capped`. The first inner 256 KB
     // block has `blockSrc == srcIn`, so the keyframe flag fires whenever
@@ -1371,8 +1289,7 @@ fn compressOneFrameBlockWindowed(
     }
 
     // Frame-block fallback: rewrite as uncompressed if the LZ payload
-    // didn't beat raw. Mirrors C# `if (compressedSize > 0 && compressedSize
-    // < blockBytes)` at StreamLzFrameCompressor.cs:226.
+    // didn't beat raw.
     const fb_compressed_size = pos - fb_start;
     if (fb_compressed_size >= block_bytes) {
         pos = fb_start;
@@ -1465,7 +1382,7 @@ fn finalizeSingleFrameBlock(
 /// fall-back uncompressed 2-byte block header + raw payload when
 /// LZ compression doesn't beat raw for this block.
 ///
-/// Mirrors C# `StreamLzCompressor.CompressOneBlock` but with the
+/// Single-block High compression helper with
 /// per-sub-chunk loop inlined (matching `compressFramedHigh`'s
 /// structure). Shared by the serial and parallel block loops.
 fn compressOneHighBlock(
@@ -1526,7 +1443,7 @@ fn compressOneHighBlock(
             const sub_payload_start: usize = local_pos;
             // `start_pos` is the cumulative offset from `windowBase` —
             // the absolute position of this sub-chunk within the
-            // current frame block. Matches C# `CompressChunk` line 900:
+            // current frame block:
             // `offset + (int)(src - sourceStart)`. Both SC and non-SC
             // pass the same monotonic offset; the SC enforcement happens
             // inside the optimal parser via `scMaxBack = startPos + pos`.
@@ -1620,15 +1537,14 @@ fn compressOneHighBlock(
 //  compressBlocksParallel — non-SC High parallel block dispatch
 // ────────────────────────────────────────────────────────────
 //
-// Port of C# `StreamLzCompressor.CompressBlocksParallel` at
-// `StreamLzCompressor.cs:778`. Works per-block (one 256 KB chunk),
+// Parallel block compression for the High codec. Works per-block (one 256 KB chunk),
 // each thread owning a dedicated tmp buffer. Shared read-only
 // across workers: `src` (the full source), `mls` (pre-computed
 // match storage), `ctx` (config). The per-block `compressOneHigh
 // Block` never mutates any of these, so thread-safety is
 // guaranteed without locks.
 //
-// Workers run at the OS default thread priority. C# sets
+// Workers run at the OS default thread priority.
 // `ThreadPriority.BelowNormal` to keep compression off the UI
 // critical path; the Zig `std.Thread` API doesn't expose priority
 // directly on all targets, so we leave this at default — this is
@@ -1665,13 +1581,13 @@ fn pcWorkerFn(shared: *PcShared) void {
     // `backing_allocator`. Reset between blocks with
     // `.retain_capacity` so the second+ block's allocations are
     // bump-pointer within the already-grown arena pages, matching
-    // C#'s `[ThreadStatic] LzTemp t_lztemp` reuse pattern. Step 14
+    // Thread-local scratch reuse pattern. Step 14
     // (D13).
     var arena = std.heap.ArenaAllocator.init(shared.backing_allocator);
     defer arena.deinit();
 
     // Worker-local context copy with the arena allocator + private
-    // cross-block state. Mirrors C# `Parallel.For` with `CloneForThread`:
+    // cross-block state:
     // each worker has its own `LzCoder` clone so stats accumulate
     // within a worker's block range but not across workers.
     var worker_ctx = shared.base_ctx.*;
@@ -1680,7 +1596,7 @@ fn pcWorkerFn(shared: *PcShared) void {
     worker_ctx.cross_block = &worker_cross_block;
 
     // Each worker allocates its OWN `HighHasher` once and reuses it
-    // across blocks, matching the C# per-thread `LzCoder` clone. For
+    // across blocks, matching the per-thread context clone. For
     // L5+ this is `.none` (the optimal parser uses the shared MLS
     // directly), so no per-thread state besides the arena.
     var hasher: high_compressor.HighHasher = .{ .none = {} };
@@ -1817,8 +1733,7 @@ fn compressBlocksParallel(
 //  compressInternalParallelSc — SC parallel across chunk groups
 // ────────────────────────────────────────────────────────────
 //
-// Port of C# `StreamLzCompressor.CompressInternalParallelSC` at
-// `StreamLzCompressor.cs:528`. The key difference vs
+// Parallel SC compression for the High codec. The key difference vs
 // `compressBlocksParallel`: each worker runs its OWN match finder
 // on only its group's `sc_group_size * chunk_size` bytes, so
 // there's no shared global MLS. This is required for SC mode
@@ -1936,7 +1851,7 @@ fn scWorkerFn(shared: *ScShared) void {
             const in_group_src_off = ci * lz_constants.chunk_size;
             const block_src_len = @min(group_src.len - in_group_src_off, lz_constants.chunk_size);
             // Only the first chunk in each group is a keyframe — matches
-            // C# `CompressInternalParallelSC` (StreamLzCompressor.cs:580).
+            //
             // The block header keyframe bit (0x40) is part of the 2-byte
             // header so getting this wrong shifts every block's bytes.
             const keyframe = (ci == 0);
@@ -2642,43 +2557,6 @@ test "decompressFramed: decoder accepts 2 concatenated SLZ1 frames" {
     const written = try decoder.decompressFramed(tmp[0..total], decoded);
     try testing.expectEqual(src.len, written);
     try testing.expectEqualSlices(u8, &src, decoded[0..written]);
-}
-
-// ────────────────────────────────────────────────────────────
-//  Phase 14 step 40 — calculateMaxThreads tests
-// ────────────────────────────────────────────────────────────
-
-test "calculateMaxThreads: returns at least 1" {
-    // Any non-negative input must yield a positive thread count —
-    // a caller passing the result directly into the parallel
-    // dispatch should never see 0.
-    const n = calculateMaxThreads(0, 9);
-    try testing.expect(n >= 1);
-    const m = calculateMaxThreads(1024 * 1024, 9);
-    try testing.expect(m >= 1);
-}
-
-test "calculateMaxThreads: doesn't exceed CPU count" {
-    const cpu: u32 = @intCast(std.Thread.getCpuCount() catch 1);
-    const n = calculateMaxThreads(1024, 6);
-    try testing.expect(n <= cpu);
-}
-
-test "calculateMaxThreads: scales down with huge src_len" {
-    // A huge shared-memory estimate (nearly the whole RAM budget)
-    // should drive `available_for_threads` below zero and clamp to
-    // 1. We can't observe this directly without knowing the host's
-    // total_memory, so we test with src_len == usize max, which
-    // guarantees `memory_budget <= shared_mem` on any host.
-    const n = calculateMaxThreads(std.math.maxInt(usize) / 2, 9);
-    try testing.expect(n >= 1);
-}
-
-test "totalAvailableMemoryBytes: returns a plausible value on Windows" {
-    if (@import("builtin").os.tag != .windows) return;
-    const mem = totalAvailableMemoryBytes();
-    // Any Windows host running this test suite has at least 1 GB.
-    try testing.expect(mem >= 1 * 1024 * 1024 * 1024);
 }
 
 test "decompressFramed: multi-piece concatenation across L6 + L9 codecs" {

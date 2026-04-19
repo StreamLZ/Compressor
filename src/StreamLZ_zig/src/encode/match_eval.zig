@@ -1,12 +1,10 @@
-//! Shared LZ match-evaluation helpers. Port of
-//! src/StreamLZ/Compression/MatchEvaluation.cs (`MatchUtils`).
+//! Shared LZ match-evaluation helpers for the High codec.
+//! Used by: Fast and High codecs
 //!
-//! These are the building blocks the High codec's parsers and cost model
-//! use to measure and rank candidate matches. Fast's `fast_lz_parser.zig`
-//! has its own inlined copies of `countMatchingBytes` and friends — those
-//! stay where they are to preserve the Fast-encoder byte-exact parity;
-//! this module exists so the High codec (step 29+) can share the same
-//! algorithms without touching Fast.
+//! The High codec's parsers and cost model use these to measure and rank
+//! candidate matches. `fast_lz_parser.zig` has its own inlined copies
+//! with different type signatures (unsigned offsets, i32 lengths) tuned
+//! to the Fast encoder's hot loop.
 
 const std = @import("std");
 
@@ -19,7 +17,7 @@ pub const CompareLengthAndOffset = LengthAndOffset;
 /// `p - offset`, up to `p_end`. Uses 8-byte and 4-byte scans with a
 /// trailing-zero count on the XOR difference for a precise match length.
 ///
-/// Port of C# `MatchUtils.CountMatchingBytes` (`MatchEvaluation.cs:19-52`).
+///
 pub fn countMatchingBytes(p: [*]const u8, p_end: [*]const u8, offset: isize) usize {
     var len: usize = 0;
     var cursor = p;
@@ -61,7 +59,7 @@ pub fn countMatchingBytes(p: [*]const u8, p_end: [*]const u8, offset: isize) usi
 /// Quick match-length computation starting from a 4-byte prefix. Returns
 /// 4 + tail when the prefix matches, or 0..3 for short partial matches.
 ///
-/// Port of C# `MatchUtils.GetMatchLengthQuick` (`MatchEvaluation.cs:59-75`).
+///
 pub fn getMatchLengthQuick(
     src: [*]const u8,
     offset: isize,
@@ -80,8 +78,7 @@ pub fn getMatchLengthQuick(
     return if ((xor & 0xFFFFFF) != 0) 2 else 3;
 }
 
-/// Match length with minimum 2 — single-byte matches fold to 0.
-/// Port of C# `MatchUtils.GetMatchLengthMin2`.
+/// Match length with minimum 2 -- single-byte matches fold to 0.
 pub fn getMatchLengthMin2(
     src_ptr_cur: [*]const u8,
     offset: isize,
@@ -92,7 +89,6 @@ pub fn getMatchLengthMin2(
 }
 
 /// Match length with minimum 3. Returns 0 if the first 3 bytes differ.
-/// Port of C# `MatchUtils.GetMatchLengthQuickMin3`.
 pub fn getMatchLengthQuickMin3(
     src_ptr_cur: [*]const u8,
     offset: isize,
@@ -109,7 +105,6 @@ pub fn getMatchLengthQuickMin3(
 }
 
 /// Match length with minimum 4. Returns 0 if the first 4 bytes differ.
-/// Port of C# `MatchUtils.GetMatchLengthQuickMin4`.
 pub fn getMatchLengthQuickMin4(
     src_ptr_cur: [*]const u8,
     offset: isize,
@@ -126,7 +121,7 @@ pub fn getMatchLengthQuickMin4(
 }
 
 /// True when a normal match of the given length/offset beats the current
-/// recent-offset match. Port of `MatchUtils.IsBetterThanRecent`.
+/// recent-offset match.
 pub fn isBetterThanRecent(recent_match_length: i32, match_length: i32, offset: i32) bool {
     return recent_match_length < 2 or
         (recent_match_length + 1 < match_length and
@@ -135,8 +130,7 @@ pub fn isBetterThanRecent(recent_match_length: i32, match_length: i32, offset: i
 }
 
 /// True when `(match_length, offset)` is better than `(best_match_length,
-/// best_offset)` under the length-biased heuristic. Port of
-/// `MatchUtils.IsMatchBetter`.
+/// best_offset)` under the length-biased heuristic.
 pub fn isMatchBetter(match_length: u32, offset: u32, best_match_length: u32, best_offset: u32) bool {
     if (match_length < best_match_length) return false;
     if (match_length == best_match_length) return offset < best_offset;
@@ -147,7 +141,7 @@ pub fn isMatchBetter(match_length: u32, offset: u32, best_match_length: u32, bes
 /// Lazy-match score — compares the prospective lazy match at position+1
 /// against the current match. Positive means the lazy candidate wins.
 ///
-/// Port of C# `MatchUtils.GetLazyScore` (`MatchEvaluation.cs:161-166`).
+///
 ///
 /// `a` and `b` can be any struct type with `length: i32` and
 /// `offset: i32` fields — both `fast_lz_parser.LengthAndOffset` and

@@ -1,4 +1,4 @@
-//! Port of src/StreamLZ/Common/FrameFormat.cs — SLZ frame format (v2).
+//! SLZ frame format (v2).
 //!
 //! Wire layout (little-endian) — StreamLZ v2:
 //!   [4] magic = 0x534C5A31 ('SLZ1' byte order S,L,Z,1)
@@ -310,7 +310,7 @@ test "parseHeader rejects truncated input" {
 }
 
 test "parseHeader rejects v1 frames (breaking change for v2)" {
-    // Original v1 C# fixture (18 bytes) — v2 decoders must reject.
+    // Original v1 fixture (18 bytes) — v2 decoders must reject.
     const v1_fixture = [_]u8{
         0x31, 0x5A, 0x4C, 0x53, // magic 'SLZ1'
         0x01, // version = 1 (v1, not supported by v2 decoder)
@@ -389,8 +389,8 @@ test "writeHeader / parseHeader roundtrip, custom sc_group_size + parallel flag"
 
 test "block header end mark detected" {
     const em = [_]u8{ 0, 0, 0, 0, 0, 0, 0, 0 };
-    const bh = try parseBlockHeader(&em);
-    try testing.expect(bh.isEndMark());
+    const block_hdr= try parseBlockHeader(&em);
+    try testing.expect(block_hdr.isEndMark());
 }
 
 test "block header uncompressed flag roundtrip" {
@@ -401,11 +401,11 @@ test "block header uncompressed flag roundtrip" {
         .uncompressed = true,
         .parallel_decode_metadata = false,
     });
-    const bh = try parseBlockHeader(&buf);
-    try testing.expect(bh.uncompressed);
-    try testing.expect(!bh.parallel_decode_metadata);
-    try testing.expectEqual(@as(u32, 41), bh.compressed_size);
-    try testing.expectEqual(@as(u32, 41), bh.decompressed_size);
+    const block_hdr= try parseBlockHeader(&buf);
+    try testing.expect(block_hdr.uncompressed);
+    try testing.expect(!block_hdr.parallel_decode_metadata);
+    try testing.expectEqual(@as(u32, 41), block_hdr.compressed_size);
+    try testing.expectEqual(@as(u32, 41), block_hdr.decompressed_size);
 }
 
 test "block header parallel_decode_metadata flag roundtrip" {
@@ -416,10 +416,10 @@ test "block header parallel_decode_metadata flag roundtrip" {
         .uncompressed = false,
         .parallel_decode_metadata = true,
     });
-    const bh = try parseBlockHeader(&buf);
-    try testing.expect(bh.parallel_decode_metadata);
-    try testing.expect(!bh.uncompressed);
-    try testing.expectEqual(@as(u32, 123), bh.compressed_size);
-    try testing.expectEqual(@as(u32, 0), bh.decompressed_size);
-    try testing.expect(!bh.isEndMark());
+    const block_hdr= try parseBlockHeader(&buf);
+    try testing.expect(block_hdr.parallel_decode_metadata);
+    try testing.expect(!block_hdr.uncompressed);
+    try testing.expectEqual(@as(u32, 123), block_hdr.compressed_size);
+    try testing.expectEqual(@as(u32, 0), block_hdr.decompressed_size);
+    try testing.expect(!block_hdr.isEndMark());
 }

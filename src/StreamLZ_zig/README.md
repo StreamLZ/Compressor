@@ -491,6 +491,24 @@ For anyone modifying the hot loops:
 
 ---
 
+## Glossary
+
+| Term | Meaning |
+|------|---------|
+| Fast codec | Greedy/lazy LZ parser, levels 1-5. Fast compress + decompress. |
+| High codec | Optimal DP parser, levels 6-11. Slower compress, same decompress speed. |
+| tANS | Tabled Asymmetric Numeral System — entropy coder used for literal streams. |
+| BT4 | Binary Tree 4-way — match finder used by the High codec's optimal parser. |
+| SC | Self-Contained — block format flag; each block decodes independently. |
+| Sidecar | Optional parallel-decode metadata block (cross-chunk dependency map). |
+| Chunk | 256 KB decompression unit. Sub-chunk = 128 KB half. |
+| Cross-chunk | A match whose source bytes are in a different chunk than its target. |
+| Cleanness | Whether a byte's dependency chain stays within one chunk (no cross-chunk refs). |
+| PPOC | Parallel Producer/Consumer — proof-of-concept sidecar builder. |
+| MLS | Managed Match Length Storage — variable-length match table for the High codec. |
+
+---
+
 ## License
 
 Same as the upstream StreamLZ project (MIT).

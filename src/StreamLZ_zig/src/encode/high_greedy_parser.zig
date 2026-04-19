@@ -1,6 +1,6 @@
 //! High fast parser (levels 1-4): greedy / 1-lazy / 2-lazy match
-//! finder emitting tokens via `high_encoder.addToken`. Port of
-//! src/StreamLZ/Compression/High/FastParser.cs.
+//! finder emitting tokens via `high_encoder.addToken`.
+//! Used by: High codec (L6-L11)
 //!
 //! The parser is comptime-generic over the hasher type — each High
 //! level instantiates a specialized copy for its `MatchHasher*` so
@@ -8,7 +8,7 @@
 //! hash table probe at the current position fans out through 1, 2,
 //! 4, 8, or 16 bucket entries depending on the hasher variant.
 //!
-//! Level ↔ lazy-step mapping (from C# `High.Compressor.DoCompress`):
+//! Level / lazy-step mapping:
 //!   L1, L2 → numLazy = 0  (pure greedy)
 //!   L3     → numLazy = 1  (one lazy step)
 //!   L4     → numLazy = 2  (two lazy steps)
@@ -28,20 +28,18 @@ const HighStreamWriter = high_types.HighStreamWriter;
 const HighEncoderContext = high_encoder.HighEncoderContext;
 const HighWriterStorage = high_encoder.HighWriterStorage;
 
-/// Options threaded through `compressFast`. Mirrors the subset of
-/// C# `CompressOptions` the parser actually consults.
+/// Options threaded through `compressFast`.
 pub const FastParserOptions = struct {
-    /// Matches `CompressOptions.DictionarySize` (0 = default).
+    /// Dictionary size (0 = default).
     dictionary_size: u32 = 0,
-    /// Matches `CompressOptions.MinMatchLength` (clamped to >= 4).
+    /// Minimum match length (clamped to >= 4).
     min_match_length: u32 = 0,
-    /// Matches `CompressOptions.SelfContained`.
+    /// Self-contained mode.
     self_contained: bool = false,
 };
 
 /// Inspects a recent-offset slot and updates `best_ml` / `best_off`
-/// if it produces a longer match. Port of C#
-/// `FastParser.CheckRecentMatch` (`FastParser.cs:22-31`).
+/// if it produces a longer match.
 inline fn checkRecentMatch(
     src: [*]const u8,
     src_end: [*]const u8,
@@ -64,7 +62,7 @@ inline fn checkRecentMatch(
 /// + 3 recent offsets. Comptime-generic over the hasher type so each
 /// level compiles to its own specialized copy.
 ///
-/// Port of C# `FastParser.GetMatch` (`FastParser.cs:37-118`).
+///
 pub fn getMatch(
     comptime HasherT: type,
     hasher: *HasherT,
@@ -147,9 +145,8 @@ pub fn getMatch(
     return .{ .length = best_ml, .offset = best_offs };
 }
 
-/// Fast High compression — greedy / 1-lazy / 2-lazy parser emitting
-/// via `HighStreamWriter`. Port of C# `FastParser.CompressFast`
-/// (`FastParser.cs:125-263`). Returns the number of compressed bytes
+/// Fast High compression -- greedy / 1-lazy / 2-lazy parser emitting
+/// via `HighStreamWriter`. Returns the number of compressed bytes
 /// written to `dst`, or `src.len` on bail-out.
 pub fn compressFast(
     comptime HasherT: type,
@@ -270,7 +267,7 @@ pub fn compressFast(
         }
 
         // Resolve the actual backward offset from the recent-offset slot
-        // or a new offset (m.offset > 0). C#'s "avoid recent0 right after
+        // or a new offset (m.offset > 0). The "avoid recent0 right after
         // a match" rule (line 230-233): if we would emit recent0 with no
         // literals in between, shift to recent1 to allow the decoder to
         // distinguish the two runs.

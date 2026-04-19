@@ -1,8 +1,8 @@
-//! Port of src/StreamLZ/Common/CopyHelpers.cs — SIMD via Zig `@Vector`.
+//! SIMD copy helpers via Zig `@Vector`.
 //!
-//! Design matches the C# reference:
+//! Design notes:
 //!   * `copy64Bytes` writes 64 bytes via 4× 16-byte vectors (SSE2-sized);
-//!     the C# comment explains that 32-byte AVX2 loads caused frequency
+//!     32-byte AVX2 loads caused frequency
 //!     throttling on Arrow Lake and 16-byte is optimal for this workload.
 //!   * `wildCopy16` stays on two u64 halves per iteration, sequenced
 //!     load-store-load-store so that small-offset LZ match overlaps
@@ -111,6 +111,59 @@ pub inline fn copy16Add(dst: [*]u8, src: [*]const u8, delta: [*]const u8) void {
     const vs = loadV16(src);
     const vd = loadV16(delta);
     storeV16(dst, vs +% vd);
+}
+
+/// PSHUFB-based pattern replication masks, indexed by `min(distance, 16) - 1`.
+/// Entry `d` maps 16 output lanes to byte `(lane_index mod (d+1))` from
+/// the source, so a 16-byte load at `dst - (d+1)` followed by PSHUFB with
+/// this mask produces a correct repeating pattern for LZ matches where
+/// the distance is in [1, 16]. Entry 15 is the identity mask for
+/// distances >= 16.
+pub const match_copy_pshufb_masks: [16]V16 = .{
+    .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, // d=1
+    .{ 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1 }, // d=2
+    .{ 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0 }, // d=3
+    .{ 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3 }, // d=4
+    .{ 0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 0 }, // d=5
+    .{ 0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5, 0, 1, 2, 3 }, // d=6
+    .{ 0, 1, 2, 3, 4, 5, 6, 0, 1, 2, 3, 4, 5, 6, 0, 1 }, // d=7
+    .{ 0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7 }, // d=8
+    .{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 0, 1, 2, 3, 4, 5, 6 }, // d=9
+    .{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5 }, // d=10
+    .{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0, 1, 2, 3, 4 }, // d=11
+    .{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0, 1, 2, 3 }, // d=12
+    .{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0, 1, 2 }, // d=13
+    .{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 0, 1 }, // d=14
+    .{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 0 }, // d=15
+    .{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 }, // d>=16: identity
+};
+
+/// 16-byte match copy with unconditional MOVDQU + PSHUFB-based pattern
+/// replication. Writes exactly 16 bytes at `dst` as if the caller had
+/// executed a byte-by-byte LZ match copy of length 16 from `dst - distance`
+/// to `dst`. Works for any `distance >= 1`.
+///
+/// Callers must supply `distance = dst - match_ptr` (not `match_ptr`
+/// directly) so the helper can index the shuffle-mask table.
+///
+/// Replaces the 2× `copy64` cascade used in the Fast short-token match
+/// path: drops one 8-byte store per iteration, relieving store-port
+/// pressure (the main non-memory backend bottleneck on Arrow Lake).
+pub inline fn copyMatch16Pshufb(dst: [*]u8, match_ptr: [*]const u8, distance: usize) void {
+    // Compute idx in [0, 15]: for distance in [1, 16] use distance-1,
+    // for distance > 16 clamp to 15 (identity mask). Narrowing to u4
+    // tells LLVM the index is 4-bit-bounded so it can drop the extra
+    // `and r, 0x1f` safety mask the default codegen emits.
+    const idx_wide: usize = @min(distance - 1, 15);
+    const idx: u4 = @intCast(idx_wide);
+    const mask: V16 = match_copy_pshufb_masks[idx];
+    const v: V16 = loadV16(match_ptr);
+    const shuffled: V16 = asm ("pshufb %[mask], %[v]"
+        : [ret] "=x" (-> V16),
+        : [v] "0" (v),
+          [mask] "x" (mask),
+    );
+    storeV16(dst, shuffled);
 }
 
 /// Fills `count` bytes starting at `dst` with `byte`.

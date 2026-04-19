@@ -1,3 +1,5 @@
+//! Test-only module. Not part of the library. Requires STREAMLZ_FIXTURES_DIR env var.
+//!
 //! Phase 9: encode-then-decode roundtrip tests over the Phase 8 fixture
 //! corpus. For every `.raw` file under `$STREAMLZ_FIXTURES_DIR/raw/`, run
 //! it through the Zig Fast encoder at levels 1 and 2, decode the result

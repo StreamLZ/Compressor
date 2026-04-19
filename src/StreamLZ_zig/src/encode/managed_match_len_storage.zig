@@ -1,10 +1,5 @@
 //! Managed match-length storage + variable-length codec + extract helpers.
-//! Port of
-//!   src/StreamLZ/Compression/MatchFinding/ManagedMatchLenStorage.cs
-//!   src/StreamLZ/Compression/MatchFinding/MatchFinder.cs (VarLen + Extract
-//!     helpers — `VarLenWriteSpill/Offset/Length`, `InsertMatches`,
-//!     `ExtractFromMlsInner`, `ExtractLengthFromMls`, `ExtractOffsetFromMls`,
-//!     `ExtractLaoFromMls`, `RemoveIdentical`)
+//! Used by: High codec (L6-L11)
 //!
 //! Shared data structure used by the High codec: each source offset maps
 //! to a variable-length sequence of (length, offset) pairs encoded via
@@ -15,7 +10,7 @@
 const std = @import("std");
 const match_eval = @import("match_eval.zig");
 
-/// (length, offset) pair matching C# `LengthAndOffset`. Offset is the
+/// (length, offset) pair. Offset is the
 /// backward distance to the match source (always positive for hash-based
 /// matches).
 pub const LengthAndOffset = struct {
@@ -82,7 +77,7 @@ pub const ManagedMatchLenStorage = struct {
     }
 
     /// Grows `byte_buffer` to hold at least `needed_bytes`. Matches the
-    /// C# growth policy (1.25×) so any cost-model test that compares
+    /// Growth policy (1.25×) so any cost-model test that compares
     /// allocation counts stays predictable.
     fn ensureByteBuffer(self: *ManagedMatchLenStorage, needed_bytes: usize) !void {
         if (needed_bytes < self.byte_buffer.len) return;
@@ -99,7 +94,6 @@ pub const ManagedMatchLenStorage = struct {
 // ────────────────────────────────────────────────────────────
 
 /// Writes a variable-length encoded value using a split high/low scheme.
-/// Port of C# `MatchFinder.VarLenWriteSpill` (`MatchFinder.cs:43-55`).
 inline fn varLenWriteSpill(dst: []u8, dst_pos_in: usize, value_in: u32, a: u5) usize {
     var dst_pos = dst_pos_in;
     var value = value_in;
@@ -116,7 +110,6 @@ inline fn varLenWriteSpill(dst: []u8, dst_pos_in: usize, value_in: u32, a: u5) u
 }
 
 /// Writes a variable-length encoded offset (2-byte base + optional spill).
-/// Port of C# `MatchFinder.VarLenWriteOffset` (`MatchFinder.cs:65-83`).
 inline fn varLenWriteOffset(dst: []u8, dst_pos_in: usize, value: u32, a: u5, b: u5) usize {
     var dst_pos = dst_pos_in;
     const shifted: u32 = @as(u32, 1) << a;
@@ -135,7 +128,6 @@ inline fn varLenWriteOffset(dst: []u8, dst_pos_in: usize, value: u32, a: u5, b: 
 }
 
 /// Writes a variable-length encoded length (1-byte base + optional spill).
-/// Port of C# `MatchFinder.VarLenWriteLength` (`MatchFinder.cs:93-109`).
 inline fn varLenWriteLength(dst: []u8, dst_pos_in: usize, value: u32, a: u5, b: u5) usize {
     var dst_pos = dst_pos_in;
     const shifted: u32 = @as(u32, 1) << a;
@@ -155,8 +147,7 @@ inline fn varLenWriteLength(dst: []u8, dst_pos_in: usize, value: u32, a: u5, b: 
 //  Insertion into storage
 // ────────────────────────────────────────────────────────────
 
-/// Inserts one or more matches into the MLS at `at_offset`. Port of C#
-/// `MatchFinder.InsertMatches` (`MatchFinder.cs:119-147`).
+/// Inserts one or more matches into the MLS at `at_offset`.
 pub fn insertMatches(
     mls: *ManagedMatchLenStorage,
     at_offset: usize,
@@ -189,7 +180,6 @@ pub fn insertMatches(
 // ────────────────────────────────────────────────────────────
 
 /// Removes entries with duplicate lengths from a sorted match array.
-/// Port of C# `MatchFinder.RemoveIdentical` (`MatchFinder.cs:155-177`).
 pub fn removeIdentical(matches: []LengthAndOffset, count_in: usize) usize {
     std.debug.assert(count_in > 0);
     var count = count_in;
@@ -213,13 +203,12 @@ pub fn removeIdentical(matches: []LengthAndOffset, count_in: usize) usize {
 //  Extraction (decoder-side of VarLen codec)
 // ────────────────────────────────────────────────────────────
 
-/// Reads a variable-length integer from the MLS byte buffer. Port of
-/// C# `MatchFinder.ExtractFromMlsInner` (`MatchFinder.cs:522-541`).
+/// Reads a variable-length integer from the MLS byte buffer.
 /// Returns `error.Truncated` on underflow, otherwise the decoded value.
 ///
 /// All arithmetic is done via wrapping `u32` ops then bitcast back to
-/// `i32`, matching C# `int` semantics (C# silently wraps on overflow;
-/// Zig's signed ops would panic on `-ftrap-integer-overflow`).
+/// `i32` to match signed-wrapping semantics (Zig's signed ops would
+/// panic on overflow).
 inline fn extractFromMlsInner(
     src: []const u8,
     pos_in_out: *usize,
@@ -246,8 +235,7 @@ inline fn extractFromMlsInner(
     }
 }
 
-/// Reads a variable-length encoded length. Port of C#
-/// `MatchFinder.ExtractLengthFromMls` (`MatchFinder.cs:547-569`).
+/// Reads a variable-length encoded length.
 pub fn extractLengthFromMls(
     src: []const u8,
     pos_in_out: *usize,
@@ -268,8 +256,7 @@ pub fn extractLengthFromMls(
     return t;
 }
 
-/// Reads a variable-length encoded offset. Port of C#
-/// `MatchFinder.ExtractOffsetFromMls` (`MatchFinder.cs:575-598`).
+/// Reads a variable-length encoded offset.
 pub fn extractOffsetFromMls(
     src: []const u8,
     pos_in_out: *usize,
@@ -290,8 +277,7 @@ pub fn extractOffsetFromMls(
 }
 
 /// Extracts `LengthAndOffset` arrays from a `ManagedMatchLenStorage` for
-/// a range of source offsets. Port of C# `MatchFinder.ExtractLaoFromMls`
-/// (`MatchFinder.cs:609-659`).
+/// a range of source offsets.
 pub fn extractLaoFromMls(
     mls: *const ManagedMatchLenStorage,
     start: usize,

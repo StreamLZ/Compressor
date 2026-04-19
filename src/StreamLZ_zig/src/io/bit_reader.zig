@@ -1,6 +1,6 @@
-//! Port of src/StreamLZ/Common/BitReader.cs
+//! Bit-level reader with a 32-bit accumulator.
 //!
-//! Bit-level reader with a 32-bit accumulator. Consumes bits MSB-first.
+//! Consumes bits MSB-first.
 //! Supports forward and backward refill so the same reader works on
 //! entropy streams that are laid out in either direction.
 //!
@@ -94,12 +94,12 @@ pub const BitReader = struct {
     }
 
     /// Reads `n` bits without refilling. `n` may be 0; double-shift
-    /// dodges the undefined shift-by-32 case that the C# version avoids.
+    /// dodges the undefined shift-by-32 case.
     pub inline fn readBitsNoRefillZero(self: *BitReader, n: u6) u32 {
         const r = (self.bits >> 1) >> @intCast(31 - n);
         // In Zig, shifting u32 by n requires n to fit in u5. For n == 0
         // we cannot use the vanilla `<<` path because `@intCast(0)` is fine
-        // but the value must round-trip; split into the two halves the C#
+        // but the value must round-trip; split into the two halves the
         // version uses.
         if (n == 0) {
             // no-op; bits/bit_pos unchanged

@@ -44,7 +44,7 @@ pub fn processLzRuns(
 }
 
 /// Fallback allocator for the Type 1 token array when the scratch buffer
-/// is exhausted. Uses libc malloc/free via Zig's c_allocator — matches C#'s
+/// is exhausted. Uses libc malloc/free via Zig's c_allocator — matches the
 /// `NativeMemory.Alloc` and avoids the ~5µs syscall cost of page_allocator
 /// (VirtualAlloc/VirtualFree). For a 100 MB L9 decode we hit the fallback
 /// ~12,000 times; VTune Hotspots showed page_allocator at 13.8% of CPU.
@@ -126,7 +126,7 @@ fn processLzRunsType0(
 
         // Prefetch the match source for THIS iteration — the literal copy
         // that follows gives ~10-100 cycles for the line to arrive in L1.
-        // C# does the same; see High.LzDecoder.ProcessLzRuns_Type0.
+        //
         {
             const pre_addr: usize = @intFromPtr(dst) + lit_len_i +% @as(usize, @bitCast(@as(isize, off_i)));
             @prefetch(@as([*]const u8, @ptrFromInt(pre_addr)), .{ .rw = .read, .locality = 3, .cache = .data });
@@ -299,7 +299,7 @@ fn resolveTokens(
         }
 
         // Speculative offset load — always read offs_stream[0]; only
-        // consume (advance) when oi == 3. Mirrors the C# pattern.
+        // consume (advance) when oi == 3.
         const new_off: i32 = offs_stream[0];
 
         // CMOV chain (was tested vs jump table — CMOV wins).
@@ -315,7 +315,7 @@ fn resolveTokens(
 
         // Branchless offs_stream advance: (oi + 1) & 4 is 0 for oi in
         // {0,1,2} and 4 (= sizeof(i32)) for oi == 3. Saves the branch
-        // VTune flagged at 11% of resolveTokens. Matches C# pattern.
+        // VTune flagged at 11% of resolveTokens.
         const offs_adv: usize = (@as(usize, offset_index) + 1) & 4;
         offs_stream = @ptrFromInt(@intFromPtr(offs_stream) + offs_adv);
 
@@ -427,7 +427,7 @@ fn processLzRunsType1(
 }
 
 /// Prefetch this far ahead (in tokens) so the match source cache line is
-/// resident in L1 by the time we reach it. C# uses 128 based on an Arrow
+/// resident in L1 by the time we reach it. Uses 128 based on an Arrow
 /// Lake sweep (32→1376, 64→1547, 128→1541, 256→1514 MB/s). We match it.
 const prefetch_ahead: u32 = 128;
 

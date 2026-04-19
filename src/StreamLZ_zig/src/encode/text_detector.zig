@@ -1,5 +1,6 @@
 //! Quick UTF-8 text-detection heuristic. Port of
 //! `src/StreamLZ/Compression/TextDetector.cs`.
+//! Used by: Fast and High codecs
 //!
 //! Samples 32 fixed-size spans spaced across the input and counts how many
 //! look like valid UTF-8 (printable ASCII ≥ 0x09 plus multi-byte sequences
@@ -38,8 +39,7 @@ inline fn inRange(a: u8, lo: u8, hi: u8) bool {
     return @as(u8, a -% lo) <= @as(u8, hi -% lo);
 }
 
-/// Classifies a single ≥32-byte block as probably-text. Port of C#
-/// `TextDetector.IsBlockProbablyText` (`TextDetector.cs:47-162`).
+/// Classifies a single >=32-byte block as probably-text.
 ///
 /// Exposed publicly so the High codec (step 29+) can call it directly
 /// on arbitrary window regions without forcing the full `isProbablyText`

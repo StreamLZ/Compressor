@@ -1,4 +1,5 @@
 //! Fast LZ sub-chunk encoder — raw-literal mode (user levels 1 & 2).
+//! Used by: Fast codec (L1-L5)
 //!
 //! One `encodeSubChunkRaw` call:
 //!   1. Initializes a `FastStreamWriter` with literals pointing in-place into
@@ -14,8 +15,7 @@
 //! compressed output would be ≥ `source_length`, returns `bail = true` so
 //! the outer chunk writer can fall back to an uncompressed chunk.
 //!
-//! Port of FastParser.CompressGreedy + Encoder.AssembleCompressedOutput
-//! (raw-mode branches only). Entropy-mode assembly lands in Phase 10.
+//! Raw-mode branches only. Entropy-mode assembly lands in Phase 10.
 
 const std = @import("std");
 const fast_constants = @import("fast_constants.zig");
@@ -26,12 +26,14 @@ const parser = @import("fast_lz_parser.zig");
 const token_writer = @import("fast_token_writer.zig");
 const entropy_enc = @import("entropy_encoder.zig");
 const byte_hist = @import("byte_histogram.zig");
-const cost_model = @import("cost_model.zig");
+const cost_model = @import("fast_cost_model.zig");
 
 const MatchHasher2 = match_hasher.MatchHasher2;
 
 const FastStreamWriter = writer_mod.FastStreamWriter;
 const EntropyOptions = entropy_enc.EntropyOptions;
+
+const trace_cost = false;
 
 pub const EncodeError = error{
     DestinationTooSmall,
@@ -45,15 +47,13 @@ pub const EncodeResult = struct {
     /// True when compression "failed" — caller should store the source raw
     /// in the sub-chunk instead of using our output.
     bail: bool,
-    /// Rate-distortion cost matching C# `Fast.Encoder.AssembleCompressedOutput`'s
-    /// cost output. Used by the dispatcher to compare against `memsetCost`
-    /// and potentially store the sub-chunk raw.
+    /// Rate-distortion cost used by the dispatcher to compare against
+    /// `memsetCost` and potentially store the sub-chunk raw.
     cost: f32 = std.math.floatMax(f32) / 2,
 };
 
 /// Per-sub-chunk parser configuration resolved by the outer driver
-/// (`streamlz_encoder.resolveParams`). Fields mirror C# `CompressOptions`
-/// post-resolution.
+/// (`streamlz_encoder.resolveParams`).
 pub const ParserConfig = struct {
     /// Active minimum match length after text detection. 4 for binary,
     /// 6 for text at engine levels ≤ 3.
@@ -67,8 +67,7 @@ pub const ParserConfig = struct {
 
 /// Encode a single Fast sub-chunk in raw-literal mode (no entropy).
 ///
-/// Port of C# `Fast.FastParser.CompressGreedy` for raw mode. Matches the
-/// C# parser's coordinate split:
+/// Coordinate split:
 ///   * bounds on accepted match offsets are measured against the SUB-CHUNK
 ///     start (`source.ptr`) so matches can't reach before the current
 ///     sub-chunk
@@ -276,7 +275,7 @@ pub fn encodeSubChunkRaw(
     const total: usize = @intFromPtr(out_cursor) - @intFromPtr(dst.ptr);
     if (total >= source.len) return bail_result;
 
-    // ── Cost (matches C# Fast.Encoder.AssembleCompressedOutput, raw path) ──
+    // ── Cost (raw path) ──
     // tokenCost = tokenCount + 3         (memcpy-framed token stream)
     // literalCost = literalCount + 3     (raw literal stream header + data)
     // offset16Cost = off16Count * 2      (data portion only)
@@ -304,7 +303,7 @@ pub fn encodeSubChunkRaw(
         decoding_time_raw * config.speed_tradeoff +
         extra_bytes + off16_cost + initial_bytes_f;
 
-    if (std.process.hasEnvVarConstant("SLZ_COST_TRACE")) {
+    if (comptime trace_cost) {
         std.debug.print(
             "[cost] srcLen={} tokens={} complex={} lits={} off16={} off32={} " ++
                 "tokCost={d} litCost={d} off16Cost={d} off32Time={d} " ++
@@ -328,7 +327,7 @@ pub fn encodeSubChunkRaw(
 
 /// Encode a single Fast sub-chunk in entropy mode (delta-literal + token
 /// entropy coding via tANS/memcpy, optional off16 entropy split). Port
-/// of the entropy-mode branches in C# `Encoder.AssembleCompressedOutput`.
+/// of the entropy-mode branches.
 ///
 /// The caller runs the parser with `use_delta_literals = true` so BOTH
 /// literal streams are available; this function picks the cheaper one
@@ -466,17 +465,16 @@ fn assembleEntropyOutput(
     const enc_scratch = try allocator.alloc(u8, @max(literal_count, token_count) + 512);
     defer allocator.free(enc_scratch);
 
-    // C# has a `literalCount == 0 && deltaLiteralCount > 0` branch (Encoder.cs
-    // lines 495-506) ahead of the main split below. It's unreachable with our
-    // parsers — every literal write advances BOTH cursors in lockstep via
-    // `writeOffset` / `writeOffsetWithLiteral1` / `copyTrailingLiterals`, so
-    // the two counts are always equal. Kept as a comment for audit parity.
+    // A `literalCount == 0 && deltaLiteralCount > 0` branch is unreachable
+    // with our parsers — every literal write advances BOTH cursors in lockstep
+    // via `writeOffset` / `writeOffsetWithLiteral1` / `copyTrailingLiterals`,
+    // so the two counts are always equal.
 
-    // ── Encode literal stream — direct port of C# Fast.Encoder.AssembleCompressedOutput ──
+    // ── Encode literal stream ──
     //
-    // C# uses a histogram-cost-based comparison to decide whether to emit
-    // delta literals (encode the residual after subtracting the recent match)
-    // or raw literals. Identical decision is required for byte parity.
+    // Histogram-cost-based comparison to decide whether to emit delta
+    // literals (encode the residual after subtracting the recent match)
+    // or raw literals.
     //
     // raw_literal_cost = literalCount + 3      (memcpy framing header)
     // delta is preferred iff
@@ -485,13 +483,13 @@ fn assembleEntropyOutput(
     var literal_cost: f32 = std.math.inf(f32);
     const raw_literal_cost: f32 = @floatFromInt(literal_count + 3);
     if (literal_count >= 32) {
-        var lit_histo: [256]u32 = undefined;
-        byte_hist.countBytesHistogram(&lit_histo, w.literal_start[0..literal_count]);
+        var lit_histo: byte_hist.ByteHistogram = .{};
+        lit_histo.countBytes(w.literal_start[0..literal_count]);
 
         var encoded_literal_bytes: i32 = -1;
         if (w.delta_literal_start) |dls| {
-            var delta_histo: [256]u32 = undefined;
-            byte_hist.countBytesHistogram(&delta_histo, dls[0..literal_count]);
+            var delta_histo: byte_hist.ByteHistogram = .{};
+            delta_histo.countBytes(dls[0..literal_count]);
             const delta_literal_time_cost: f32 = cost_model.combinePlatformCostsScaled(
                 0,
                 @floatFromInt(literal_count),
@@ -500,9 +498,9 @@ fn assembleEntropyOutput(
                 0.550,
                 0.289,
             ) * config.speed_tradeoff;
-            const lit_cost_approx: f32 = @floatFromInt(byte_hist.getCostApproxCore(&lit_histo, @intCast(literal_count)));
-            const delta_cost_approx: f32 = @floatFromInt(byte_hist.getCostApproxCore(&delta_histo, @intCast(literal_count)));
-            // C#: `level >= 6 || ...`. Our Fast levels are < 6, so the level
+            const lit_cost_approx: f32 = @floatFromInt(byte_hist.getCostApproxCore(&lit_histo.count, @intCast(literal_count)));
+            const delta_cost_approx: f32 = @floatFromInt(byte_hist.getCostApproxCore(&delta_histo.count, @intCast(literal_count)));
+            // `level >= 6 || ...`. Our Fast levels are < 6, so the level
             // shortcut never fires in this code path.
             if (lit_cost_approx * 0.125 > delta_cost_approx * 0.125 + delta_literal_time_cost) {
                 chunk_type = .delta;
@@ -532,7 +530,7 @@ fn assembleEntropyOutput(
         }
 
         if (encoded_literal_bytes < 0) {
-            // Raw literal path (memcpy-framed). C# treats this as `chunk_type = 1` (raw).
+            // Raw literal path (memcpy-framed). `chunk_type = 1` (raw).
             chunk_type = .raw;
             literal_cost = raw_literal_cost;
             const raw_n = try entropy_enc.encodeArrayU8Memcpy(enc_scratch, w.literal_start[0..literal_count]);
@@ -575,8 +573,7 @@ fn assembleEntropyOutput(
 
     // ── Off16 stream: try entropy split, fall back to raw ─────────────
     //
-    // Port of C# Fast.Encoder.AssembleCompressedOutput off16 section. Decision
-    // is cost-based, not size-based:
+    // Decision is cost-based, not size-based:
     //     cost = costHigh + costLow + GetDecodingTimeOffset16 * speedTradeoff
     //     entropy used iff cost < offset16Count*2 AND enough room
     //
@@ -603,7 +600,7 @@ fn assembleEntropyOutput(
         const lo_n = try entropy_enc.encodeArrayU8(allocator, split_enc[hi_n..], lo_bytes, options, config.speed_tradeoff, null, 0, null);
         const split_total = hi_n + lo_n;
         // Without Huffman/tANS, encodeArrayU8 falls through to memcpy, which
-        // emits `bytes + 3` output. C# sets cost = encoded-byte-count for the
+        // emits `bytes + 3` output. Cost = encoded-byte-count for the
         // memcpy branch, so `hi_n`/`lo_n` double as per-stream cost.
         const cost_hi: f32 = @floatFromInt(hi_n);
         const cost_lo: f32 = @floatFromInt(lo_n);
@@ -633,10 +630,9 @@ fn assembleEntropyOutput(
         offset16_bytes_written = off16_bytes;
     }
 
-    // Scratch-usage guard — direct port of C# line 642-648 in
-    // Fast.Encoder.AssembleCompressedOutput. Sanity check that the internal
-    // scratch accounting fits the statically-allocated budget. If this
-    // trips, we bail to the uncompressed path rather than risk corruption.
+    // Scratch-usage guard: sanity check that the internal scratch
+    // accounting fits the statically-allocated budget. If this trips,
+    // we bail to the uncompressed path rather than risk corruption.
     {
         const off32_total_count: usize = w.off32_count_block1 + w.off32_count_block2;
         const required_scratch: usize = token_count + literal_count +
@@ -683,7 +679,7 @@ fn assembleEntropyOutput(
     if (total >= source_len) return bail_result;
 
     // ── Cost (entropy path, tANS disabled → memcpy for all streams) ──
-    // In C# Fast.Encoder.AssembleCompressedOutput with useLiteralEntropyCoding=true:
+    // With useLiteralEntropyCoding=true:
     //   literalCost = literalCount + 3 (memcpy)
     //   tokenCost   = tokenCount + 3   (memcpy)
     //   offset16Cost = offset16Count * 2 (raw path) — no entropy split for tANS-off
@@ -702,7 +698,7 @@ fn assembleEntropyOutput(
     );
     const token_cost: f32 = @floatFromInt(token_count + 3);
     // `literal_cost` and `offset16_cost` were set by the per-stream
-    // encoders above (matching C# Fast.Encoder.AssembleCompressedOutput).
+    // encoders above.
     //
     // dest_after_tokens = start of payload AFTER the token stream
     // bytes_after_tokens = everything from token-stream-end to end-of-output,
@@ -841,9 +837,7 @@ fn wrapAndDecode(
     encoded: []const u8,
     out: []u8,
     source_len: usize,
-    start_position: usize,
 ) !void {
-    _ = start_position;
     var wrapped: [300_000]u8 = undefined;
     const hdr: u32 = @as(u32, @intCast(encoded.len)) |
         (@as(u32, 1) << lz_constants.sub_chunk_type_shift) |
@@ -883,7 +877,7 @@ test "encodeSubChunkRaw roundtrip: repeating 2 KB pattern" {
     try testing.expect(res.bytes_written < source.len);
 
     var decoded: [source.len + 64]u8 = @splat(0);
-    try wrapAndDecode(dst[0..res.bytes_written], decoded[0..], source.len, 0);
+    try wrapAndDecode(dst[0..res.bytes_written], decoded[0..], source.len);
     try testing.expectEqualSlices(u8, source[0..], decoded[0..source.len]);
 }
 
@@ -908,7 +902,7 @@ test "encodeSubChunkRaw roundtrip: 4 KB binary-ish input" {
     if (res.bail) return; // Random data usually bails — acceptable.
 
     var decoded: [source.len + 64]u8 = @splat(0);
-    try wrapAndDecode(dst[0..res.bytes_written], decoded[0..], source.len, 0);
+    try wrapAndDecode(dst[0..res.bytes_written], decoded[0..], source.len);
     try testing.expectEqualSlices(u8, source[0..], decoded[0..source.len]);
 }
 
@@ -931,6 +925,6 @@ test "encodeSubChunkRaw roundtrip: 16 KB lorem-ipsum-ish" {
     try testing.expect(!res.bail);
 
     var decoded: [source.len + 64]u8 = @splat(0);
-    try wrapAndDecode(dst[0..res.bytes_written], decoded[0..], source.len, 0);
+    try wrapAndDecode(dst[0..res.bytes_written], decoded[0..], source.len);
     try testing.expectEqualSlices(u8, source[0..], decoded[0..source.len]);
 }

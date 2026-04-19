@@ -1,4 +1,4 @@
-//! Port of src/StreamLZ/Compression/BitWriter.cs
+//! Bit-level writers for entropy encoding.
 //!
 //! Four bit-writer variants:
 //!   * `BitWriter64Forward`  — 64-bit buffer, big-endian byte-swap on flush,

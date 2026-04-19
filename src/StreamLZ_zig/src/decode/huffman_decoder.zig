@@ -1,6 +1,6 @@
 //! 11-bit LUT, 3-stream parallel canonical Huffman decoder.
 //!
-//! Port of src/StreamLZ/Decompression/Entropy/HuffmanDecoder{,.CodeLengths,.Decode}.cs.
+//!
 //!
 //! Data layout (performance notes):
 //!   * `HuffRevLut` is a pair of 2048-byte arrays (Bits2Len, Bits2Sym) that together
@@ -14,7 +14,7 @@
 //!   * Uses `[*]const u8` / `[*]u8` pointers (not slices) to avoid bounds checks on
 //!     the critical path. Bounds are enforced by the outer while-loop conditions.
 //!   * OR-clamps each bitpos with 0x18 post-refill to guarantee ≥24 valid bits per
-//!     stream before decoding two symbols from it — matches the C# reference.
+//!     stream before decoding two symbols from it.
 
 const std = @import("std");
 const constants = @import("../format/streamlz_constants.zig");
@@ -60,7 +60,7 @@ pub const HuffReader = struct {
 };
 
 /// Minimal bit reader for Huffman/tANS table reading. Mirrors the layout
-/// of `io/bit_reader.zig::BitReader` but kept here (per the C# note) to
+/// of `io/bit_reader.zig::BitReader` but kept here to
 /// keep the Huffman hot path free of the extended API.
 pub const BitReaderState = struct {
     p: [*]const u8,
@@ -85,7 +85,7 @@ pub const HuffRange = extern struct {
 //  Constants
 // ────────────────────────────────────────────────────────────
 
-/// Canonical Huffman code-length prefix sums for lengths 0..11 (C# `CodePrefixOrg`).
+/// Canonical Huffman code-length prefix sums for lengths 0..11.
 pub const code_prefix_org = [_]u32{
     0x0, 0x0, 0x2, 0x6, 0xE, 0x1E, 0x3E, 0x7E, 0xFE, 0x1FE, 0x2FE, 0x3FE,
 };
@@ -191,7 +191,7 @@ pub inline fn bitReaderReadBitsNoRefill(br: *BitReaderState, n: u5) u32 {
 }
 
 /// Reads `n` bits without refilling; `n` may be zero. Uses the two-shift
-/// trick from the C# source to dodge the undefined shift-by-32 case.
+/// trick to dodge the undefined shift-by-32 case.
 pub inline fn bitReaderReadBitsNoRefillZero(br: *BitReaderState, n: u6) u32 {
     if (n == 0) return 0;
     const r = (br.bits >> 1) >> @intCast(31 - n);
@@ -280,7 +280,7 @@ pub fn decodeGolombRiceLengths(dst_buf: [*]u8, size: usize, br: *BitReader2) Dec
 
 /// Decodes additional Golomb-Rice precision bits (1, 2, or 3) and merges them
 /// into the length array. Uses SIMD-style bit unpacking (u64 bit manipulation
-/// tricks) — faithful port of the C# reference.
+/// tricks).
 pub fn decodeGolombRiceBits(dst_buf: [*]u8, size: usize, bitcount: u32, br: *BitReader2) DecodeError!void {
     if (bitcount == 0) return;
 
@@ -970,20 +970,20 @@ pub fn highDecodeBytesType12(
 
 const testing = std.testing;
 
-test "code_prefix_org values match C# source" {
+test "code_prefix_org values match reference" {
     try testing.expectEqual(@as(u32, 0x0), code_prefix_org[0]);
     try testing.expectEqual(@as(u32, 0x0), code_prefix_org[1]);
     try testing.expectEqual(@as(u32, 0x2), code_prefix_org[2]);
     try testing.expectEqual(@as(u32, 0x3FE), code_prefix_org[11]);
 }
 
-test "k_rice_code_bits2_value matches C# table length" {
+test "k_rice_code_bits2_value matches reference table length" {
     try testing.expectEqual(@as(usize, 256), k_rice_code_bits2_value.len);
     try testing.expectEqual(@as(u32, 0x80000000), k_rice_code_bits2_value[0]);
     try testing.expectEqual(@as(u32, 0x00000000), k_rice_code_bits2_value[255]);
 }
 
-test "k_rice_code_bits2_len matches C# table" {
+test "k_rice_code_bits2_len matches reference table" {
     try testing.expectEqual(@as(usize, 256), k_rice_code_bits2_len.len);
     try testing.expectEqual(@as(u8, 0), k_rice_code_bits2_len[0]);
     try testing.expectEqual(@as(u8, 8), k_rice_code_bits2_len[255]);

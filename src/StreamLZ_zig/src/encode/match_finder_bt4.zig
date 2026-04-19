@@ -1,6 +1,5 @@
 //! Binary-tree (BT4) match finder for the High optimal parser at level 11.
-//! Port of `MatchFinder.FindMatchesBT4` + `BT4InsertOnly` +
-//! `BT4SearchAndInsert` from src/StreamLZ/Compression/MatchFinding/MatchFinder.cs.
+//! Used by: High codec (L6-L11)
 //!
 //! Finds higher-quality matches than the hash-chain finder at the cost of
 //! slower insertion. Each position is both inserted into and searched
@@ -19,7 +18,7 @@
 //! descent point, and records up to `max_num_matches` matches into
 //! the `ManagedMatchLenStorage` via `insertMatches`.
 //!
-//! Unlike the C# version which uses `ArrayPool<int>`, this port allocates
+//! This implementation allocates
 //! scratch via the supplied `std.mem.Allocator` on each call. Per-round
 //! scratch caching can be layered in later if needed.
 
@@ -29,13 +28,10 @@ const mls_mod = @import("managed_match_len_storage.zig");
 const LengthAndOffset = mls_mod.LengthAndOffset;
 const ManagedMatchLenStorage = mls_mod.ManagedMatchLenStorage;
 
-/// On-stack match-capture buffer. Mirrors C# `stackalloc
-/// LengthAndOffset[maxNumMatches + 2]` with a small upper bound (the
+/// On-stack match-capture buffer with a small upper bound (the
 /// optimal parser reads at most 4 matches per position).
 const match_buf_cap: usize = 8;
 
-/// Port of C# `MatchFinder.FindMatchesBT4` (`MatchFinder.cs:680-757`).
-///
 /// Populates `mls` with match candidates discovered via a binary-tree
 /// walk. `max_num_matches` caps how many matches per source position
 /// are kept. `preload_size` specifies how many leading bytes of `src`
@@ -127,7 +123,7 @@ pub fn findMatchesBT4(
             const skip_len: usize = @intCast(match_buf[0].length);
             const skip_offset: i32 = match_buf[0].offset;
             var skip_pos: usize = pos + 4;
-            // Match C# `BT4InsertOnly(..., maxDepth / 4, ...)` — integer
+            // BT4InsertOnly(..., maxDepth / 4, ...) — integer
             // divide without the `max(1, ...)` guard. For max_depth < 4
             // this passes 0, which correctly makes the inner search loop
             // exit immediately (insert-only with no tree descent).
@@ -168,7 +164,7 @@ pub fn findMatchesBT4(
 /// the point where the descent naturally terminates. Returns the number
 /// of matches written into `matches` (up to `max_matches`).
 ///
-/// The C# code uses two pointer variables (`leftNodePtr`, `rightNodePtr`)
+/// Uses two pointer variables (`leftNodePtr`, `rightNodePtr`)
 /// that each point to either `left[k]` or `right[k]` for some node k,
 /// tracking "where we would write the next descended child". This port
 /// models the same state with (index, which_array) pairs.

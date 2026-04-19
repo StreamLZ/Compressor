@@ -1,21 +1,22 @@
-//! Port of `src/StreamLZ/Compression/Fast/CostModel.cs` — platform cost
+//! Platform cost
+//! Used by: Fast codec (L1-L5)
 //! combination and decompression-time estimates used by the Fast
 //! compressor's rate-distortion decisions.
 //!
-//! Matches C# EXACTLY. The four per-platform coefficient sets are
-//! empirically tuned against 4 hardware targets; when `platforms = 0`
-//! (the default used by the Fast path) we compute the simple average
-//! `(a + b + c + d) * 0.25`, which is also what C# does.
+//! The four per-platform coefficient sets are empirically tuned
+//! against 4 hardware targets; when `platforms = 0` (the default
+//! used by the Fast path) we compute the simple average
+//! `(a + b + c + d) * 0.25`.
 //!
 //! These estimates feed the "lzCost vs memsetCost" decision in
 //! `streamlz_encoder.zig`. Correctness is mandatory — a single
 //! rounding difference here flips whether a sub-chunk stores raw or
-//! compressed, producing byte-level drift vs C#.
+//! compressed, producing byte-level output drift.
 
 const std = @import("std");
 
 /// Combine four platform-specific cost values. `platforms == 0` → simple
-/// average, matching the default C# Fast path.
+/// average (the default Fast path).
 pub inline fn combinePlatformCosts(platforms: u32, a: f32, b: f32, c: f32, d: f32) f32 {
     if ((platforms & 0xf) == 0) return (a + b + c + d) * 0.25;
     var sum: f32 = 0;

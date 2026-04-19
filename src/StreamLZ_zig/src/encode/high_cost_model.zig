@@ -1,7 +1,7 @@
-//! High-codec cost model — statistics, rescaling, histogram → cost
+//! High-codec cost model -- statistics, rescaling, histogram-to-cost
 //! conversion, and per-token/offset/literal/literal-length cost lookups.
-//! Port of src/StreamLZ/Compression/High/CostModel.cs (the non-
-//! `IsMatchLongEnough` portion — that helper lives in `high_matcher.zig`).
+//! Used by: High codec (L6-L11)
+//! The `IsMatchLongEnough` predicate lives in `high_matcher.zig`.
 
 const std = @import("std");
 const lz_constants = @import("../format/streamlz_constants.zig");
@@ -14,16 +14,14 @@ const Token = high_types.Token;
 const Stats = high_types.Stats;
 const CostModel = high_types.CostModel;
 
-/// Shift-down-then-add-one rescale of a single histogram. Matches C#
-/// `RescaleOne` (`CostModel.cs:27-33`).
+/// Shift-down-then-add-one rescale of a single histogram.
 pub fn rescaleOne(h: *ByteHistogram) void {
     for (0..256) |i| {
         h.count[i] = (h.count[i] >> 4) + 1;
     }
 }
 
-/// Rescales every histogram in a running `Stats` block. Matches C#
-/// `RescaleStats` (`CostModel.cs:35-46`).
+/// Rescales every histogram in a running `Stats` block.
 pub fn rescaleStats(s: *Stats) void {
     rescaleOne(&s.lit_raw);
     rescaleOne(&s.lit_sub);
@@ -33,8 +31,7 @@ pub fn rescaleStats(s: *Stats) void {
     rescaleOne(&s.match_len_histo);
 }
 
-/// `h := ((h + t) >> 5) + 1`. Port of C# `RescaleAddOne`
-/// (`CostModel.cs:48-54`).
+/// `h := ((h + t) >> 5) + 1`.
 pub fn rescaleAddOne(h: *ByteHistogram, t: *const ByteHistogram) void {
     for (0..256) |i| {
         h.count[i] = ((h.count[i] + t.count[i]) >> 5) + 1;
@@ -42,7 +39,7 @@ pub fn rescaleAddOne(h: *ByteHistogram, t: *const ByteHistogram) void {
 }
 
 /// Merges the per-block `t` statistics into the running `s` and
-/// rescales. Port of C# `RescaleAddStats` (`CostModel.cs:56-89`).
+/// rescales.
 pub fn rescaleAddStats(s: *Stats, t: *const Stats, chunk_type_same: bool) void {
     if (chunk_type_same) {
         rescaleAddOne(&s.lit_raw, &t.lit_raw);
@@ -66,7 +63,7 @@ pub fn rescaleAddStats(s: *Stats, t: *const Stats, chunk_type_same: bool) void {
 }
 
 /// Increments histogram counts for each symbol a token sequence would
-/// encode. Port of C# `UpdateStats` (`CostModel.cs:91-172`).
+/// encode.
 pub fn updateStats(
     h: *Stats,
     src: [*]const u8,
@@ -81,12 +78,10 @@ pub fn updateStats(
         const recent: usize = @intCast(t.recent_offset0);
 
         // Per-literal histogram updates (raw + sub).
-        // C# reads `src[pos + j - recent]` as pointer arithmetic that can
-        // go BEFORE the source buffer when `pos + j < recent` (technically
-        // UB in C# but reads whatever byte happens to be there). Port via
-        // wrap-subtract so Zig doesn't panic on usize underflow — the
-        // computed pointer mirrors C#'s behaviour and the resulting delta
-        // goes into the histogram just like the reference does.
+        // When `pos + j < recent` the subtraction wraps below the source
+        // buffer. We use wrapping subtraction so Zig doesn't panic on
+        // usize underflow — the resulting delta byte goes into the
+        // histogram regardless.
         var j: usize = 0;
         while (j < litlen) : (j += 1) {
             const b: u8 = src[pos + j];
@@ -162,8 +157,7 @@ pub fn updateStats(
 }
 
 /// Builds a `CostModel` from the given `Stats` block by converting every
-/// histogram to a per-symbol cost table via `OffsetEncoder.ConvertHistoToCost`.
-/// Port of C# `MakeCostModel` (`CostModel.cs:174-207`).
+/// histogram to a per-symbol cost table.
 pub fn makeCostModel(h: *const Stats, cost_model: *CostModel) void {
     offset_encoder.convertHistoToCost(&h.offs_histo, &cost_model.offs_cost, 36, 255);
 
@@ -181,7 +175,7 @@ pub fn makeCostModel(h: *const Stats, cost_model: *CostModel) void {
     }
 }
 
-/// Port of C# `BitsForLiteralLength` (`CostModel.cs:210-222`).
+/// Cost in 32nds-of-a-bit for a literal run of the given length.
 pub inline fn bitsForLiteralLength(cost_model: *const CostModel, cur_litlen: i32) u32 {
     if (cur_litlen < 3) return 0;
     if (cur_litlen - 3 >= 255) {
@@ -192,14 +186,13 @@ pub inline fn bitsForLiteralLength(cost_model: *const CostModel, cur_litlen: i32
     return cost_model.match_len_cost[@intCast(cur_litlen - 3)];
 }
 
-/// Port of C# `BitsForLiteral` (`CostModel.cs:225-229`).
+/// Cost in 32nds-of-a-bit for a single literal byte.
 ///
 /// `sub_or_copy_mask` is `0` (copy mode, literals unchanged) or `-1`
-/// (subtract mode, delta vs recent0). C# uses `byte & (byte)mask`
+/// (subtract mode, delta vs recent0). The original uses `byte & (byte)mask`
 /// which truncates the i32 mask to the low 8 bits (0 or 0xFF) and
 /// relies on signed int pointer arithmetic that silently wraps on
-/// `pos - recent` underflow — the masked result is still valid
-/// because C# implicitly guarantees the match is in-window.
+/// `pos - recent` underflow.
 ///
 /// Zig panics on both the `@intCast(-1 → u8)` cast and the `pos -
 /// recent` underflow. We fix both: bitcast the mask byte, and take
@@ -222,7 +215,7 @@ pub inline fn bitsForLiteral(
     return cost_model.lit_cost[delta];
 }
 
-/// Port of C# `BitsForLiterals` (`CostModel.cs:232-241`).
+/// Aggregate cost for `num` consecutive literals.
 pub inline fn bitsForLiterals(
     src: [*]const u8,
     pos: usize,
@@ -251,12 +244,11 @@ pub inline fn bitsForLiterals(
 }
 
 /// Computes the cost (in 32nds of a bit) of emitting a token with the
-/// given `(match_len, cmd_offset, recent_field, length_field)`. Port
-/// of C# `BitsForToken` (`CostModel.cs:244-274`).
+/// given `(match_len, cmd_offset, recent_field, length_field)`.
 pub fn bitsForToken(
     cost_model: *const CostModel,
     cur_match_len: i32,
-    _: i32, // cmd_offset is unused by the C# reference
+    _: i32, // cmd_offset is unused
     recent_field: i32,
     length_field: i32,
 ) i32 {
@@ -284,12 +276,11 @@ pub fn bitsForToken(
 
 /// Offset-distance penalty threshold — offsets requiring > 16 bits of
 /// encoding space incur a per-bit penalty to bias the parser toward
-/// nearby matches. Matches C# `OffsetDistancePenaltyThreshold`.
+/// nearby matches.
 const offset_distance_penalty_threshold: u32 = 16;
 const offset_distance_penalty_mult: u32 = 16;
 
-/// Computes the cost of emitting an offset (in 32nds of a bit). Port of
-/// C# `BitsForOffset` (`CostModel.cs:282-330`).
+/// Computes the cost of emitting an offset (in 32nds of a bit).
 pub fn bitsForOffset(cost_model: *const CostModel, offset: u32) u32 {
     var cost: u32 = undefined;
     if (cost_model.offs_encode_type == 0) {

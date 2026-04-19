@@ -1,5 +1,4 @@
-//! Port of src/StreamLZ/Common/StreamLzConstants.cs — centralized magic numbers
-//! for the StreamLZ codec family. See the C# file for rationale; keep in sync.
+//! Centralized magic numbers for the StreamLZ codec family.
 
 // ────────────────────────────────────────────────────────────
 //  Chunk and buffer sizing
@@ -23,7 +22,7 @@ pub const chunk_has_cross_chunk_match_mask: u32 = 1 << chunk_has_cross_chunk_mat
 pub const bt4_max_read_size: usize = 8 * 1024 * 1024;
 
 /// Default sliding-window size for the SLZ1 frame compressor. Matches
-/// C# `FrameConstants.DefaultWindowSize = 128 * 1024 * 1024`. Each frame
+/// Default window size (128 MB). Each frame
 /// block can reference up to this many bytes of previously-compressed
 /// data for match finding.
 pub const default_window_size: usize = 128 * 1024 * 1024;

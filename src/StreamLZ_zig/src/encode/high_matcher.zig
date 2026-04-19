@@ -1,6 +1,6 @@
 //! Greedy match finder + match validation helpers for the High
-//! compressor. Port of src/StreamLZ/Compression/High/Matcher.cs and
-//! the `IsMatchLongEnough` predicate at `CostModel.cs:14-25`.
+//! compressor.
+//! Used by: High codec (L6-L11)
 
 const std = @import("std");
 const lz_constants = @import("../format/streamlz_constants.zig");
@@ -13,8 +13,7 @@ const HighRecentOffs = high_types.HighRecentOffs;
 const LengthAndOffset = mls_mod.LengthAndOffset;
 
 /// True when a match of `match_length` at `offset` meets the minimum
-/// viable length threshold for its offset tier. Port of C#
-/// `Compressor.IsMatchLongEnough` (`CostModel.cs:14-25`).
+/// viable length threshold for its offset tier.
 pub inline fn isMatchLongEnough(match_length: u32, offset: u32) bool {
     return switch (match_length) {
         0, 1, 2 => false,
@@ -27,8 +26,7 @@ pub inline fn isMatchLongEnough(match_length: u32, offset: u32) bool {
 }
 
 /// Returns true when the given (length, offset) pair is a valid match
-/// given the offset-length tier thresholds. Port of C#
-/// `Compressor.CheckMatchValidLength` (`Matcher.cs:12-17`).
+/// given the offset-length tier thresholds.
 pub inline fn checkMatchValidLength(match_length: u32, offset: u32) bool {
     if (offset < lz_constants.offset_threshold_768kb) return true;
     if (offset < lz_constants.offset_threshold_1_5mb) return match_length >= 5;
@@ -37,8 +35,7 @@ pub inline fn checkMatchValidLength(match_length: u32, offset: u32) bool {
 }
 
 /// Returns the recent-offset index (0, 1, or 2) that matches `offset`,
-/// or `null` if `offset` is not in the recent-offset ring. Port of C#
-/// `Compressor.GetRecentOffsetIndex` (`Matcher.cs:20-35`).
+/// or `null` if `offset` is not in the recent-offset ring.
 pub inline fn getRecentOffsetIndex(st: *const State, offset: i32) ?u2 {
     if (offset == st.recent_offs0) return 0;
     if (offset == st.recent_offs1) return 1;
@@ -50,7 +47,7 @@ pub inline fn getRecentOffsetIndex(st: *const State, offset: i32) ?u2 {
 /// comparing each recent-offset candidate and the hash-based match list
 /// under the length-biased tiebreak in `match_eval.isMatchBetter`.
 ///
-/// Port of C# `Compressor.GetBestMatch` (`Matcher.cs:37-116`). Returns
+/// Returns
 /// a `LengthAndOffset` where `offset >= 0` is a raw backward distance
 /// and `offset < 0` encodes a recent-offset slot (0 = most-recent, -1 =
 /// second, -2 = third).

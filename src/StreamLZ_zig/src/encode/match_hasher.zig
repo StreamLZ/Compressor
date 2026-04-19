@@ -1,6 +1,7 @@
 //! MatchHasher — bucket-based Fibonacci-hash match finder used by the lazy
 //! parsers. Port of `MatchHasherBase` + `MatchHasher{1,2x,4,4Dual,16Dual}`
 //! in src/StreamLZ/Compression/MatchFinding/MatchHasher.cs.
+//! Used by: Fast and High codecs
 //!
 //! Each table entry stores `(tag<<25) | (pos & 0x01FFFFFF)` — 7 high tag bits
 //! for collision rejection and 25 low position bits. Positions are tracked
@@ -157,7 +158,7 @@ pub fn MatchHasher(comptime num_hash: u32, comptime dual_hash: bool) type {
             self.hash_entry_ptr_index = hash1 & self.hash_mask;
             if (dual_hash) {
                 // Second hash uses the raw Fibonacci multiplier and a
-                // different shift — matches C# MatchHasherBase.SetHashPos:
+                // different shift:
                 //     hash2 = (FibonacciMult * atSrc) >> (64 - bits)
                 //     HashEntry2Ptr = hash2 & ~(NumHash - 1)
                 const fib_mult: u64 = lz_constants.fibonacci_hash_multiplier;
@@ -170,7 +171,7 @@ pub fn MatchHasher(comptime num_hash: u32, comptime dual_hash: bool) type {
 
         /// `setHashPos` + prefetch the cache lines containing the target
         /// bucket(s). For dual-hash mode, prefetches BOTH the primary
-        /// (cur1) and dual (cur2) buckets — matching C#. Without this,
+        /// (cur1) and dual (cur2) buckets. Without this,
         /// every iteration of `findMatchesHashBased` cache-missed on
         /// the dual bucket → ~8 sec of DRAM stalls on 100 MB enwik8 L9.
         pub inline fn setHashPosPrefetch(self: *Self, p: [*]const u8) void {
@@ -212,8 +213,7 @@ pub fn MatchHasher(comptime num_hash: u32, comptime dual_hash: bool) type {
 
         /// Explicit dual-index insert — takes a pre-computed hash value
         /// plus two bucket indices and writes to both (when `dual_hash`
-        /// is true). Port of C# `MatchHasherBase.Insert(int idx1, int
-        /// idx2, uint he)` at `MatchHasher.cs:287-294`. Used by
+        /// is true). Used by
         /// `FindMatchesHashBased` so the hash value can be composed
         /// inline via `makeHashValue`.
         pub inline fn insertAtDual(self: *Self, idx1: u32, idx2: u32, hval: u32) void {
@@ -231,7 +231,7 @@ pub fn MatchHasher(comptime num_hash: u32, comptime dual_hash: bool) type {
                     self.hash_table[index] = hval;
                 },
                 4 => {
-                    // C# MatchHasher4.InsertAtIndex: load 3 consecutive
+                    // MatchHasher4.InsertAtIndex: load 3 consecutive
                     // entries into locals then store shifted.
                     const a = self.hash_table[index + 2];
                     const b = self.hash_table[index + 1];
@@ -242,7 +242,7 @@ pub fn MatchHasher(comptime num_hash: u32, comptime dual_hash: bool) type {
                     self.hash_table[index] = hval;
                 },
                 16 => {
-                    // C# MatchHasher16Dual uses SSE2 overlapping 128-bit
+                    // MatchHasher16Dual uses SSE2 overlapping 128-bit
                     // stores. Scalar version for Zig: shift entries
                     // [0..14] → [1..15] then write hval at index.
                     var i: u32 = 14;
@@ -284,14 +284,12 @@ pub fn MatchHasher(comptime num_hash: u32, comptime dual_hash: bool) type {
             }
         }
 
-        /// Set base offset without preloading. Matches C#
-        /// `MatchHasherBase.SetBaseWithoutPreload(long srcBaseOffset)`.
+        /// Set base offset without preloading.
         pub inline fn setBaseAndPreloadNone(self: *Self, base_offset: i64) void {
             self.src_base_offset = base_offset;
         }
 
-        /// Preload the hash table from a pre-existing dictionary window.
-        /// Port of C# `MatchHasherBase.SetBaseAndPreload`: positions
+        /// Preload the hash table from a pre-existing dictionary window. Positions
         /// `[srcBaseOffset .. srcStartOffset]` are walked with an adaptive
         /// step size and inserted into the hash table before compression
         /// begins. `src_base_ptr` must be the base pointer such that
@@ -328,8 +326,7 @@ pub fn MatchHasher(comptime num_hash: u32, comptime dual_hash: bool) type {
     };
 }
 
-/// Adaptive-step preload loop. Port of C#
-/// `MatchHasherPreload.AdaptivePreloadLoop` (`MatchHasher.cs:45-83`).
+/// Adaptive-step preload loop.
 /// Starts with a large step near the dictionary base and halves the step
 /// as it approaches `src_start_offset`, giving denser coverage near the
 /// positions most likely to be matched.
@@ -366,7 +363,7 @@ pub fn adaptivePreloadLoop(
     }
 }
 
-/// Convenience aliases matching the C# class names.
+/// Convenience aliases.
 /// Non-dual bucket hashers.
 pub const MatchHasher1 = MatchHasher(1, false);
 pub const MatchHasher2x = MatchHasher(2, false);

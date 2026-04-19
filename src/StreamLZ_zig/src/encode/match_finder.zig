@@ -1,6 +1,7 @@
 //! Hash-based match finder for the High optimal parser. Port of
 //! `MatchFinder.FindMatchesHashBased` from
 //! src/StreamLZ/Compression/MatchFinding/MatchFinder.cs.
+//! Used by: High codec (L6-L11)
 //!
 //! Uses `MatchHasher16Dual` (16-entry dual-hash bucket) to probe
 //! candidate match positions at each source offset, extends each
@@ -11,7 +12,7 @@
 //!   * Two-bucket probe (primary `cur1` + dual `cur2`) is unrolled
 //!     as a 2-iteration `pass` loop.
 //!   * Each bucket holds 16 entries; every entry is tested via a
-//!     scalar tag+position filter. C# uses SSE2 vectorized probes
+//!     scalar tag+position filter. Uses SSE2 vectorized probes
 //!     for this, but the scalar code path produces identical
 //!     results and is simpler to port without intrinsic rewrites.
 //!   * When a match's length is >= 77 bytes, the finder inserts
@@ -30,11 +31,10 @@ const MatchHasher16Dual = match_hasher.MatchHasher16Dual;
 const LengthAndOffset = mls_mod.LengthAndOffset;
 const ManagedMatchLenStorage = mls_mod.ManagedMatchLenStorage;
 
-/// Max matches stored per source position. C# uses 33 as the on-stack
-/// buffer size in `FindMatchesHashBased`.
+/// Max matches stored per source position.
 const max_matches_per_pos: usize = 33;
 
-/// Port of C# `MatchFinder.FindMatchesHashBased` (`MatchFinder.cs:289-512`).
+///
 ///
 /// `src` is the full source buffer (dictionary preload + window).
 /// `mls` receives the match lists indexed by `pos - preload_size`.
@@ -108,8 +108,7 @@ pub fn findMatchesHashBased(
         while (pass < 2) : (pass += 1) {
             var best_ml: usize = 0;
 
-            // SSE2 vectorized 16-entry hash probe — direct port of C#
-            // MatchFinder.FindMatchesHashBased lines 354-432. Processes
+            // SSE2 vectorized 16-entry hash probe. Processes
             // 4 hash entries per @Vector(4, i32), 4 rounds = 16 entries.
             // Each round computes the (curPos - 1 - pos) & mask + 1
             // offset, packs it into a 4-bit subfield of a 16-bit

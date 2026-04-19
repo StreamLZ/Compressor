@@ -1,13 +1,11 @@
 //! Top-level StreamLZ framed decompressor.
 //!
-//! Port of the framed decompress loop in src/StreamLZ/StreamLZ.cs
-//! (`Slz.DecompressFramed`) and the inner dispatcher in
-//! src/StreamLZ/Decompression/StreamLzDecoder.cs.
+//! Handles the framed decompress loop and inner block dispatcher.
 //!
 //! Current coverage:
 //!   * Frame-level uncompressed block path (phase 3a)
-//!   * Fast codec (L1–5) compressed path via fast_lz_decoder (phase 3b)
-//!   * High codec (L6–11) not yet wired — returns `HighNotImplemented`
+//!   * Fast codec (L1-5) compressed path via fast_lz_decoder (phase 3b)
+//!   * High codec (L6-11) not yet wired -- returns `HighNotImplemented`
 
 const std = @import("std");
 const frame = @import("../format/frame_format.zig");
@@ -18,7 +16,6 @@ const high = @import("high_lz_decoder.zig");
 const parallel = @import("decompress_parallel.zig");
 
 /// Extra bytes the decoder is allowed to write past `dst_len`.
-/// Ported from `StreamLZDecoder.SafeSpace` (64 in C#).
 pub const safe_space: usize = 64;
 
 pub const DecompressError = error{
@@ -44,7 +41,7 @@ pub fn decompressFramed(src: []const u8, dst: []u8) DecompressError!usize {
 
 /// Parallel variant of `decompressFramed`. Uses `allocator` to spawn
 /// worker threads + allocate per-thread scratch for SC (L6-L8) blocks.
-/// Non-SC blocks fall through to the serial path. Phase 13 step 35 (A1).
+/// Non-SC blocks fall through to the serial path.
 pub fn decompressFramedParallel(
     allocator: std.mem.Allocator,
     src: []const u8,
@@ -52,6 +49,41 @@ pub fn decompressFramedParallel(
 ) DecompressError!usize {
     return decompressFramedInner(allocator, src, dst);
 }
+
+/// Reusable decompression context that keeps a thread pool alive across
+/// multiple `decompress` calls. Library consumers who decompress many
+/// buffers should create one context, call `decompress` repeatedly, and
+/// `deinit` when done — avoiding the ~5 ms pool init/teardown per call.
+pub const DecompressContext = struct {
+    allocator: std.mem.Allocator,
+    pool: LazyPool,
+
+    pub fn init(allocator: std.mem.Allocator) DecompressContext {
+        return .{
+            .allocator = allocator,
+            .pool = LazyPool.init(allocator),
+        };
+    }
+
+    pub fn decompress(self: *DecompressContext, src: []const u8, dst: []u8) DecompressError!usize {
+        if (src.len == 0) return 0;
+        var src_pos: usize = 0;
+        var dst_off: usize = 0;
+        while (src_pos < src.len) {
+            const piece_src = src[src_pos..];
+            const piece_dst = dst[dst_off..];
+            const pair = try decompressOneFrame(self.allocator, &self.pool, piece_src, piece_dst);
+            src_pos += pair.src_consumed;
+            dst_off += pair.dst_written;
+            if (pair.src_consumed == 0) break;
+        }
+        return dst_off;
+    }
+
+    pub fn deinit(self: *DecompressContext) void {
+        self.pool.deinit();
+    }
+};
 
 /// Lazy thread pool wrapper. The pool is expensive to init (24 thread
 /// spawns ≈ 5 ms on Arrow Lake) and many decompress calls don't need
@@ -177,8 +209,8 @@ fn decompressOneFrame(
             break;
         }
 
-        const bh = frame.parseBlockHeader(src[pos..]) catch return error.InvalidBlockHeader;
-        if (bh.isEndMark()) {
+        const block_hdr= frame.parseBlockHeader(src[pos..]) catch return error.InvalidBlockHeader;
+        if (block_hdr.isEndMark()) {
             pos += 8;
             break;
         }
@@ -188,21 +220,21 @@ fn decompressOneFrame(
         // skip it — the sidecar is optional metadata for parallel decode
         // paths, and contributes zero bytes to dst. The compressed_size
         // bytes carry the sidecar payload, which we advance past here.
-        if (bh.parallel_decode_metadata) {
-            if (pos + bh.compressed_size > src.len) return error.BlockDataTruncated;
-            pos += bh.compressed_size;
+        if (block_hdr.parallel_decode_metadata) {
+            if (pos + block_hdr.compressed_size > src.len) return error.BlockDataTruncated;
+            pos += block_hdr.compressed_size;
             continue;
         }
 
-        if (bh.uncompressed) {
-            if (pos + bh.decompressed_size > src.len) return error.BlockDataTruncated;
-            if (dst_off + bh.decompressed_size > dst.len) return error.OutputTooSmall;
+        if (block_hdr.uncompressed) {
+            if (pos + block_hdr.decompressed_size > src.len) return error.BlockDataTruncated;
+            if (dst_off + block_hdr.decompressed_size > dst.len) return error.OutputTooSmall;
             @memcpy(
-                dst[dst_off..][0..bh.decompressed_size],
-                src[pos..][0..bh.decompressed_size],
+                dst[dst_off..][0..block_hdr.decompressed_size],
+                src[pos..][0..block_hdr.decompressed_size],
             );
-            dst_off += bh.decompressed_size;
-            pos += bh.compressed_size;
+            dst_off += block_hdr.decompressed_size;
+            pos += block_hdr.compressed_size;
             continue;
         }
 
@@ -214,13 +246,13 @@ fn decompressOneFrame(
         //                   match resolve serial)
         // Anything else (single-chunk, Fast without sidecar, mixed
         // decoder types) falls through to the existing serial loop.
-        const block_src = src[pos .. pos + bh.compressed_size];
+        const block_src = src[pos .. pos + block_hdr.compressed_size];
         var dispatched_parallel: bool = false;
         if (allocator_opt) |allocator| {
             if (block_src.len >= 2) {
                 const peek = block_header.parseBlockHeader(block_src) catch null;
                 if (peek) |ph| {
-                    const has_many_chunks = bh.decompressed_size > constants.chunk_size;
+                    const has_many_chunks = block_hdr.decompressed_size > constants.chunk_size;
                     const is_fast_like = ph.decoder_type == .fast or ph.decoder_type == .turbo;
                     if (is_fast_like and !ph.self_contained and sidecar_body != null and has_many_chunks) {
                         // v2 Fast L1-L4 parallel path: uses the pre-
@@ -234,7 +266,7 @@ fn decompressOneFrame(
                             sidecar_body.?,
                             dst,
                             &dst_off,
-                            bh.decompressed_size,
+                            block_hdr.decompressed_size,
                         );
                         dispatched_parallel = true;
                     } else if (ph.self_contained and has_many_chunks) {
@@ -244,7 +276,7 @@ fn decompressOneFrame(
                             block_src,
                             dst,
                             &dst_off,
-                            bh.decompressed_size,
+                            block_hdr.decompressed_size,
                             hdr.sc_group_size,
                         );
                         dispatched_parallel = true;
@@ -255,7 +287,7 @@ fn decompressOneFrame(
                             block_src,
                             dst,
                             &dst_off,
-                            bh.decompressed_size,
+                            block_hdr.decompressed_size,
                         );
                         if (ok) dispatched_parallel = true;
                     }
@@ -269,12 +301,12 @@ fn decompressOneFrame(
                 block_src,
                 dst,
                 &dst_off,
-                bh.decompressed_size,
+                block_hdr.decompressed_size,
                 &scratch,
                 hdr.sc_group_size,
             );
         }
-        pos += bh.compressed_size;
+        pos += block_hdr.compressed_size;
     }
 
     if (hdr.content_size) |cs| {
@@ -287,13 +319,11 @@ fn decompressOneFrame(
 /// `dst[0..length]`. Used for "whole-match" chunk variants where the entire
 /// chunk is a single back-reference to earlier output.
 ///
-/// Port of C# `StreamLZDecoder.CopyWholeMatch` at
-/// `StreamLzDecoder.cs:142-157`. Uses 8-byte chunks when `offset >= 8` so
-/// the load and store regions don't overlap. Falls through to byte-at-a-time
-/// for the tail.
+/// Uses 8-byte chunks when `offset >= 8` so the load and store regions
+/// don't overlap. Falls through to byte-at-a-time for the tail.
 ///
 /// Unreachable via the current encoder (no compressor populates
-/// `chunk_header.whole_match_distance`) but kept for structural parity and
+/// `chunk_header.whole_match_distance`) but kept for completeness and
 /// to match the wire format reservation.
 fn copyWholeMatch(dst: [*]u8, offset: u32, length: usize) void {
     std.debug.assert(offset > 0);
@@ -316,7 +346,7 @@ pub const StreamDecompressOptions = struct {
     /// where `block_size` comes from the frame header. Default 4 MB.
     window_size: u32 = 4 * 1024 * 1024,
     /// Maximum allowed total decompressed output bytes. 0 = no limit.
-    /// Port of the `maxDecompressedSize` parameter in C#
+    /// Maximum decompressed size limit
     /// `StreamLzFrameDecompressor.Decompress` — protects against decompression
     /// bombs where a small malicious frame claims a huge output.
     max_decompressed_size: u64 = 0,
@@ -330,11 +360,9 @@ pub const StreamDecompressOptions = struct {
 /// XXH32 content checksum. Returns the total number of decompressed bytes
 /// written.
 ///
-/// Port of C# `StreamLzFrameDecompressor.Decompress` at
-/// `StreamLzFrameDecompressor.cs:28-196`. Unlike C#, `src` here is a single
-/// byte slice (the caller is responsible for reading the file / memory-
-/// mapping); output goes to any `std.Io.Writer`. For file-to-file streaming,
-/// the caller can wrap a file writer.
+/// `src` is a single byte slice (the caller is responsible for reading the
+/// file / memory-mapping); output goes to any `std.Io.Writer`. For
+/// file-to-file streaming, the caller can wrap a file writer.
 pub fn decompressStream(
     allocator: std.mem.Allocator,
     src: []const u8,
@@ -354,8 +382,7 @@ pub fn decompressStream(
 
     // Window buffer layout: [dict ... current block output ... safe_space].
     // The dict portion holds the sliding window for cross-block back-refs;
-    // the current block's output is written past dict_bytes. Mirrors C#
-    // `StreamLzFrameDecompressor.cs:66-67`.
+    // the current block's output is written past dict_bytes.
     const window_buf_size: usize = window_size + block_size + safe_space * 2;
     const window_buf = try allocator.alloc(u8, window_buf_size);
     defer allocator.free(window_buf);
@@ -378,62 +405,61 @@ pub fn decompressStream(
         }
 
         if (pos + 8 > src.len) return error.Truncated;
-        const bh = frame.parseBlockHeader(src[pos..]) catch return error.InvalidBlockHeader;
-        if (bh.isEndMark()) {
+        const block_hdr= frame.parseBlockHeader(src[pos..]) catch return error.InvalidBlockHeader;
+        if (block_hdr.isEndMark()) {
             pos += 4;
             break;
         }
         pos += 8;
 
-        // Sanity caps matching C# `StreamLzFrameDecompressor.cs:96-99`.
-        if (bh.decompressed_size > frame.max_decompressed_block_size) return error.BadFrame;
-        if (bh.compressed_size > frame.max_decompressed_block_size) return error.BadFrame;
+        // Sanity caps.
+        if (block_hdr.decompressed_size > frame.max_decompressed_block_size) return error.BadFrame;
+        if (block_hdr.compressed_size > frame.max_decompressed_block_size) return error.BadFrame;
 
         // v2: skip parallel-decode-metadata (sidecar) blocks.
-        if (bh.parallel_decode_metadata) {
-            if (pos + bh.compressed_size > src.len) return error.BlockDataTruncated;
-            pos += bh.compressed_size;
+        if (block_hdr.parallel_decode_metadata) {
+            if (pos + block_hdr.compressed_size > src.len) return error.BlockDataTruncated;
+            pos += block_hdr.compressed_size;
             continue;
         }
 
         // Grow the output budget check before decoding.
-        if (dict_bytes + bh.decompressed_size + safe_space > window_buf.len) return error.OutputTooSmall;
+        if (dict_bytes + block_hdr.decompressed_size + safe_space > window_buf.len) return error.OutputTooSmall;
 
-        if (bh.uncompressed) {
-            if (pos + bh.decompressed_size > src.len) return error.BlockDataTruncated;
+        if (block_hdr.uncompressed) {
+            if (pos + block_hdr.decompressed_size > src.len) return error.BlockDataTruncated;
             @memcpy(
-                window_buf[dict_bytes..][0..bh.decompressed_size],
-                src[pos..][0..bh.decompressed_size],
+                window_buf[dict_bytes..][0..block_hdr.decompressed_size],
+                src[pos..][0..block_hdr.decompressed_size],
             );
-            pos += bh.compressed_size;
+            pos += block_hdr.compressed_size;
         } else {
-            if (pos + bh.compressed_size > src.len) return error.BlockDataTruncated;
+            if (pos + block_hdr.compressed_size > src.len) return error.BlockDataTruncated;
             const n = try decompressBlockWithDict(
-                src[pos .. pos + bh.compressed_size],
+                src[pos .. pos + block_hdr.compressed_size],
                 window_buf,
                 dict_bytes,
-                bh.decompressed_size,
+                block_hdr.decompressed_size,
             );
-            if (n != bh.decompressed_size) return error.SizeMismatch;
-            pos += bh.compressed_size;
+            if (n != block_hdr.decompressed_size) return error.SizeMismatch;
+            pos += block_hdr.compressed_size;
         }
 
-        const decoded = window_buf[dict_bytes..][0..bh.decompressed_size];
+        const decoded = window_buf[dict_bytes..][0..block_hdr.decompressed_size];
 
         // Hash before writing so a later flush failure doesn't corrupt state.
         if (hasher) |*h| h.update(decoded);
 
         writer.writeAll(decoded) catch return error.OutputTooSmall;
-        total_written += bh.decompressed_size;
+        total_written += block_hdr.decompressed_size;
 
         if (opts.max_decompressed_size != 0 and total_written > opts.max_decompressed_size) {
             return error.OutputTooSmall;
         }
 
         // Slide the window: keep the last `window_size` bytes so the next
-        // block's LZ back-references can still reach them. Port of C#
-        // `StreamLzFrameDecompressor.cs:155-166`.
-        const total_used: usize = dict_bytes + bh.decompressed_size;
+        // block's LZ back-references can still reach them.
+        const total_used: usize = dict_bytes + block_hdr.decompressed_size;
         if (total_used > window_size) {
             const keep: usize = window_size;
             const discard: usize = total_used - keep;
@@ -444,8 +470,7 @@ pub fn decompressStream(
         }
     }
 
-    // Optional XXH32 content checksum verification. C# reads the 4 checksum
-    // bytes after the 4-byte end mark (`StreamLzFrameDecompressor.cs:172-187`).
+    // Optional XXH32 content checksum verification (4 bytes after the end mark).
     if (hasher) |*h| {
         if (pos + 4 > src.len) return error.ChecksumMismatch;
         const stored = std.mem.readInt(u32, src[pos..][0..4], .little);
@@ -458,8 +483,7 @@ pub fn decompressStream(
 
 /// Decompresses a raw StreamLZ block (no SLZ1 frame wrapper) into `dst[0..decompressed_size]`.
 ///
-/// Port of C# `StreamLZDecoder.Decompress(src, srcLen, dst, dstLen)` at
-/// `StreamLzDecoder.cs:376-379`. `src` is a raw compressed block — a
+/// `src` is a raw compressed block -- a
 /// sequence of internal 2-byte block headers + 4-byte chunk headers +
 /// chunk payloads (no frame header, no end mark). `dst.len` must be at
 /// least `decompressed_size + safe_space`.
@@ -477,9 +501,7 @@ pub fn decompressBlock(
 /// Decompresses a raw StreamLZ block into `dst[dst_offset..dst_offset + decompressed_size]`,
 /// with `dst[0..dst_offset]` treated as a pre-populated dictionary window.
 ///
-/// Port of C# `StreamLZDecoder.Decompress(src, srcLen, dst, dstLen, dstOffset)`
-/// at `StreamLzDecoder.cs:392-417` and `SerialDecodeLoopWithOffset` at
-/// `StreamLzDecoder.cs:438-469`. LZ back-references in the compressed
+/// LZ back-references in the compressed
 /// stream can reach into the dictionary bytes at `dst[0..dst_offset]`.
 ///
 /// `dst.len` must be at least `dst_offset + decompressed_size + safe_space`.
@@ -511,7 +533,7 @@ pub fn decompressBlockWithDict(
 /// header has `self_contained` set, the encoder stores `(num_chunks-1)*8`
 /// "delta prefix" bytes at the very end of the block payload. After the
 /// main decode, the first 8 bytes of every chunk except chunk 0 are
-/// overwritten with those tail bytes. C# parallelizes SC decode and
+/// overwritten with those tail bytes. The parallel SC decode path
 /// forms per-group dst_start boundaries; our serial equivalent just
 /// decodes sequentially with a buffer-wide dst_start (which is safe
 /// because a well-formed encoder emits no cross-group references
@@ -577,11 +599,11 @@ fn decompressCompressedBlock(
         src_pos += ch.bytes_consumed;
 
         if (ch.is_memset) {
-            // C# DecodeStep line 253-269: when compressed_size == 0, prefer
+            // When compressed_size == 0, prefer
             // whole-match over memset if whole_match_distance is set.
             // `ParseChunkHeader` on both sides never populates this field,
             // so the branch is unreachable in practice — keeping it for
-            // structural parity with the C# reference.
+            //
             if (ch.whole_match_distance != 0) {
                 if (ch.whole_match_distance > dst_off) return error.BadChunkHeader;
                 if (dst_off + dst_this_chunk > dst.len) return error.OutputTooSmall;
@@ -754,12 +776,12 @@ test "decompressBlock roundtrips a raw compressed block (no frame wrapper)" {
     const framed_len = try encoder.compressFramed(allocator, &payload, &framed, .{ .level = 1 });
 
     const hdr = try frame.parseHeader(framed[0..framed_len]);
-    const bh = try frame.parseBlockHeader(framed[hdr.header_size..]);
+    const block_hdr= try frame.parseBlockHeader(framed[hdr.header_size..]);
     // Only validate the roundtrip when the encoder chose the compressed path.
     // For very short inputs the frame block may come back uncompressed.
-    if (bh.uncompressed) return;
+    if (block_hdr.uncompressed) return;
     const inner_start = hdr.header_size + 8;
-    const inner = framed[inner_start .. inner_start + bh.compressed_size];
+    const inner = framed[inner_start .. inner_start + block_hdr.compressed_size];
 
     var out: [1024]u8 = @splat(0);
     const written = try decompressBlock(inner, &out, payload.len);
@@ -815,10 +837,10 @@ test "decompressBlockWithDict matches decompressBlock when dst_offset == 0" {
     const framed_len = try encoder.compressFramed(allocator, &payload, &framed, .{ .level = 1 });
 
     const hdr = try frame.parseHeader(framed[0..framed_len]);
-    const bh = try frame.parseBlockHeader(framed[hdr.header_size..]);
-    if (bh.uncompressed) return;
+    const block_hdr= try frame.parseBlockHeader(framed[hdr.header_size..]);
+    if (block_hdr.uncompressed) return;
     const inner_start = hdr.header_size + 8;
-    const inner = framed[inner_start .. inner_start + bh.compressed_size];
+    const inner = framed[inner_start .. inner_start + block_hdr.compressed_size];
 
     var out_a: [1024]u8 = @splat(0);
     var out_b: [1024]u8 = @splat(0);
@@ -885,7 +907,7 @@ test "encoder sets RestartDecoder flag on first internal block header" {
     // Port parity check for A9: the encoder writes `keyframe` = true for
     // the first 256 KB block inside a frame, which sets bit 6 of the
     // 2-byte internal block header (`restart_decoder` on the decoder side).
-    // C# consumers don't act on it but the flag IS written; confirm Zig
+    // Consumers don't act on it but the flag IS written; confirm Zig
     // is consistent.
     var payload: [384]u8 = undefined;
     for (&payload, 0..) |*b, i| b.* = @truncate(i);
@@ -898,8 +920,8 @@ test "encoder sets RestartDecoder flag on first internal block header" {
     const framed_len = try encoder.compressFramed(allocator, &payload, &framed, .{ .level = 1 });
 
     const hdr = try frame.parseHeader(framed[0..framed_len]);
-    const bh = try frame.parseBlockHeader(framed[hdr.header_size..]);
-    if (bh.uncompressed) return;
+    const block_hdr= try frame.parseBlockHeader(framed[hdr.header_size..]);
+    if (block_hdr.uncompressed) return;
     const inner_start = hdr.header_size + 8;
     const internal = try block_header.parseBlockHeader(framed[inner_start..]);
     try testing.expect(internal.restart_decoder);

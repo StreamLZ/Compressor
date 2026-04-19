@@ -1,13 +1,12 @@
 //! High-codec encoder: HighStreamWriter init, per-token stream writers,
 //! and the top-level `assembleCompressedOutput` that entropy-encodes the
-//! 5 sub-streams into the final chunk payload. Port of
-//! src/StreamLZ/Compression/High/Encoder.cs.
+//! 5 sub-streams into the final chunk payload.
+//! Used by: High codec (L6-L11)
 //!
 //! The `HighStreamWriter` holds pointers into a single backing allocation
 //! carved into 7 regions (literals, delta-literals, tokens, near-offsets,
-//! far-offsets, literal run lengths, overflow lengths). Matches C#
-//! `HighStreamWriter` exactly — the decoder reads each stream sequentially
-//! so interleaving would destroy cache behaviour.
+//! far-offsets, literal run lengths, overflow lengths). The decoder reads
+//! each stream sequentially so interleaving would destroy cache behaviour.
 
 const std = @import("std");
 const lz_constants = @import("../format/streamlz_constants.zig");
@@ -24,12 +23,11 @@ const Stats = high_types.Stats;
 const Token = high_types.Token;
 
 /// Cross-block statistics state carried between High-codec compress
-/// calls within a single stream. Mirrors C#
-/// `lzcoder.SymbolStatisticsScratch` + `lzcoder.LastChunkType`: the
+/// calls within a single stream. The
 /// optimal parser saves its final `Stats` block after each call so the
 /// next block can seed its cost model via `rescaleAddStats` instead of
 /// the cold-start `rescaleStats`. `last_chunk_type = -1` signals "no
-/// prior block" (same sentinel C# uses on first invocation).
+/// prior block".
 pub const HighCrossBlockState = struct {
     prev_stats: Stats = .{},
     last_chunk_type: i32 = -1,
@@ -37,7 +35,6 @@ pub const HighCrossBlockState = struct {
 };
 
 /// Runtime encoder context passed through `assembleCompressedOutput`.
-/// Mirrors the subset of `LzCoder` the High encoder consults.
 pub const HighEncoderContext = struct {
     allocator: std.mem.Allocator,
     compression_level: i32,
@@ -45,7 +42,7 @@ pub const HighEncoderContext = struct {
     entropy_options: entropy_enc.EntropyOptions,
     encode_flags: u32,
     sub_or_copy_mask: i32 = 0,
-    /// Mirrors C# `lzcoder.Options.SelfContained`. Read by the optimal
+    /// Self-contained mode flag. Read by the optimal
     /// parser (and the fast parser) to enable per-position SC max-back
     /// enforcement and the LAO pre-filter pass.
     self_contained: bool = false,
@@ -55,9 +52,8 @@ pub const HighEncoderContext = struct {
     cross_block: ?*HighCrossBlockState = null,
 };
 
-/// Owns the backing scratch allocation for a `HighStreamWriter`. The
-/// C# version reuses `LzTemp.HighEncoderScratch`; Zig just allocates
-/// fresh each time with `allocator.alloc`. Call `deinit` when done.
+/// Owns the backing scratch allocation for a `HighStreamWriter`.
+/// Call `deinit` when done.
 pub const HighWriterStorage = struct {
     backing: []u8,
     allocator: std.mem.Allocator,
@@ -69,8 +65,7 @@ pub const HighWriterStorage = struct {
 };
 
 /// Initializes a `HighStreamWriter` with a freshly allocated scratch
-/// buffer carved into the 7 output streams. Port of C#
-/// `Compressor.InitializeStreamWriter` (`Encoder.cs:18-52`).
+/// buffer carved into the 7 output streams.
 ///
 /// The caller must keep `storage` alive for the lifetime of `writer`
 /// and call `storage.deinit()` when done.
@@ -154,7 +149,7 @@ inline fn alignUpPtr(p: [*]u8, comptime alignment: usize) [*]u8 {
 
 /// Writes the match length into the run-length / overflow streams and
 /// returns the 4-bit `matchLen` token contribution pre-shifted to bits
-/// 5:2. Port of C# `Compressor.WriteMatchLength` (`Encoder.cs:60-77`).
+/// 5:2.
 /// Not `inline` — Zig's comptime evaluator would fold comptime-known
 /// match_length values through the unreachable overflow branches and
 /// fail type checks.
@@ -180,7 +175,6 @@ fn writeMatchLength(writer: *HighStreamWriter, match_length: i32) i32 {
 }
 
 /// Long-literal path: copies `len` literal bytes + delta bytes.
-/// Port of C# `WriteLiteralsLong` (`Encoder.cs:79-105`).
 fn writeLiteralsLong(writer: *HighStreamWriter, src: [*]const u8, len: usize, do_subtract: bool) void {
     if (do_subtract) {
         // delta[i] = src[i] - src[i - recent0] (dst uses negative offset).
@@ -214,8 +208,7 @@ fn writeLiteralsLong(writer: *HighStreamWriter, src: [*]const u8, len: usize, do
 }
 
 /// Writes a literal run and returns the 2-bit `litLen` token field
-/// (bits 1:0 of the command byte). Port of C#
-/// `Compressor.WriteLiterals` (`Encoder.cs:117-151`).
+/// (bits 1:0 of the command byte).
 inline fn writeLiterals(writer: *HighStreamWriter, src: [*]const u8, len: usize, do_subtract: bool) i32 {
     if (len == 0) return 0;
 
@@ -225,7 +218,7 @@ inline fn writeLiterals(writer: *HighStreamWriter, src: [*]const u8, len: usize,
     }
 
     // Branchless run-length write: always store `len - 3`, only advance
-    // the pointer when `len >= 3`. C# relies on `(byte)(len - 3)` wrapping
+    // the pointer when `len >= 3`. Relies on `(byte)(len - 3)` wrapping
     // when `len < 3`; Zig's `@intCast` would panic on the negative value,
     // so compute the wrap explicitly via `-%` + `@truncate`.
     const lrl8: [*]u8 = writer.literal_run_lengths;
@@ -252,8 +245,7 @@ inline fn writeLiterals(writer: *HighStreamWriter, src: [*]const u8, len: usize,
     return @intCast(@min(len, @as(usize, 3)));
 }
 
-/// Writes a far offset (≥ `high_offset_threshold`). Port of C#
-/// `WriteFarOffset` (`Encoder.cs:154-159`).
+/// Writes a far offset (>= `high_offset_threshold`).
 inline fn writeFarOffset(writer: *HighStreamWriter, offset: u32) void {
     const low_limit: u32 = @intCast(lz_constants.low_offset_encoding_limit);
     const bsr: u32 = std.math.log2_int(u32, offset - low_limit);
@@ -264,8 +256,7 @@ inline fn writeFarOffset(writer: *HighStreamWriter, offset: u32) void {
     writer.far_offsets += 1;
 }
 
-/// Writes a near offset (< `high_offset_threshold`). Port of C#
-/// `WriteNearOffset` (`Encoder.cs:162-167`).
+/// Writes a near offset (< `high_offset_threshold`).
 inline fn writeNearOffset(writer: *HighStreamWriter, offset: u32) void {
     const bias: u32 = @intCast(lz_constants.offset_bias_constant);
     const bsr: u32 = std.math.log2_int(u32, offset + bias);
@@ -276,8 +267,7 @@ inline fn writeNearOffset(writer: *HighStreamWriter, offset: u32) void {
     writer.far_offsets += 1;
 }
 
-/// Writes an offset, dispatching near vs far. Port of C# `WriteOffset`
-/// (`Encoder.cs:170-180`).
+/// Writes an offset, dispatching near vs far.
 inline fn writeOffset(writer: *HighStreamWriter, offset: u32) void {
     if (offset >= lz_constants.high_offset_threshold) {
         writeFarOffset(writer, offset);
@@ -287,7 +277,7 @@ inline fn writeOffset(writer: *HighStreamWriter, offset: u32) void {
 }
 
 /// Emits one token (literal run + match length + offset field) into
-/// the writer's streams. Port of C# `AddToken` (`Encoder.cs:190-224`).
+/// the writer's streams.
 ///
 /// `offs_or_recent > 0` means "new offset"; `offs_or_recent <= 0` means
 /// "reuse recent-offset slot `-offs_or_recent`" (0, 1, or 2).
@@ -331,8 +321,7 @@ pub fn addToken(
     writer.tokens += 1;
 }
 
-/// Emits the trailing literals past the last match. Port of C#
-/// `AddFinalLiterals` (`Encoder.cs:226-239`).
+/// Emits the trailing literals past the last match.
 pub fn addFinalLiterals(
     writer: *HighStreamWriter,
     src: [*]const u8,
@@ -360,7 +349,7 @@ pub fn addFinalLiterals(
 /// cost. Returns the number of compressed bytes written, or the
 /// source length on bail-out (caller treats as uncompressed).
 ///
-/// Port of C# `AssembleCompressedOutput` (`Encoder.cs:246-438`).
+///
 pub fn assembleCompressedOutput(
     ctx: *const HighEncoderContext,
     writer: *const HighStreamWriter,
@@ -389,7 +378,7 @@ pub fn assembleCompressedOutput(
     }
 
     const level = ctx.compression_level;
-    const flag_ignore_u32_length: bool = false; // C# line 269: always 0 here.
+    const flag_ignore_u32_length: bool = false; // always 0 here.
     std.debug.assert((ctx.encode_flags & 1) == 0);
 
     const num_lits: usize = @intFromPtr(writer.literals) - @intFromPtr(writer.literals_start);
@@ -406,12 +395,12 @@ pub fn assembleCompressedOutput(
         lit_cost = memcpy_cost;
     } else {
         var lits_histo: ByteHistogram = .{};
-        lits_histo.count_bytes(writer.literals_start[0..num_lits]);
+        lits_histo.countBytes(writer.literals_start[0..num_lits]);
 
         const has_litsub: bool = @intFromPtr(writer.delta_literals) != @intFromPtr(writer.delta_literals_start);
         var litsub_histo: ByteHistogram = .{};
         if (has_litsub) {
-            litsub_histo.count_bytes(writer.delta_literals_start[0..num_lits]);
+            litsub_histo.countBytes(writer.delta_literals_start[0..num_lits]);
         }
 
         if (stats) |s| {
@@ -619,7 +608,7 @@ pub fn assembleCompressedOutput(
 /// order, calls `addToken` for each (with do_recent = do_subtract =
 /// true), then `addFinalLiterals`, then `assembleCompressedOutput`.
 ///
-/// Port of C# `EncodeTokenArray` (`Encoder.cs:440-471`). The optimal
+/// The optimal
 /// parser uses this to emit its final token sequence after the DP
 /// phases complete.
 pub fn encodeTokenArray(

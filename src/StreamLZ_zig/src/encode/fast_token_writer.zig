@@ -1,6 +1,7 @@
 //! Fast LZ token emitter. Port of the `WriteOffset` / `WriteComplexOffset`
 //! / `WriteLengthValue` / `WriteOffset32` helpers in
 //! src/StreamLZ/Compression/Fast/Encoder.cs.
+//! Used by: Fast codec (L1-L5)
 //!
 //! Hot-loop design:
 //!   * `writeOffset` is the fast path: literal run ≤ 7 bytes, match ≤ 15,
@@ -26,7 +27,7 @@ const FastStreamWriter = writer_mod.FastStreamWriter;
 // ────────────────────────────────────────────────────────────
 
 /// Extend a match forward by comparing 4 bytes at a time. Port of
-/// `Encoder.ExtendMatchForward` in C#.
+///
 pub inline fn extendMatchForward(
     source: [*]const u8,
     source_end: [*]const u8,
@@ -223,7 +224,7 @@ pub fn writeComplexOffset(
     }
 
     if (effective_offset > 0xFFFF) {
-        // Offset adjustment: `+ (sourcePointer + block2StartOffset - literalEnd)` in C#.
+        // Offset adjustment: `+ (sourcePointer + block2StartOffset - literalEnd)`.
         // For the serial port we compute it from writer state.
         const literal_end_pos: usize = @intFromPtr(literal_start) + literal_run_length_in;
         const src_base_plus_block2: usize = @intFromPtr(w.source_ptr) + w.block2_start_offset;
@@ -280,9 +281,9 @@ pub inline fn writeOffset(
 /// Lazy-parser entry point: scans literal runs in the [8, 63] range for
 /// 1-byte recent-offset matches, splitting the run into multiple length-1
 /// recent-offset tokens when the slot accounting allows. Port of
-/// `Encoder.WriteOffsetWithLiteral1` / `WriteOffsetWithLiteral1Inner` (C#).
 ///
-/// Caller invariant: matches the C# call sites — used after the lazy parser
+///
+/// Caller invariant: used after the lazy parser
 /// (chain hasher and 2x hasher) emits a match. For literal runs outside
 /// [8, 63] this collapses to a plain `writeOffset`.
 pub fn writeOffsetWithLiteral1(

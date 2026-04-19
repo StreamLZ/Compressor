@@ -1,6 +1,7 @@
 //! FastMatchHasher — single-entry Fibonacci-hash table used by the greedy
 //! Fast LZ parser. Port of `FastMatchHasher<T>` in
 //! src/StreamLZ/Compression/MatchFinding/MatchHasher.cs.
+//! Used by: Fast codec (L1-L5)
 //!
 //! Hot-loop design:
 //!   * The hash table is plain contiguous memory (slice of `T`), sized to a
@@ -49,14 +50,14 @@ pub fn FastMatchHasher(comptime T: type) type {
         /// Right-shift amount after the multiply: `64 - hash_bits`.
         hash_shift: u6,
         /// Base offset subtracted from positions before storing in the table.
-        /// Matches C# `SrcBaseOffset`. For non-streaming compress, this is 0.
+        /// Source base offset. For non-streaming compress, this is 0.
         src_base_offset: i64,
         /// Allocator kept for `deinit`.
         allocator: std.mem.Allocator,
 
         /// Allocates and zeros a new hash table for the given parameters.
         ///
-        /// Matches C# `FastMatchHasher<T>.AllocateHash` EXACTLY, including
+        /// Allocates hash table, including
         /// the special-case for k=4 (the default):
         ///
         ///   if (k in [5, 8]):  hashMult = FibonacciHashMultiplier << (8 * (8 - k))
@@ -108,7 +109,7 @@ test "FastMatchHasher(u32) allocates a power-of-two table and computes shift" {
     defer h.deinit();
     try testing.expectEqual(@as(usize, 1 << 14), h.hash_table.len);
     try testing.expectEqual(@as(u6, 50), h.hash_shift);
-    // k = 4 falls out of the [5,8] band so C# uses the special constant.
+    // k = 4 falls out of the [5,8] band so use the special constant.
     try testing.expectEqual(@as(u64, 0x9E3779B100000000), h.hash_mult);
     for (h.hash_table) |e| try testing.expectEqual(@as(u32, 0), e);
 }

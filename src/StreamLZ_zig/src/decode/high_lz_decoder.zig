@@ -1,7 +1,6 @@
 //! High codec LZ decoder — types, ReadLzTable, UnpackOffsets, DecodeChunk.
 //!
-//! Port of src/StreamLZ/Decompression/High/LzDecoder.cs (non-ProcessLzRuns parts).
-//! ProcessLzRuns_Type0 / Type1 live in `high_lz_process_runs.zig`.
+//! ProcessLzRuns_Type0 / Type1 live in `high_lz_token_executor.zig`.
 //!
 //! Two-phase decode per sub-chunk:
 //!   1. `readLzTable` — decodes the 4 sub-streams (lit, cmd, packed offs,
@@ -15,7 +14,7 @@ const constants = @import("../format/streamlz_constants.zig");
 const copy = @import("../io/copy_helpers.zig");
 const BitReader = @import("../io/bit_reader.zig").BitReader;
 const entropy = @import("entropy_decoder.zig");
-const runs = @import("high_lz_process_runs.zig");
+const runs = @import("high_lz_token_executor.zig");
 
 pub const DecodeError = error{
     BadMode,
@@ -383,8 +382,7 @@ pub const ChunkPhase1Result = struct {
 /// Phase 1 of two-phase decompression: walks the sub-chunks inside
 /// a compressed 256 KB chunk and calls `readLzTable` on each LZ
 /// sub-chunk, writing the decoded `HighLzTable` into a per-sub-chunk
-/// scratch region. Mirrors C# `High.LzDecoder.Phase1_ProcessChunk`
-/// (`LzDecoder.TwoPhase.cs:21`).
+/// scratch region.
 ///
 /// Scratch layout: `scratch[0..scratch_end-scratch]` is split in half
 /// — the first half holds sub-chunk 0's HighLzTable + streams; the

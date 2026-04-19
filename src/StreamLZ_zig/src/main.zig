@@ -5,7 +5,7 @@ const block_header = @import("format/block_header.zig");
 const constants = @import("format/streamlz_constants.zig");
 const decoder = @import("decode/streamlz_decoder.zig");
 const encoder = @import("encode/streamlz_encoder.zig");
-const cleanness = @import("decode/cleanness_analyzer.zig");
+const cleanness = @import("decode/cross_chunk_analyzer.zig");
 
 const version_string = "0.0.0-phase3a";
 
@@ -248,33 +248,33 @@ fn runPpoc(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const []cons
     while (pos + 4 <= src.len) {
         const first_word = std.mem.readInt(u32, src[pos..][0..4], .little);
         if (first_word == frame.end_mark) break;
-        const bh = frame.parseBlockHeader(src[pos..]) catch break;
-        if (bh.isEndMark()) break;
+        const block_hdr = frame.parseBlockHeader(src[pos..]) catch break;
+        if (block_hdr.isEndMark()) break;
         pos += 8;
-        if (bh.uncompressed) {
+        if (block_hdr.uncompressed) {
             // Block-level uncompressed — the entire block is a raw copy.
             try chunks.append(allocator, .{
                 .chunk_type = .raw_copy,
                 .src_ptr = src[pos..].ptr,
-                .src_len = bh.decompressed_size,
+                .src_len = block_hdr.decompressed_size,
                 .dst_offset = dst_off_scan,
-                .dst_size = bh.decompressed_size,
+                .dst_size = block_hdr.decompressed_size,
                 .memset_byte = 0,
             });
-            pos += bh.compressed_size;
-            dst_off_scan += bh.decompressed_size;
+            pos += block_hdr.compressed_size;
+            dst_off_scan += block_hdr.decompressed_size;
             continue;
         }
 
         const block_start = pos;
-        const block_src_len = bh.compressed_size;
+        const block_src_len = block_hdr.compressed_size;
         const block_src = src[block_start..][0..block_src_len];
 
         // Walk chunks within this block. Non-SC (L1-L4) format: no prefix
         // table, straight sequence of (2-byte internal header, 4-byte chunk
         // header, compressed payload).
         var src_pos_in_block: usize = 0;
-        var dst_remaining: usize = bh.decompressed_size;
+        var dst_remaining: usize = block_hdr.decompressed_size;
         while (dst_remaining > 0) {
             if (src_pos_in_block + 2 > block_src.len) break;
             const ih = block_header.parseBlockHeader(block_src[src_pos_in_block..]) catch break;
@@ -906,7 +906,7 @@ fn runAnalyze(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const []c
     }
 }
 
-/// In-memory compress + decompress benchmark mirroring the C# `slz -b`
+/// In-memory compress + decompress benchmark matching the `slz -b`
 /// output: per-run timings, median (not mean), and a final round-trip
 /// pass/fail check.
 fn runBenchCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const []const u8) !void {
@@ -1010,7 +1010,7 @@ fn runBenchCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []con
     const comp_median_mbps = mb * 1000.0 / comp_median_ms;
     try w.print("  Compress median: {d:.0}ms ({d:.1} MB/s)\n\n", .{ comp_median_ms, comp_median_mbps });
 
-    // Warm-up decompress (parallel — matches what C# `-b` does for SC files).
+    // Warm-up decompress (parallel — matches what `-b` does for SC files).
     _ = try decoder.decompressFramedParallel(allocator, compressed[0..comp_size], decompressed);
 
     // ── Decompress benchmark ──────────────────────────────────────────
@@ -1115,7 +1115,7 @@ fn runBench(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const []con
     defer allocator.free(dst);
 
     // Warm-up: one untimed decode to page-fault the dst and prime the caches.
-    // Uses parallel decompress (matches what C# `-b` does for SC files and
+    // Uses parallel decompress (matches what `-b` does for SC files and
     // what production code paths take when an allocator is available).
     _ = decoder.decompressFramedParallel(allocator, src, dst) catch |err| {
         try w.print("error: decompression failed: {s}\n", .{@errorName(err)});
@@ -1388,11 +1388,11 @@ fn runInfo(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const []cons
     var block_index: usize = 0;
     var total_decompressed: u64 = 0;
     while (pos + 4 <= data.len) {
-        const bh = frame.parseBlockHeader(data[pos..]) catch |err| {
+        const block_hdr = frame.parseBlockHeader(data[pos..]) catch |err| {
             try w.print("    [#{d}] invalid block header at pos={d}: {s}\n", .{ block_index, pos, @errorName(err) });
             break;
         };
-        if (bh.isEndMark()) {
+        if (block_hdr.isEndMark()) {
             try w.print("    end_mark at pos={d}\n", .{pos});
             pos += 4;
             break;
@@ -1400,12 +1400,12 @@ fn runInfo(allocator: std.mem.Allocator, w: *std.Io.Writer, args: []const []cons
         try w.print("    [#{d}] pos={d} comp={d} decomp={d}{s}\n", .{
             block_index,
             pos,
-            bh.compressed_size,
-            bh.decompressed_size,
-            if (bh.uncompressed) " UNCOMPRESSED" else "",
+            block_hdr.compressed_size,
+            block_hdr.decompressed_size,
+            if (block_hdr.uncompressed) " UNCOMPRESSED" else "",
         });
-        total_decompressed += bh.decompressed_size;
-        pos += 8 + bh.compressed_size;
+        total_decompressed += block_hdr.decompressed_size;
+        pos += 8 + block_hdr.compressed_size;
         block_index += 1;
     }
     try w.print("  total blocks:    {d}\n", .{block_index});
@@ -1419,14 +1419,13 @@ test {
     _ = @import("format/block_header.zig");
     _ = @import("io/bit_reader.zig");
     _ = @import("io/bit_writer.zig");
-    _ = @import("io/bit_writer_64.zig");
     _ = @import("io/copy_helpers.zig");
     _ = @import("decode/streamlz_decoder.zig");
     _ = @import("decode/huffman_decoder.zig");
     _ = @import("decode/entropy_decoder.zig");
     _ = @import("decode/fast_lz_decoder.zig");
     _ = @import("decode/high_lz_decoder.zig");
-    _ = @import("decode/high_lz_process_runs.zig");
+    _ = @import("decode/high_lz_token_executor.zig");
     _ = @import("decode/tans_decoder.zig");
     _ = @import("decode/decompress_parallel.zig");
     _ = @import("decode/fixture_tests.zig");
@@ -1439,12 +1438,11 @@ test {
     _ = @import("encode/match_hasher.zig");
     _ = @import("encode/text_detector.zig");
     _ = @import("encode/cost_coefficients.zig");
-    _ = @import("encode/cost_model.zig");
+    _ = @import("encode/fast_cost_model.zig");
     _ = @import("encode/fast_stream_writer.zig");
     _ = @import("encode/fast_token_writer.zig");
     _ = @import("encode/fast_lz_parser.zig");
     _ = @import("encode/match_eval.zig");
-    _ = @import("encode/block_header_writer.zig");
     _ = @import("encode/managed_match_len_storage.zig");
     _ = @import("encode/match_finder.zig");
     _ = @import("encode/match_finder_bt4.zig");
@@ -1452,7 +1450,7 @@ test {
     _ = @import("encode/high_matcher.zig");
     _ = @import("encode/high_cost_model.zig");
     _ = @import("encode/high_encoder.zig");
-    _ = @import("encode/high_fast_parser.zig");
+    _ = @import("encode/high_greedy_parser.zig");
     _ = @import("encode/high_optimal_parser.zig");
     _ = @import("encode/high_compressor.zig");
     _ = @import("encode/fast_lz_encoder.zig");

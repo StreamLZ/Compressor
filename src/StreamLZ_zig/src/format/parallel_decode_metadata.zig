@@ -1,4 +1,5 @@
 //! StreamLZ v2 parallel-decode sidecar format.
+//! Optional sidecar block for L1-L5 parallel decode. Not present in L6-L11 or v1 frames.
 //!
 //! A sidecar block carries the pre-computed "phase 1" state that a
 //! parallel Fast L1-L4 decoder needs in order to execute cross-chunk

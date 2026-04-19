@@ -1,8 +1,8 @@
-//! Core data structures for the High compressor. Port of
-//! src/StreamLZ/Compression/High/HighTypes.cs.
+//! Core data structures for the High compressor.
+//! Used by: High codec (L6-L11)
 //!
 //! These types are shared across the High encoder, High cost model,
-//! High optimal parser, and High fast parser — they live here to
+//! High optimal parser, and High fast parser -- they live here to
 //! avoid circular imports.
 
 const std = @import("std");
@@ -21,7 +21,6 @@ pub const recent_offset_count: usize = 3;
 /// matches the decoder's carousel in `ProcessLzRuns` and must not be
 /// changed without updating both sides.
 ///
-/// Port of C# `HighRecentOffs` (`HighTypes.cs:22-33`).
 pub const HighRecentOffs = extern struct {
     offs: [8]i32 = @splat(0),
 
@@ -36,8 +35,7 @@ pub const HighRecentOffs = extern struct {
 
 /// Intermediate LZ encoding state — holds the six output streams
 /// (literals, delta-literals, tokens, u8 offsets, u32 offsets,
-/// literal run lengths, overflow lengths). Port of C# `HighStreamWriter`
-/// (`HighTypes.cs:40-53`).
+/// literal run lengths, overflow lengths).
 pub const HighStreamWriter = struct {
     literals_start: [*]u8,
     literals: [*]u8,
@@ -70,8 +68,7 @@ pub const HighStreamWriter = struct {
     encode_flags: i32,
 };
 
-/// A single token in the parsed LZ sequence. Port of C# `Token`
-/// (`HighTypes.cs:57-63`).
+/// A single token in the parsed LZ sequence.
 pub const Token = extern struct {
     recent_offset0: i32,
     lit_len: i32,
@@ -79,7 +76,7 @@ pub const Token = extern struct {
     offset: i32,
 };
 
-/// Growable token array. Port of C# `TokenArray` (`HighTypes.cs:67-71`).
+/// Growable token array.
 pub const TokenArray = struct {
     data: [*]Token,
     size: usize,
@@ -87,15 +84,13 @@ pub const TokenArray = struct {
 };
 
 /// Token array exported from the optimal parser for two-phase compression.
-/// Port of C# `ExportedTokens` (`HighTypes.cs:74-79`).
 pub const ExportedTokens = struct {
     tokens: []Token,
     count: usize,
     chunk_type: i32,
 };
 
-/// Optimal-parser state (one per grid cell). Port of C# `State`
-/// (`HighTypes.cs:83-133`).
+/// Optimal-parser state (one per grid cell).
 pub const State = extern struct {
     best_bit_count: i32 = 0,
     recent_offs0: i32 = 0,
@@ -139,8 +134,7 @@ pub const State = extern struct {
     }
 };
 
-/// Cost model built from running statistics. Port of C# `CostModel`
-/// (`HighTypes.cs:136-151`).
+/// Cost model built from running statistics.
 pub const CostModel = struct {
     chunk_type: i32,
     sub_or_copy_mask: i32,
@@ -158,7 +152,6 @@ pub const CostModel = struct {
 };
 
 /// Running compression statistics (histograms for each stream).
-/// Port of C# `Stats` (`HighTypes.cs:154-163`).
 pub const Stats = struct {
     lit_raw: ByteHistogram = .{},
     lit_sub: ByteHistogram = .{},

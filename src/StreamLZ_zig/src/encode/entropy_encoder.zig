@@ -1,5 +1,5 @@
-//! High-level entropy encoder wrapper. Port of the dispatch routines in
-//! src/StreamLZ/Compression/Entropy/EntropyEncoder.cs.
+//! High-level entropy encoder wrapper.
+//! Used by: Fast and High codecs
 //!
 //! Two primary paths:
 //!
@@ -18,7 +18,7 @@ const tans = @import("tans_encoder.zig");
 
 const ByteHistogram = hist_mod.ByteHistogram;
 
-/// Entropy option bit flags (mirror of C# `EntropyOptions`).
+/// Entropy option bit flags.
 pub const EntropyOptions = packed struct(u8) {
     allow_tans: bool = false,
     allow_rle_entropy: bool = false,
@@ -50,8 +50,7 @@ pub fn encodeArrayU8Memcpy(dst: []u8, src: []const u8) EncodeError!usize {
     return src.len + 3;
 }
 
-/// Write a 5-byte non-compact chunk header. Mirror of C#
-/// `WriteNonCompactChunkHeader`. `decompressed_size` and
+/// Write a 5-byte non-compact chunk header. `decompressed_size` and
 /// `compressed_size` must each fit in 18 bits; `chunk_type` in 4 bits.
 fn writeNonCompactChunkHeader(dst: []u8, chunk_type: u8, compressed_size: u32, decompressed_size: u32) void {
     const dst_minus_1: u32 = decompressed_size - 1;
@@ -64,10 +63,9 @@ fn writeNonCompactChunkHeader(dst: []u8, chunk_type: u8, compressed_size: u32, d
 }
 
 /// Convert a fresh 5-byte non-compact header (or Type-0 3-byte memcpy
-/// header) into a compact variant when possible. Mirrors
-/// `MakeCompactChunkHdr` in C# (`EntropyEncoder.cs:140-184`): decrements
-/// `cost_ptr` by 1 (memcpy shrink) or 2 (compressed shrink) when the
-/// header compacts. Returns the new total byte count.
+/// header) into a compact variant when possible. Decrements `cost_ptr`
+/// by 1 (memcpy shrink) or 2 (compressed shrink) when the header compacts.
+/// Returns the new total byte count.
 fn makeCompactChunkHdr(dst: []u8, total_n: usize, cost_ptr: ?*f32) usize {
     const chunk_type: u32 = (dst[0] >> 4) & 0x7;
     if (chunk_type == 0) {
@@ -119,7 +117,7 @@ fn makeCompactChunkHdr(dst: []u8, total_n: usize, cost_ptr: ?*f32) usize {
 /// the chunk header (non-compact 5 bytes for compressed, 3 bytes for
 /// memcpy). Returns the total byte count written.
 ///
-/// Port of C# `EntropyEncoder.EncodeArrayU8` signature: `speed_tradeoff`
+/// `speed_tradeoff`
 /// biases tANS vs memcpy cost comparison, `cost_out` receives the
 /// rate-distortion cost of the chosen encoding (used by callers to
 /// pick between multiple candidates), `level` gates level-dependent
@@ -136,20 +134,19 @@ pub fn encodeArrayU8(
     histo_out: ?*ByteHistogram,
 ) EncodeError!usize {
     if (src.len <= 32) {
-        if (histo_out) |h| h.count_bytes(src);
+        if (histo_out) |h| h.countBytes(src);
         if (cost_out) |c| c.* = @floatFromInt(src.len + 3);
         return encodeArrayU8Memcpy(dst, src);
     }
 
     var histo: ByteHistogram = .{};
-    histo.count_bytes(src);
+    histo.countBytes(src);
     if (histo_out) |h| h.* = histo;
 
     return encodeArrayU8CoreWithHisto(allocator, dst, src, &histo, options, speed_tradeoff, cost_out, level);
 }
 
-/// Core encode with pre-computed histogram. Mirrors C#
-/// `EntropyEncoder.EncodeArrayU8WithHisto` — takes the histogram by
+/// Core encode with pre-computed histogram. Takes the histogram by
 /// value (copies internally so the caller's copy is untouched by any
 /// in-place adjustments the encoders make).
 pub fn encodeArrayU8WithHisto(

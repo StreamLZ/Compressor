@@ -1,4 +1,4 @@
-//! Entropy-stream dispatcher. Port of src/StreamLZ/Decompression/Entropy/EntropyDecoder.cs.
+//! Entropy-stream dispatcher.
 //!
 //! Dispatches an entropy block by reading its 2-5 byte header (chunk type in
 //! `src[0][6:4]`) and routing to:
@@ -49,7 +49,7 @@ pub const DecodeResult = struct {
 /// `scratch` / `scratch_end` is the workspace for sub-decoders (tANS LUT,
 /// RLE command expansion, recursive sub-block intermediate buffers).
 /// When `dst_buf` aliases `scratch`, the internal code advances scratch
-/// past `dst_size` before handing it to sub-decoders — matching the C#
+/// past `dst_size` before handing it to sub-decoders — matching the
 /// `dst == scratch` alias check in `EntropyDecoder.High_DecodeBytesInternal`.
 pub fn highDecodeBytes(
     dst_buf: [*]u8,
@@ -143,7 +143,7 @@ fn highDecodeBytesInternal(
 
     // dst == scratch alias handling: caller may have passed the same
     // pointer for both, in which case sub-decoder workspace must start
-    // past the decoded output. Port of the C# check at
+    // past the decoded output. Check at
     // `EntropyDecoder.High_DecodeBytesInternal` lines 770-778.
     var scratch_ptr: [*]u8 = scratch_in;
     if (@intFromPtr(dst_buf) == @intFromPtr(scratch_in)) {
@@ -325,8 +325,7 @@ pub const DecodeMultiArrayResult = struct {
 /// array receives a contiguous slice of `dst`; `array_data[i]` is set to
 /// the start of array `i` and `array_lens[i]` to its byte count.
 ///
-/// Port of C# `EntropyDecoder.High_DecodeMultiArrayInternal` at
-/// `EntropyDecoder.cs:344-638`. The on-wire format is:
+/// The on-wire format is:
 ///   1. Marker byte (bit 7 set) + 6-bit `num_arrays_in_file` (1..32).
 ///   2. `num_arrays_in_file` nested entropy blocks decoded into scratch.
 ///   3. 2-byte Q value (interpretation depends on bit 15).
@@ -387,13 +386,12 @@ fn decodeMultiArrayInternal(
     var dst: [*]u8 = dst_buf_ptr;
     const dst_end: [*]u8 = dst_buf_ptr + dst_size_in;
 
-    // Handle the scratch-aliased-with-dst case, mirroring C# lines 376-382.
+    // Handle the scratch-aliased-with-dst case.
     var scratch: [*]u8 = scratch_in;
     var dst_end_work: [*]u8 = dst_end;
     if (@intFromPtr(dst) == @intFromPtr(scratch_in)) {
         // Reserve 0xC000 at the tail of scratch for nested entropy-decode
-        // workspace; split the remainder in half between dst and scratch
-        // workspace, matching C# line 380.
+        // workspace; split the remainder in half between dst and scratch.
         const remain: isize = @as(isize, @intCast(@intFromPtr(scratch_end) - @intFromPtr(scratch_in))) - 0xC000;
         if (remain <= 0) return error.OutputTooSmall;
         const half: usize = @as(usize, @intCast(remain)) >> 1;
@@ -404,7 +402,7 @@ fn decodeMultiArrayInternal(
     var total_size: usize = 0;
 
     // Fast path: no interleaved assembly, just decode `array_count` sub-blocks
-    // in order directly into `dst`. Port of C# lines 386-402.
+    // in order directly into `dst`.
     if (num_arrays_in_file == 0) {
         for (0..array_count) |i| {
             const remaining_src: []const u8 = src_ptr[0 .. @intFromPtr(src_total_end) - @intFromPtr(src_ptr)];
@@ -460,7 +458,7 @@ fn decodeMultiArrayInternal(
     src_ptr += 2;
 
     // Read the interval-index-count header using the block-size-only parser
-    // (same algorithm as highDecodeBytesInternal but destSize-only — C#
+    // (same algorithm as highDecodeBytesInternal but destSize-only —
     // `High_GetBlockSize`). We inline it here.
     const num_indexes: u32 = try readIndexCount(src_ptr, src_total_end, total_size);
     var num_lens: i32 = @as(i32, @intCast(num_indexes)) - @as(i32, @intCast(array_count));
@@ -673,9 +671,8 @@ fn decodeMultiArrayInternal(
     };
 }
 
-/// Helper: parse a block-size-only header (chunk type 0 ignored here — we
-/// just want the `dst_size` field). Port of C# `EntropyDecoder.High_GetBlockSize`
-/// at `EntropyDecoder.cs:46-127`, entropy branch only.
+/// Helper: parse a block-size-only header (chunk type 0 ignored here -- we
+/// just want the `dst_size` field). Entropy branch only.
 fn readIndexCount(src_ptr: [*]const u8, src_end: [*]const u8, dest_capacity: usize) DecodeError!u32 {
     if (@intFromPtr(src_end) - @intFromPtr(src_ptr) < 2) return error.SourceTruncated;
 
@@ -732,7 +729,7 @@ fn decodeRecursive(
     const n0: u8 = src[0] & 0x7F;
 
     // Multi-array variant (bit 7 set) — the interleaved-stream path in
-    // C#'s `High_DecodeMultiArrayInternal`. Dispatches to `decodeMultiArray`
+    // `High_DecodeMultiArrayInternal`. Dispatches to `decodeMultiArray`
     // with `array_count = 1` so the entire decoded output fills `dst_buf`.
     if ((src[0] & 0x80) != 0) {
         var arr_data: [1][*]u8 = undefined;

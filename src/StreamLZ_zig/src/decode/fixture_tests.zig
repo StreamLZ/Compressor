@@ -1,3 +1,5 @@
+//! Test-only module. Not part of the library. Requires STREAMLZ_FIXTURES_DIR env var.
+//!
 //! Phase 8: exhaustive roundtrip tests over a pre-generated fixture corpus.
 //!
 //! The fixtures live in `$STREAMLZ_FIXTURES_DIR` (by convention

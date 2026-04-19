@@ -1,5 +1,6 @@
-//! Offset encoder + delta-literal subtraction helpers. Port of
-//! src/StreamLZ/Compression/Entropy/OffsetEncoder.cs.
+//! Offset encoder + delta-literal subtraction helpers.
+//! Used by: Fast and High codecs
+//! Note: Fast encoder bypasses this module (emits raw off16/off32). High encoder uses the full pipeline.
 //!
 //! Three distinct responsibilities live here:
 //!   1. `subtractBytes{,Unsafe}` — the delta-literal subtract used by the
@@ -16,7 +17,7 @@ const std = @import("std");
 const hist_mod = @import("byte_histogram.zig");
 const entropy_enc = @import("entropy_encoder.zig");
 const cost_coeffs = @import("cost_coefficients.zig");
-const bw_mod = @import("../io/bit_writer_64.zig");
+const bw_mod = @import("../io/bit_writer.zig");
 const lz_constants = @import("../format/streamlz_constants.zig");
 
 const ByteHistogram = hist_mod.ByteHistogram;
@@ -83,10 +84,7 @@ pub fn subtractBytes(dst: [*]u8, src: [*]const u8, len: usize, neg_offset: isize
 // ────────────────────────────────────────────────────────────
 
 /// Interpolated log2 approximation used by the offset-cost model.
-/// Port of C# `OffsetEncoder.GetLog2Interpolate` (`OffsetEncoder.cs:112-132`).
-/// Matches the C# lookup table EXACTLY — this is a pure bit-level
-/// computation with no floating-point, so the Zig output must be
-/// byte-identical to C# for cost-model parity.
+/// Pure bit-level computation with no floating-point.
 pub const log2_interp_lookup = [65]u16{
     0,    183,  364,  541,  716,  889,  1059, 1227, 1392, 1555, 1716, 1874,
     2031, 2186, 2338, 2489, 2637, 2784, 2929, 3072, 3214, 3354, 3492,
@@ -105,8 +103,7 @@ pub fn getLog2Interpolate(x: u32) i32 {
     return lo + @as(i32, @intCast(interp));
 }
 
-/// Converts a histogram to per-symbol approximate cost. Port of C#
-/// `OffsetEncoder.ConvertHistoToCost` (`OffsetEncoder.cs:137-166`).
+/// Converts a histogram to per-symbol approximate cost.
 pub fn convertHistoToCost(
     src: *const ByteHistogram,
     dst: *[256]u32,
@@ -145,16 +142,13 @@ pub fn convertHistoToCost(
     }
 }
 
-/// Thin wrapper around `byte_histogram.getCostApproxCore` matching the C#
-/// `OffsetEncoder.GetHistoCostApprox` signature. The Zig `getCostApproxCore`
-/// takes a slice; here we accept a pointer + array size for ergonomic
-/// parity with the C# overload used by `GetCostModularOffsets`.
+/// Thin wrapper around `byte_histogram.getCostApproxCore`.
 pub fn getHistoCostApprox(histo: []const u32, histo_sum: i32) u32 {
     return hist_mod.getCostApproxCore(histo, histo_sum);
 }
 
 inline fn bitsUp(bits: u32) f32 {
-    // Port of C# `BitsUp` (`CompressUtils`): fixed-point shift to bytes.
+    // Fixed-point shift to bytes.
     // bits fixed-point is 1/8192 of a bit; divide by 8 and round up.
     return @as(f32, @floatFromInt((bits + 7) >> 3));
 }
@@ -163,7 +157,7 @@ inline fn bitsUp(bits: u32) f32 {
 //  Cost estimate for a given offset-modulo encoding divisor
 // ────────────────────────────────────────────────────────────
 
-/// Port of C# `OffsetEncoder.GetCostModularOffsets` (`OffsetEncoder.cs:216-253`).
+///
 /// Computes the approximate bit cost of encoding the offset stream with
 /// the given `offs_encode_type` divisor (1 = no-modulo / legacy).
 pub fn getCostModularOffsets(
@@ -210,7 +204,6 @@ pub fn getCostModularOffsets(
 //  Pick the best modulo divisor
 // ────────────────────────────────────────────────────────────
 
-/// Port of C# `OffsetEncoder.GetBestOffsetEncodingFast` (`OffsetEncoder.cs:263-302`).
 /// Tracks the four most common small offsets and tries each one as the
 /// modulo divisor. Returns the best-scoring divisor (1 = no modulo).
 pub fn getBestOffsetEncodingFast(
@@ -219,7 +212,7 @@ pub fn getBestOffsetEncodingFast(
     speed_tradeoff: f32,
 ) u32 {
     // Initialize array with i in low byte so the sort-descending tiebreak
-    // picks the smallest divisor when counts are equal — matches C#.
+    // picks the smallest divisor when counts are equal.
     var arr: [129]u32 = undefined;
     for (0..129) |i| arr[i] = @intCast(i);
 
@@ -230,7 +223,7 @@ pub fn getBestOffsetEncodingFast(
         }
     }
 
-    // Sort descending: C# `arr.Sort((a, b) => b.CompareTo(a))`.
+    // Sort descending.
     std.sort.pdq(u32, &arr, {}, struct {
         fn lessThan(_: void, a: u32, b: u32) bool {
             return a > b;
@@ -254,7 +247,6 @@ pub fn getBestOffsetEncodingFast(
     return best;
 }
 
-/// Port of C# `OffsetEncoder.GetBestOffsetEncodingSlow` (`OffsetEncoder.cs:307-329`).
 /// Exhaustively tries every divisor in 1..128 and picks the cheapest.
 pub fn getBestOffsetEncodingSlow(
     u32_offs: [*]const u32,
@@ -297,7 +289,7 @@ const high_offset_cost_adjust: u32 = high_offset_marker - 16;
 const offset_bias_constant: u32 = lz_constants.offset_bias_constant;
 const low_offset_encoding_limit: u32 = lz_constants.low_offset_encoding_limit;
 
-/// Port of C# `OffsetEncoder.EncodeNewOffsets` (`OffsetEncoder.cs:339-381`).
+///
 /// Splits each 32-bit offset into `hi = off / divisor` + `lo = off % divisor`
 /// and encodes the hi-part as a variable-length byte. Writes `u8_offs_hi`
 /// and (when divisor > 1) `u8_offs_lo`; returns per-type bit-count totals.
@@ -350,7 +342,7 @@ pub fn encodeNewOffsets(
 //  Dual-ended bit-stream write (forward + backward)
 // ────────────────────────────────────────────────────────────
 
-/// Port of C# `OffsetEncoder.WriteLzOffsetBits` (`OffsetEncoder.cs:402-528`).
+///
 /// Writes the variable-length offset bit fields into a dual-ended
 /// bit-stream — forward writer at `dst`, backward writer at `dst_end` —
 /// then moves the backward portion adjacent to the forward portion.
@@ -470,7 +462,7 @@ pub const EncodeLzOffsetsResult = struct {
     cost: f32,
 };
 
-/// Port of C# `OffsetEncoder.EncodeLzOffsets` (`OffsetEncoder.cs:554-679`).
+///
 /// Chooses between legacy (type-0) and modulo-coded (type-1) offset
 /// encoding, writes the result into `dst`, and returns the byte count +
 /// chosen encoding type + cost.
@@ -603,7 +595,7 @@ pub fn encodeLzOffsets(
         const trial_bytes: usize = @intFromPtr(tmp_dst) - @intFromPtr(tmp_dst_start);
         if (trial_bytes > dst.len) return error.DestinationTooSmall;
         @memcpy(dst[0..trial_bytes], tmp_dst_start[0..trial_bytes]);
-        // Overwrite u8_offs with the new hi-stream (C# does this so callers
+        // Overwrite u8_offs with the new hi-stream (so callers
         // see the re-encoded descriptor bytes).
         @memcpy(u8_offs[0..offs_count], u8_offs_hi[0..offs_count]);
         if (histo_out) |h| h.* = histo_buf;

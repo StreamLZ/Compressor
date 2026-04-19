@@ -1,9 +1,9 @@
 //! High optimal parser (L5+): DP-based minimum-cost parse over the
 //! full source block, emitting a sequence of (literal-run, match)
 //! tokens that minimizes total bit cost.
+//! Used by: High codec (L6-L11)
 //!
-//! Port of src/StreamLZ/Compression/High/OptimalParser.cs. The parser
-//! operates in three phases per chunk:
+//! The parser operates in three phases per chunk:
 //!
 //!   1. Collect statistics — a greedy pass over the match table to
 //!      seed a baseline `Stats` histogram set.
@@ -58,7 +58,7 @@ pub const OptimalParserOptions = struct {
 
 /// Try to improve `states[state_idx]` with a new path. `is_recent`
 /// selects between "recent-offset slot" and "raw offset" semantics.
-/// Port of C# `UpdateState` (`OptimalParser.cs:99-146`).
+///
 inline fn updateState(
     state_idx: usize,
     bits: i32,
@@ -106,8 +106,7 @@ inline fn updateState(
     return true;
 }
 
-/// Update the stateWidth-wide band (multi-state DP). Port of C#
-/// `UpdateStatesZ` (`OptimalParser.cs:151-164`).
+/// Update the stateWidth-wide band (multi-state DP).
 fn updateStatesZ(
     pos: usize,
     bits_in: i32,
@@ -150,8 +149,7 @@ fn updateStatesZ(
 /// Greedy-pass statistics collector. Walks the match table with the
 /// same lazy-eval logic as `High.FastParser.CompressFast` and emits
 /// tokens to a writer; the resulting `Stats` block seeds the optimal
-/// parser's initial cost model. Port of C# `CollectStatistics`
-/// (`OptimalParser.cs:13-92`).
+/// parser's initial cost model.
 fn collectStatistics(
     ctx: *const HighEncoderContext,
     stats: *Stats,
@@ -236,7 +234,7 @@ fn collectStatistics(
         }
 
         // "Avoid recent0 immediately after a match when recent0 == recent1"
-        // dedupe rule matching C# OptimalParser.cs:73-76.
+        // dedupe rule.
         if (pos - last_pos == 0 and m0.offset == 0 and recent.offs[4] == recent.offs[5]) {
             m0.offset = -1;
         }
@@ -258,7 +256,7 @@ fn collectStatistics(
 
     high_encoder.addFinalLiterals(&writer, source + last_pos, source + src_len_usize, true);
 
-    // C# clones the LzCoder to clear `AllowMultiArray` + cap level at 4
+    // Clone the context to clear `AllowMultiArray` + cap level at 4
     // for the statistics encode. In Zig we just pass a temporary context.
     var reduced_ctx = ctx.*;
     reduced_ctx.compression_level = @min(ctx.compression_level, 4);
@@ -279,8 +277,7 @@ fn collectStatistics(
 }
 
 /// Optimal parser entry point. Performs the 3-phase DP + backward
-/// extraction + outer-loop rematch for L8+. Port of C# `Optimal`
-/// (`OptimalParser.cs:174-932`).
+/// extraction + outer-loop rematch for L8+.
 ///
 /// Returns the compressed byte count on success, or `error.BailOut`
 /// when the parser couldn't improve on raw (the caller should emit
@@ -304,11 +301,10 @@ pub fn optimal(
     const state_width: usize = if (ctx.compression_level >= 8) 2 else 1;
     const max_literal_run_trials: i32 = if (ctx.compression_level >= 6) 8 else 4;
 
-    var dict_size: u32 = if (opts.dictionary_size != 0 and opts.dictionary_size <= lz_constants.max_dictionary_size)
+    const dict_size: u32 = if (opts.dictionary_size != 0 and opts.dictionary_size <= lz_constants.max_dictionary_size)
         opts.dictionary_size
     else
         lz_constants.max_dictionary_size;
-    _ = &dict_size;
 
     const sc = opts.self_contained;
     const sc_pos_in_chunk: i32 = start_pos;
@@ -321,7 +317,7 @@ pub fn optimal(
     const window_base: [*]const u8 = source;
 
     // Match table — extracted from MLS when provided, otherwise zero-filled.
-    // C# keeps a single reusable `laoManaged` buffer; we allocate fresh.
+    // Allocate a fresh `laoManaged` buffer.
     const match_table = try ctx.allocator.alloc(LengthAndOffset, @intCast(4 * src_size));
     defer ctx.allocator.free(match_table);
     @memset(match_table, .{ .length = 0, .offset = 0 });
@@ -377,7 +373,7 @@ pub fn optimal(
     }
     const lit_indexes: ?[*]i32 = if (lit_indexes_buf) |b| b.ptr else null;
 
-    // Scratch for the trial encode buffer (C# uses `tmpDst` = stateBuf).
+    // Scratch for the trial encode buffer.
     // Allocate a separate scratch big enough for a bail-out fallback.
     const tmp_dst_size: usize = @intCast(src_size + 1024);
     const tmp_dst_buf = try ctx.allocator.alloc(u8, tmp_dst_size);
@@ -474,7 +470,7 @@ pub fn optimal(
 
     var outer_loop_index_mut: u32 = 0;
     // Cross-block stats carry: if the caller plumbed a `HighCrossBlockState`,
-    // read the previous block's stats as a seed for `rescaleAddStats`. C#
+    // read the previous block's stats as a seed for `rescaleAddStats`.
     // stores these in `lzcoder.SymbolStatisticsScratch` + `lzcoder.LastChunkType`;
     // without plumbing this, multi-block streams diverge byte-exact parity.
     var prev_stats: ?Stats = null;
@@ -637,7 +633,7 @@ pub fn optimal(
 
                 var lao_index: usize = 0;
                 while (lao_index < 4) : (lao_index += 1) {
-                    // Matches C# `(uint)matchTable[i].Length` / `(uint)matchTable[i].Offset`:
+                    //
                     // bit reinterpretation, not a range-checked cast. The varlen extractor
                     // may have written a garbage value into the offset slot immediately after
                     // a length=0 terminator; the break below catches that case safely.
@@ -1079,7 +1075,7 @@ pub fn optimal(
 
         // Outer loop: for L8+, when the chosen chunk type disagrees with
         // the cost model's expected chunk type, re-run once with fresh
-        // stats (last_chunk_type = -1). Otherwise break. Matches C#
+        // stats (last_chunk_type = -1). Otherwise break. Matches
         // `if (lzcoder.CompressionLevel < 8 || outerLoopIndex != 0 ||
         //     costModel.ChunkType == tmpChunkType) { save stats; break; }`.
         if (ctx.compression_level < 8 or outer_loop_index_mut != 0 or cost_model.chunk_type == tmp_ct) {

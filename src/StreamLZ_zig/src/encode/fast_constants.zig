@@ -1,4 +1,5 @@
-//! Port of src/StreamLZ/Compression/Fast/FastToken.cs FastConstants class.
+//! Fast encoder constants and helpers.
+//! Used by: Fast codec (L1-L5)
 //! Shared constants and small helpers for the Fast encoder.
 
 const std = @import("std");
@@ -58,14 +59,14 @@ pub const chunk_header_compressed_flag: u32 = lz_constants.chunk_header_compress
 // ────────────────────────────────────────────────────────────
 
 /// Description of an internal (engine) compression level after user-level
-/// remapping. See C# Fast.Compressor.MapLevel.
+///
 pub const InternalLevel = struct {
     engine_level: i32,
     use_entropy_coding: bool,
 };
 
 /// Maps a user-facing compression level to the internal engine parameters
-/// consumed by the parser/encoder. Matches C# `Slz.MapLevel` composed with
+/// consumed by the parser/encoder. Matches `Slz.MapLevel` composed with
 /// `Fast.Compressor.MapLevel`:
 ///
 ///   user 1 → Fast 1 → engine -2 (greedy, ushort hash, raw)
@@ -74,7 +75,7 @@ pub const InternalLevel = struct {
 ///   user 4 → Fast 5 → engine  2 (greedy-rehash + entropy)   ← skips Fast 4
 ///   user 5 → Fast 6 → engine  4 (lazy chain + lazy-2 + entropy)
 ///
-/// C# intentionally skips Fast 4 (lazy MatchHasher2x) because its ratio is
+/// Intentionally skips Fast 4 (lazy MatchHasher2x) because its ratio is
 /// worse than greedy-rehash on most data.
 pub fn mapLevel(user_level: u8) InternalLevel {
     return switch (user_level) {
@@ -83,7 +84,7 @@ pub fn mapLevel(user_level: u8) InternalLevel {
         3 => .{ .engine_level = 1, .use_entropy_coding = true },
         4 => .{ .engine_level = 2, .use_entropy_coding = true },
         5 => .{ .engine_level = 4, .use_entropy_coding = true },
-        // Levels >=6 are routed through the High codec in C#; Phase 9 doesn't handle them.
+        // Levels >=6 are routed through the High codec; Phase 9 doesn't handle them.
         else => .{ .engine_level = 4, .use_entropy_coding = true },
     };
 }
@@ -93,7 +94,7 @@ pub fn mapLevel(user_level: u8) InternalLevel {
 // ────────────────────────────────────────────────────────────
 
 /// Builds the minimum-match-length table indexed by `31 - log2(offset)`.
-/// Direct port of Matcher.BuildMinimumMatchLengthTable (C#).
+/// Builds the minimum match length table.
 ///
 ///   indexes  0..9   offsets > 4 MB   → 32 bytes (effectively disabled)
 ///   indexes 10..11  offsets 1-4 MB   → 2*long_offset_threshold - 6
@@ -130,9 +131,8 @@ pub inline fn literalRunSlotCount(value: u32) u32 {
 //  Adaptive hash-bit sizing (EntropyEncoder.GetHashBits port)
 // ────────────────────────────────────────────────────────────
 
-/// Direct port of C# `EntropyEncoder.GetHashBits` (Entropy/EntropyEncoder.cs
-/// line 222-232). The Fast compressor's `SetupEncoder` calls THIS function
-/// (not the one in `StreamLzCompressor.cs`):
+/// Computes hash table bits from source length and level. The Fast
+/// compressor's `SetupEncoder` calls this function:
 ///
 ///   if (copts.HashBits > 0) return copts.HashBits;
 ///   bits = Log2((uint)max(srcLen, 1)) + 1;
@@ -165,7 +165,7 @@ pub fn getHashBits(
 
 const testing = std.testing;
 
-test "mapLevel matches C# Slz.MapLevel composed with Fast.Compressor.MapLevel" {
+test "mapLevel matches Slz.MapLevel composed with Fast.Compressor.MapLevel" {
     try testing.expectEqual(@as(i32, -2), mapLevel(1).engine_level);
     try testing.expect(!mapLevel(1).use_entropy_coding);
     try testing.expectEqual(@as(i32, -1), mapLevel(2).engine_level);

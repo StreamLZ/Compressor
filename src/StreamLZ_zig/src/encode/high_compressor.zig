@@ -1,5 +1,5 @@
-//! High LZ compressor public entry points. Port of
-//! src/StreamLZ/Compression/High/Compressor.cs.
+//! High LZ compressor public entry points.
+//! Used by: High codec (L6-L11)
 //!
 //! The High codec dispatches by compression level:
 //!   L1-L2  → greedy fast parser
@@ -23,7 +23,7 @@ const std = @import("std");
 const lz_constants = @import("../format/streamlz_constants.zig");
 const high_types = @import("high_types.zig");
 const high_encoder = @import("high_encoder.zig");
-const high_fast_parser = @import("high_fast_parser.zig");
+const high_fast_parser = @import("high_greedy_parser.zig");
 const high_optimal_parser = @import("high_optimal_parser.zig");
 const match_hasher = @import("match_hasher.zig");
 const mls_mod = @import("managed_match_len_storage.zig");
@@ -32,7 +32,7 @@ const cost_coeffs = @import("cost_coefficients.zig");
 
 pub const EncodeFlags = enum(u32) {
     none = 0,
-    /// C# `encodeFlags = 4`: the optimal parser signals that the
+    /// `encodeFlags = 4`: the optimal parser signals that the
     /// caller wants the exported token array. Set for L5+.
     export_tokens = 4,
 };
@@ -51,13 +51,13 @@ pub const HasherType = enum {
     none,
 };
 
-/// Level-table entry matching C# `Compressor.SetupEncoder`'s internal
-/// lookup (`Compressor.cs:90-108`). Indexed by `level + 3`, so index 0
+/// Level-table entry for `SetupEncoder`'s internal
+/// lookup. Indexed by `level + 3`, so index 0
 /// is level -3 and index 7 is level 4. Levels ≥ 5 use a different
 /// hasher path (Optimal creates its own).
 pub const LevelEntry = struct {
     /// Maximum hash bits when `copts.HashBits <= 0`. `null` = no cap
-    /// (C# uses `int.MaxValue` sentinel).
+    ///
     max_hash: ?u32,
     /// Entropy-option bits to CLEAR from the default 0xFF mask.
     entropy_mask: u32,
@@ -85,8 +85,7 @@ pub const level_table: [8]LevelEntry = .{
     .{ .max_hash = null, .entropy_mask = tans_multi_adv, .hasher_type = .hasher4_dual },
 };
 
-/// Entropy option masks precomputed from the combinations C# lists
-/// at `Compressor.cs:84-86`.
+/// Entropy option masks precomputed from the per-level combinations.
 const tans_multi_rle: u32 = 0b1011010; // AllowTANS | AllowMultiArray | AllowRLE
 const tans_multi: u32 = 0b0010010; // AllowTANS | AllowMultiArray
 const tans_multi_adv: u32 = 0b1000010; // AllowTANS | AllowMultiArrayAdvanced
@@ -108,10 +107,9 @@ pub const HighSetup = struct {
     min_match_length: u32,
 };
 
-/// C# `StreamLZConstants.ScratchSize` and `ChunkSize` constants.
+/// Sub-chunk size constant.
 pub const sub_chunk_size: usize = 0x20000;
 
-/// Port of C# `High.Compressor.SetupEncoder` (`Compressor.cs:51-135`).
 /// Computes the level-dependent encoder parameters but DOES NOT
 /// allocate the hasher — the caller creates the hasher based on
 /// `setup.hasher_type` / `hash_bits` / `min_match_length`.
@@ -122,11 +120,11 @@ pub fn setupEncoder(
     space_speed_tradeoff_bytes: i32,
     min_match_length: u32,
 ) HighSetup {
-    // C# EntropyEncoder.GetHashBits(srcLen, max(level, 2), copts, 16, 20, 17, 24).
+    // GetHashBits(srcLen, max(level, 2), 16, 20, 17, 24).
     const raw_bits = computeHashBits(source_length, @max(level, 2), 16, 20, 17, 24);
     var hash_bits: u32 = if (hash_bits_in > 0) hash_bits_in else raw_bits;
 
-    // C# line 62: SpeedTradeoff = bytes * Factor1 * Factor2
+    // SpeedTradeoff = bytes * Factor1 * Factor2
     const speed_tradeoff: f32 =
         @as(f32, @floatFromInt(space_speed_tradeoff_bytes)) *
         cost_coeffs.speed_tradeoff_factor_1 *
@@ -168,7 +166,7 @@ pub fn setupEncoder(
     };
 }
 
-/// C# `CodecType`.
+/// Codec type identifiers.
 pub const CodecId = enum(u32) {
     high = 0,
     fast = 1,
@@ -177,8 +175,8 @@ pub const CodecId = enum(u32) {
 
 const tans_multi_adv_bit: u32 = 0b1000000; // bit 6 in the entropy option mask
 
-/// Port of C# `EntropyEncoder.GetHashBits` (`EntropyEncoder.cs:222-232`).
-/// Uses the `log2 + 1` version that the Fast codec also consumes.
+/// Computes hash table bits from source length and level.
+/// Uses the `log2 + 1` formula that the Fast codec also consumes.
 fn computeHashBits(
     src_len: usize,
     level: i32,
@@ -253,7 +251,7 @@ pub fn allocateHighHasher(
     };
 }
 
-/// Per-level lazy-step count, matching C# `High.Compressor.DoCompress`.
+/// Per-level lazy-step count.
 fn numLazyFor(level: i32) u32 {
     return switch (level) {
         1, 2 => 0,
@@ -263,8 +261,7 @@ fn numLazyFor(level: i32) u32 {
     };
 }
 
-/// Main High compression entry point. Port of C#
-/// `High.Compressor.DoCompress` (`Compressor.cs:21-46`).
+/// Main High compression entry point.
 ///
 /// `mls` may be `null` for levels ≤ 4 (Fast parser uses the hasher);
 /// levels ≥ 5 expect a pre-populated `ManagedMatchLenStorage`.

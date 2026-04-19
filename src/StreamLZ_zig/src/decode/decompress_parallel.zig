@@ -1,21 +1,19 @@
-//! Parallel decompression helpers for phase 13.
+//! Parallel decompression helpers.
 //!
-//! Port of `StreamLzDecoder.DecompressCoreParallel` + `PreScanChunks`
-//! from `src/StreamLZ/Decompression/StreamLzDecoder.cs`. This module
-//! provides the SC (self-contained) parallel decode path used by
-//! unified levels L6-L8. The two-phase path for L9-L11 lives in
-//! step 36 (see `decompressCoreTwoPhase`).
+//! Provides the SC (self-contained) parallel decode path used by unified
+//! levels L6-L8. The two-phase path for L9-L11 lives in
+//! `decompressCoreTwoPhase`.
 //!
-//! SC semantics refresher: self-contained blocks chunk the output into
+//! SC semantics: self-contained blocks chunk the output into
 //! `sc_group_size`-sized groups (4 chunks = 1 MB). Within a group,
 //! chunks may LZ-reference earlier chunks in the same group (so they
 //! must be decoded serially). Between groups, no back-references are
 //! allowed, so groups can run in parallel. After the main decode,
-//! the encoder's tail prefix table restores the first 8 bytes of
-//! every chunk except the first chunk in each group (actually every
-//! chunk except chunk 0, but within a group the earlier chunks have
-//! already written correct bytes — the tail prefix is a belt-and-
-//! suspenders mechanism matching the C# wire format).
+//! the tail prefix table restores the first 8 bytes of every chunk
+//! except the first chunk in each group (actually every chunk except
+//! chunk 0, but within a group the earlier chunks have already written
+//! correct bytes — the tail prefix is a belt-and-suspenders mechanism
+//! matching the wire format).
 
 const std = @import("std");
 const block_header = @import("../format/block_header.zig");
@@ -23,7 +21,7 @@ const constants = @import("../format/streamlz_constants.zig");
 const pdm = @import("../format/parallel_decode_metadata.zig");
 const fast = @import("fast_lz_decoder.zig");
 const high = @import("high_lz_decoder.zig");
-const high_runs = @import("high_lz_process_runs.zig");
+const high_runs = @import("high_lz_token_executor.zig");
 
 pub const DecodeError = error{
     Truncated,
@@ -68,8 +66,7 @@ pub const PreScanResult = struct {
 };
 
 /// Walks a compressed frame block and produces a list of chunk
-/// boundaries. Mirrors C# `PreScanChunks` at `StreamLzDecoder.cs:587`.
-/// Accepts the full frame-block payload *including* the tail prefix
+/// boundaries. Accepts the full frame-block payload *including* the tail prefix
 /// table (when SC); callers that need prefix-excluded byte ranges can
 /// read `prefix_size` from the result.
 pub fn preScanBlock(
@@ -92,18 +89,18 @@ pub fn preScanBlock(
             break;
         }
         const chunk_src_start = src_pos;
-        const bh = block_header.parseBlockHeader(block_src[src_pos..]) catch return error.InvalidInternalHeader;
+        const block_hdr= block_header.parseBlockHeader(block_src[src_pos..]) catch return error.InvalidInternalHeader;
         src_pos += block_header.BlockHeader.size;
 
-        const is_high = bh.decoder_type == .high or bh.decoder_type == .fast;
+        const is_high = block_hdr.decoder_type == .high or block_hdr.decoder_type == .fast;
         const chunk_cap: usize = if (is_high) constants.chunk_size else 0x4000;
         const dst_bytes: usize = @min(chunk_cap, dst_rem);
 
-        if (bh.uncompressed) {
+        if (block_hdr.uncompressed) {
             if (src_pos + dst_bytes > block_src.len) return error.Truncated;
             src_pos += dst_bytes;
         } else {
-            const ch = block_header.parseChunkHeader(block_src[src_pos..], bh.use_checksums) catch return error.BadChunkHeader;
+            const ch = block_header.parseChunkHeader(block_src[src_pos..], block_hdr.use_checksums) catch return error.BadChunkHeader;
             src_pos += ch.bytes_consumed;
             if (ch.is_memset) {
                 // No payload — chunk is 4-byte header only.
@@ -118,7 +115,7 @@ pub fn preScanBlock(
             .src_size = src_pos - chunk_src_start,
             .dst_offset = dst_off,
             .dst_size = dst_bytes,
-            .decoder_type = bh.decoder_type,
+            .decoder_type = block_hdr.decoder_type,
         });
 
         dst_off += dst_bytes;
@@ -221,11 +218,11 @@ fn decodeOneChunk(
     scratch: []u8,
 ) DecodeError!void {
     if (src.len < block_header.BlockHeader.size) return error.Truncated;
-    const bh = block_header.parseBlockHeader(src) catch return error.InvalidInternalHeader;
+    const block_hdr= block_header.parseBlockHeader(src) catch return error.InvalidInternalHeader;
     var src_pos: usize = block_header.BlockHeader.size;
 
     // Uncompressed chunk: raw memcpy.
-    if (bh.uncompressed) {
+    if (block_hdr.uncompressed) {
         if (src_pos + dst_size > src.len) return error.Truncated;
         if (dst_off + dst_size > dst.len) return error.OutputTooSmall;
         @memcpy(dst[dst_off..][0..dst_size], src[src_pos..][0..dst_size]);
@@ -233,7 +230,7 @@ fn decodeOneChunk(
     }
 
     // 4-byte chunk header + payload.
-    const ch = block_header.parseChunkHeader(src[src_pos..], bh.use_checksums) catch return error.BadChunkHeader;
+    const ch = block_header.parseChunkHeader(src[src_pos..], block_hdr.use_checksums) catch return error.BadChunkHeader;
     src_pos += ch.bytes_consumed;
 
     if (ch.is_memset) {
@@ -262,7 +259,7 @@ fn decodeOneChunk(
     const scratch_ptr: [*]u8 = scratch.ptr;
     const scratch_end_ptr: [*]u8 = scratch.ptr + scratch.len;
 
-    switch (bh.decoder_type) {
+    switch (block_hdr.decoder_type) {
         .fast, .turbo => {
             const n = try fast.decodeChunk(
                 dst_ptr,
@@ -293,7 +290,6 @@ fn decodeOneChunk(
 }
 
 /// Decompress a self-contained compressed frame block in parallel.
-/// Mirrors C# `DecompressCoreParallel` at `StreamLzDecoder.cs:689`.
 ///
 /// Splits the block's chunks into `sc_group_size`-sized groups and
 /// dispatches one thread per active group via work-stealing. Each
@@ -433,12 +429,10 @@ pub fn decompressCoreParallel(
 //  Two-phase parallel decode (L9-L11, non-SC High)
 // ────────────────────────────────────────────────────────────
 //
-// Port of C# `StreamLzDecoder.DecompressCoreTwoPhase` + `TwoPhase
-// ParallelDecode` + `TwoPhaseSerialResolve` at `StreamLzDecoder.cs:
-// 780-1000`. The idea: the High codec's decoding time is dominated
-// by entropy decode (`readLzTable`), not match resolve (`process
-// LzRuns`). We parallelize the expensive phase and keep the
-// sequentially-dependent phase serial.
+// The High codec's decoding time is dominated by entropy decode
+// (`readLzTable`), not match resolve (`processLzRuns`). We
+// parallelize the expensive phase and keep the sequentially-
+// dependent phase serial.
 //
 // Per batch of `batch_size` chunks:
 //   Phase 2 (parallel): `phase1ProcessChunk` runs entropy decode on
@@ -509,13 +503,13 @@ fn tpPhase1OneChunk(
 
     const src = block_src[q.src_offset .. q.src_offset + q.src_size];
     if (src.len < block_header.BlockHeader.size) return error.Truncated;
-    const bh = block_header.parseBlockHeader(src) catch return error.InvalidInternalHeader;
+    const block_hdr= block_header.parseBlockHeader(src) catch return error.InvalidInternalHeader;
     var src_pos: usize = block_header.BlockHeader.size;
 
     const chunk_dst_off = dst_start_off + q.dst_offset;
 
     // Uncompressed chunk: raw memcpy. Nothing for phase 2 to do.
-    if (bh.uncompressed) {
+    if (block_hdr.uncompressed) {
         if (src_pos + q.dst_size > src.len) return error.Truncated;
         if (chunk_dst_off + q.dst_size > dst.len) return error.OutputTooSmall;
         @memcpy(dst[chunk_dst_off..][0..q.dst_size], src[src_pos..][0..q.dst_size]);
@@ -525,7 +519,7 @@ fn tpPhase1OneChunk(
     }
 
     // 4-byte chunk header + payload.
-    const ch = block_header.parseChunkHeader(src[src_pos..], bh.use_checksums) catch return error.BadChunkHeader;
+    const ch = block_header.parseChunkHeader(src[src_pos..], block_hdr.use_checksums) catch return error.BadChunkHeader;
     src_pos += ch.bytes_consumed;
 
     if (ch.is_memset) {
@@ -559,7 +553,7 @@ fn tpPhase1OneChunk(
 
     // Normal compressed chunk — dispatch to `phase1ProcessChunk` which
     // walks the 1 or 2 sub-chunks and runs `readLzTable` on each.
-    switch (bh.decoder_type) {
+    switch (block_hdr.decoder_type) {
         .high => {
             const dst_ptr: [*]u8 = dst[chunk_dst_off..].ptr;
             const dst_end_ptr: [*]u8 = dst_ptr + q.dst_size;
@@ -583,8 +577,7 @@ fn tpPhase1OneChunk(
 }
 
 /// Decompress a non-SC High compressed frame block via parallel
-/// entropy-decode + serial match-resolve. Mirrors C# `DecompressCore
-/// TwoPhase` at `StreamLzDecoder.cs:935`. All chunks in the block
+/// entropy-decode + serial match-resolve. All chunks in the block
 /// must be High-decoder; if any is Fast/Turbo the caller falls
 /// back to the serial path.
 pub fn decompressCoreTwoPhase(

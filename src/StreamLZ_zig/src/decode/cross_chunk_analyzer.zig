@@ -260,28 +260,10 @@ fn partitionFastSubChunk(
     producer_map: []u32,
     file_capacity: u64,
     tokens: *std.ArrayList(TokenInfo),
-    overcopy_leaves: *std.ArrayList(u64),
 ) !void {
     _ = mode;
     var dst_off: usize = start_off;
     var recent_offs: i64 = saved_dist.*;
-
-    // Track the maximum dst position any token in this block actually
-    // writes to. The Fast decoder uses vectorised `copy64` / `copy16`
-    // patterns that write more bytes than the token's logical length
-    // (for performance), advancing dst only by the logical length.
-    // Within a block, subsequent tokens overwrite the overshoot
-    // harmlessly. But at block boundaries — especially the outer
-    // chunk boundary where parallel workers split the work — that
-    // overshoot can corrupt the next chunk's output if the next
-    // chunk's worker has already written there.
-    //
-    // We track `max_write_end` so that, at the end of the block, we
-    // can emit guard leaves for any bytes in [dst_size, max_write_end)
-    // that phase 1 will populate from the reference buffer. Phase 1
-    // re-run after phase 2 workers complete then restores any
-    // overshoot-corrupted bytes to their correct values.
-    var max_write_end: usize = start_off;
 
     var cmd_stream = lz.cmd_start;
     const cmd_stream_end = lz.cmd_end;
@@ -306,12 +288,6 @@ fn partitionFastSubChunk(
                     if (p < file_capacity) byte_earliest[@intCast(p)] = @intCast(p);
                 }
             }
-            // Short-token write extent: the literal copy writes 8
-            // bytes at dst_off (dst then advances by lit_len), then
-            // the match copy writes 16 bytes at dst_off + lit_len.
-            // The match copy dominates since lit_len <= 7.
-            const short_write_end = dst_off + literal_length + 16;
-            if (short_write_end > max_write_end) max_write_end = short_write_end;
             dst_off += literal_length;
 
             if (use_new_dist) {
@@ -328,10 +304,6 @@ fn partitionFastSubChunk(
             off32_stream += 1;
             const dist_match: i64 = -(@as(i64, @intCast(dst_off)) + @as(i64, @intCast(far)));
             try partitionCollectMatch(allocator, byte_earliest, producer_map, chunk_start_abs, file_pos_base + dst_off, dist_match, length, file_capacity, tokens);
-            // Medium match write extent: decoder does two copy16 calls
-            // = 32 bytes starting at dst_off.
-            const mm_write_end = dst_off + 32;
-            if (mm_write_end > max_write_end) max_write_end = mm_write_end;
             dst_off += length;
             // Match the real decoder: recent_offs = match_ptr - dst, which
             // equals dist_match (the computed negative distance). Earlier
@@ -353,10 +325,6 @@ fn partitionFastSubChunk(
                 const p = base_pos + i;
                 if (p < file_capacity) byte_earliest[@intCast(p)] = @intCast(p);
             }
-            // Long literal run decoder loop does ceil(length/16) * 16
-            // bytes of copy16 writes before the overshoot correction.
-            const llr_write_end = dst_off + ((length + 15) / 16) * 16;
-            if (llr_write_end > max_write_end) max_write_end = llr_write_end;
             dst_off += length;
         } else if (cmd == 1) {
             var length: usize = length_stream[0];
@@ -371,11 +339,6 @@ fn partitionFastSubChunk(
             off16_stream += 1;
             recent_offs = -@as(i64, off16);
             try partitionCollectMatch(allocator, byte_earliest, producer_map, chunk_start_abs, file_pos_base + dst_off, recent_offs, length, file_capacity, tokens);
-            // Long match (cmd==1) decoder uses `while (remaining > 0)
-            // { copy64; copy64; d += 16; remaining -= 16; }`, writing
-            // ceil(length/16) * 16 bytes before dst advances by length.
-            const lm1_write_end = dst_off + ((length + 15) / 16) * 16;
-            if (lm1_write_end > max_write_end) max_write_end = lm1_write_end;
             dst_off += length;
         } else {
             var length: usize = length_stream[0];
@@ -390,10 +353,6 @@ fn partitionFastSubChunk(
             off32_stream += 1;
             const dist_match: i64 = -(@as(i64, @intCast(dst_off)) + @as(i64, @intCast(far)));
             try partitionCollectMatch(allocator, byte_earliest, producer_map, chunk_start_abs, file_pos_base + dst_off, dist_match, length, file_capacity, tokens);
-            // Long match (cmd==2) decoder same pattern: ceil(length/16) * 16
-            // bytes via a copy16 loop.
-            const lm2_write_end = dst_off + ((length + 15) / 16) * 16;
-            if (lm2_write_end > max_write_end) max_write_end = lm2_write_end;
             dst_off += length;
             // Match the real decoder: recent_offs = match_ptr - dst, which
             // equals dist_match.
@@ -413,21 +372,6 @@ fn partitionFastSubChunk(
         var p = trailing_start;
         while (p < trailing_end) : (p += 1) {
             if (p < file_capacity) byte_earliest[@intCast(p)] = @intCast(p);
-        }
-    }
-
-    // If the block's write operations extended past dst_size, emit
-    // guard positions for [dst_size, max_write_end). Phase 1 will
-    // populate them from the reference buffer so that a post-phase-2
-    // re-run can restore any overcopy corruption.
-    if (max_write_end > dst_size) {
-        const overcopy: usize = max_write_end - dst_size;
-        var d: usize = 0;
-        while (d < overcopy) : (d += 1) {
-            const p: u64 = file_pos_base + dst_size + d;
-            if (p < file_capacity) {
-                try overcopy_leaves.append(allocator, p);
-            }
         }
     }
 
@@ -451,7 +395,6 @@ fn partitionFastChunkPayload(
     producer_map: []u32,
     file_capacity: u64,
     tokens: *std.ArrayList(TokenInfo),
-    overcopy_leaves: *std.ArrayList(u64),
 ) !void {
     var src_pos: usize = 0;
     var dst_remaining: usize = chunk_dst_size;
@@ -564,9 +507,9 @@ fn partitionFastChunkPayload(
             }
 
             if (mode == 0) {
-                try partitionFastSubChunk(.delta, allocator, lz_ptr, dst_size_cur, &saved_dist, s_off, sub_chunk_file_pos, chunk_start_abs, byte_earliest, producer_map, file_capacity, tokens, overcopy_leaves);
+                try partitionFastSubChunk(.delta, allocator, lz_ptr, dst_size_cur, &saved_dist, s_off, sub_chunk_file_pos, chunk_start_abs, byte_earliest, producer_map, file_capacity, tokens);
             } else {
-                try partitionFastSubChunk(.raw, allocator, lz_ptr, dst_size_cur, &saved_dist, s_off, sub_chunk_file_pos, chunk_start_abs, byte_earliest, producer_map, file_capacity, tokens, overcopy_leaves);
+                try partitionFastSubChunk(.raw, allocator, lz_ptr, dst_size_cur, &saved_dist, s_off, sub_chunk_file_pos, chunk_start_abs, byte_earliest, producer_map, file_capacity, tokens);
             }
             dst_size_left -= dst_size_cur;
             if (dst_size_left == 0) break;
@@ -587,7 +530,6 @@ fn partitionFastBlock(
     producer_map: []u32,
     file_capacity: u64,
     tokens: *std.ArrayList(TokenInfo),
-    overcopy_leaves: *std.ArrayList(u64),
 ) !void {
     const max_chunk: usize = 0x20000;
     const scratch_bytes: usize = constants.scratch_size;
@@ -685,7 +627,6 @@ fn partitionFastBlock(
             producer_map,
             file_capacity,
             tokens,
-            overcopy_leaves,
         );
         src_pos += comp_size;
         dst_remaining -= dst_this_chunk;
@@ -746,43 +687,35 @@ pub fn analyzeFilePartition(
     var tokens: std.ArrayList(TokenInfo) = .{};
     defer tokens.deinit(allocator);
 
-    // Overcopy leaves. The walker appends positions past each block's
-    // intended dst_size that the Fast decoder's vectorised copies can
-    // overshoot into. `analyzeFilePartition` doesn't use these for
-    // its partition stats, but the walker signature requires the
-    // ArrayList; we let it grow and deinit it at function exit.
-    var overcopy_leaves: std.ArrayList(u64) = .{};
-    defer overcopy_leaves.deinit(allocator);
-
     var file_pos_running: u64 = 0;
     var src_pos: usize = hdr.header_size;
     while (src_pos < src.len) {
         if (src_pos + 4 > src.len) break;
         const first_word = std.mem.readInt(u32, src[src_pos..][0..4], .little);
         if (first_word == frame.end_mark) break;
-        const bh = try frame.parseBlockHeader(src[src_pos..]);
-        if (bh.isEndMark()) break;
+        const block_hdr= try frame.parseBlockHeader(src[src_pos..]);
+        if (block_hdr.isEndMark()) break;
         src_pos += 8;
         // v2: sidecar blocks carry no decompressable data — skip them.
-        if (bh.parallel_decode_metadata) {
-            src_pos += bh.compressed_size;
+        if (block_hdr.parallel_decode_metadata) {
+            src_pos += block_hdr.compressed_size;
             continue;
         }
-        if (bh.uncompressed) {
+        if (block_hdr.uncompressed) {
             const base_pos: u64 = file_pos_running;
             var i: u64 = 0;
-            while (i < bh.decompressed_size) : (i += 1) {
+            while (i < block_hdr.decompressed_size) : (i += 1) {
                 const p = base_pos + i;
                 if (p < total_decomp) byte_earliest[@intCast(p)] = @intCast(p);
             }
-            src_pos += bh.compressed_size;
-            file_pos_running += bh.decompressed_size;
+            src_pos += block_hdr.compressed_size;
+            file_pos_running += block_hdr.decompressed_size;
             continue;
         }
-        const block_payload = src[src_pos..][0..bh.compressed_size];
-        try partitionFastBlock(allocator, block_payload, bh.decompressed_size, file_pos_running, byte_earliest, producer_map, total_decomp, &tokens, &overcopy_leaves);
-        src_pos += bh.compressed_size;
-        file_pos_running += bh.decompressed_size;
+        const block_payload = src[src_pos..][0..block_hdr.compressed_size];
+        try partitionFastBlock(allocator, block_payload, block_hdr.decompressed_size, file_pos_running, byte_earliest, producer_map, total_decomp, &tokens);
+        src_pos += block_hdr.compressed_size;
+        file_pos_running += block_hdr.decompressed_size;
     }
 
     // Pick X = target_start of the median token in stream order.
@@ -1024,31 +957,69 @@ fn computeTransitiveDepth(
     chunk_size: u64,
     total_decomp_: usize,
 ) u8 {
-    if (cross_depth[pos] != 255) return cross_depth[pos];
-    const prod = producer_map_[pos];
-    if (prod == std.math.maxInt(u32)) {
-        cross_depth[pos] = 0;
-        return 0;
+    _ = chunk_size;
+
+    // Fixed-size stack for iterative chain traversal. Each entry records
+    // the position we need a depth for, plus the token index and whether
+    // the link is cross-chunk (needed to compute the depth on unwind).
+    const max_stack = 256;
+    var stack_pos: [max_stack]usize = undefined;
+    var stack_prod: [max_stack]u32 = undefined;
+    var stack_cross: [max_stack]bool = undefined;
+    var depth: usize = 0;
+
+    // --- Phase 1: walk the chain, pushing entries until we hit a base case ---
+    var cur = pos;
+    while (true) {
+        if (cross_depth[cur] != 255) break; // memoized — start unwind
+
+        const prod = producer_map_[cur];
+        if (prod == std.math.maxInt(u32)) {
+            cross_depth[cur] = 0;
+            break;
+        }
+        const t = tokens_items[prod];
+        if (t.src_start < 0 or t.length == 0) {
+            cross_depth[cur] = 0;
+            break;
+        }
+        const offset_in_match: u64 = cur - @as(usize, @intCast(t.target_start));
+        const src_pos_i: i64 = t.src_start + @as(i64, @intCast(offset_in_match));
+        if (src_pos_i < 0 or @as(u64, @intCast(src_pos_i)) >= total_decomp_) {
+            cross_depth[cur] = 0;
+            break;
+        }
+
+        // Chain exceeds the u8 depth cap — assign 254 to everything remaining.
+        if (depth >= max_stack) {
+            cross_depth[cur] = 254;
+            break;
+        }
+
+        const is_cross = t.src_start < @as(i64, @intCast(t.chunk_start));
+        stack_pos[depth] = cur;
+        stack_prod[depth] = prod;
+        stack_cross[depth] = is_cross;
+        depth += 1;
+
+        // Mark visited (prevents cycles, same as the recursive version).
+        cross_depth[cur] = 0;
+        cur = @intCast(src_pos_i);
     }
-    const t = tokens_items[prod];
-    if (t.src_start < 0 or t.length == 0) {
-        cross_depth[pos] = 0;
-        return 0;
+
+    // --- Phase 2: unwind the stack, computing depths back to the start ---
+    // `cur` now points at a position whose cross_depth is already set.
+    var base_d: u8 = cross_depth[cur];
+    while (depth > 0) {
+        depth -= 1;
+        const p = stack_pos[depth];
+        const is_cross = stack_cross[depth];
+        const d: u8 = if (is_cross) (if (base_d < 254) base_d + 1 else 254) else base_d;
+        cross_depth[p] = d;
+        base_d = d;
     }
-    const offset_in_match: u64 = pos - @as(usize, @intCast(t.target_start));
-    const src_pos_i: i64 = t.src_start + @as(i64, @intCast(offset_in_match));
-    if (src_pos_i < 0 or @as(u64, @intCast(src_pos_i)) >= total_decomp_) {
-        cross_depth[pos] = 0;
-        return 0;
-    }
-    const src_pos: usize = @intCast(src_pos_i);
-    // Prevent infinite recursion for self-referential matches.
-    cross_depth[pos] = 0;
-    const src_d = computeTransitiveDepth(src_pos, cross_depth, producer_map_, tokens_items, chunk_size, total_decomp_);
-    const is_cross_chunk = t.src_start < @as(i64, @intCast(t.chunk_start));
-    const d: u8 = if (is_cross_chunk) (if (src_d < 254) src_d + 1 else 254) else src_d;
-    cross_depth[pos] = d;
-    return d;
+
+    return cross_depth[pos];
 }
 
 fn buildPpocSidecarInner(
@@ -1081,39 +1052,30 @@ fn buildPpocSidecarInner(
     var tokens: std.ArrayList(TokenInfo) = .{};
     defer tokens.deinit(allocator);
 
-    // Overcopy leaves. Each entry is a byte position past some block's
-    // intended dst_size that the Fast decoder's `copy64`/`copy16`
-    // patterns can touch during phase 2. Drained into the sidecar's
-    // literal_bytes after the closure BFS so phase 1's post-phase-2
-    // re-run can restore those positions to reference values if a
-    // neighbouring worker's overshoot stomped them.
-    var overcopy_leaves: std.ArrayList(u64) = .{};
-    defer overcopy_leaves.deinit(allocator);
-
     var file_pos_running: u64 = 0;
     var src_pos: usize = hdr.header_size;
     while (src_pos < src.len) {
         if (src_pos + 4 > src.len) break;
         const first_word = std.mem.readInt(u32, src[src_pos..][0..4], .little);
         if (first_word == frame.end_mark) break;
-        const bh = try frame.parseBlockHeader(src[src_pos..]);
-        if (bh.isEndMark()) break;
+        const block_hdr= try frame.parseBlockHeader(src[src_pos..]);
+        if (block_hdr.isEndMark()) break;
         src_pos += 8;
         // v2: parallel-decode-metadata blocks carry no decompressable
         // bytes — skip them when walking the frame for sidecar building.
-        if (bh.parallel_decode_metadata) {
-            src_pos += bh.compressed_size;
+        if (block_hdr.parallel_decode_metadata) {
+            src_pos += block_hdr.compressed_size;
             continue;
         }
-        if (bh.uncompressed) {
-            src_pos += bh.compressed_size;
-            file_pos_running += bh.decompressed_size;
+        if (block_hdr.uncompressed) {
+            src_pos += block_hdr.compressed_size;
+            file_pos_running += block_hdr.decompressed_size;
             continue;
         }
-        const block_payload = src[src_pos..][0..bh.compressed_size];
-        try partitionFastBlock(allocator, block_payload, bh.decompressed_size, file_pos_running, byte_earliest, producer_map, total_decomp, &tokens, &overcopy_leaves);
-        src_pos += bh.compressed_size;
-        file_pos_running += bh.decompressed_size;
+        const block_payload = src[src_pos..][0..block_hdr.compressed_size];
+        try partitionFastBlock(allocator, block_payload, block_hdr.decompressed_size, file_pos_running, byte_earliest, producer_map, total_decomp, &tokens);
+        src_pos += block_hdr.compressed_size;
+        file_pos_running += block_hdr.decompressed_size;
     }
 
     // Two-pass parallel decode sidecar: only store literal bytes at
@@ -1181,8 +1143,8 @@ fn buildPpocSidecarInner(
         while (p_stat < total_decomp) : (p_stat += 1) {
             if (cross_depth[@intCast(p_stat)] > max_depth) max_depth = cross_depth[@intCast(p_stat)];
         }
-        std.debug.print("[CLOSURE-STATS] depth2+_lits={d} max_cross_depth={d} overcopy_leaves={d}\n", .{
-            sidecar.literal_bytes.items.len, max_depth, sidecar.literal_bytes.items.len,
+        std.debug.print("[CLOSURE-STATS] depth2+_lits={d} max_cross_depth={d}\n", .{
+            sidecar.literal_bytes.items.len, max_depth,
         });
     }
 
@@ -1611,19 +1573,19 @@ pub fn parseOnlyWalkFile(allocator: std.mem.Allocator, src: []const u8) !u64 {
         if (src_pos + 4 > src.len) break;
         const first_word = std.mem.readInt(u32, src[src_pos..][0..4], .little);
         if (first_word == frame.end_mark) break;
-        const bh = try frame.parseBlockHeader(src[src_pos..]);
-        if (bh.isEndMark()) break;
+        const block_hdr= try frame.parseBlockHeader(src[src_pos..]);
+        if (block_hdr.isEndMark()) break;
         src_pos += 8;
-        if (bh.uncompressed) {
-            byte_count += bh.decompressed_size;
-            src_pos += bh.compressed_size;
-            file_pos_running += bh.decompressed_size;
+        if (block_hdr.uncompressed) {
+            byte_count += block_hdr.decompressed_size;
+            src_pos += block_hdr.compressed_size;
+            file_pos_running += block_hdr.decompressed_size;
             continue;
         }
-        const block_payload = src[src_pos..][0..bh.compressed_size];
-        try parseOnlyFastBlock(allocator, block_payload, bh.decompressed_size, file_pos_running, &byte_count);
-        src_pos += bh.compressed_size;
-        file_pos_running += bh.decompressed_size;
+        const block_payload = src[src_pos..][0..block_hdr.compressed_size];
+        try parseOnlyFastBlock(allocator, block_payload, block_hdr.decompressed_size, file_pos_running, &byte_count);
+        src_pos += block_hdr.compressed_size;
+        file_pos_running += block_hdr.decompressed_size;
     }
     return byte_count;
 }
@@ -2244,20 +2206,20 @@ pub fn analyzeFileLevel0(allocator: std.mem.Allocator, src: []const u8) !Level0S
             src_pos += 4;
             break;
         }
-        const bh = try frame.parseBlockHeader(src[src_pos..]);
-        if (bh.isEndMark()) break;
+        const block_hdr= try frame.parseBlockHeader(src[src_pos..]);
+        if (block_hdr.isEndMark()) break;
         src_pos += 8;
 
-        if (bh.uncompressed) {
-            src_pos += bh.compressed_size;
-            file_pos_running += bh.decompressed_size;
+        if (block_hdr.uncompressed) {
+            src_pos += block_hdr.compressed_size;
+            file_pos_running += block_hdr.decompressed_size;
             continue;
         }
 
-        const block_payload = src[src_pos..][0..bh.compressed_size];
-        try level0Block(allocator, block_payload, bh.decompressed_size, file_pos_running, is_high, bitmap, total_decomp, &stats);
-        src_pos += bh.compressed_size;
-        file_pos_running += bh.decompressed_size;
+        const block_payload = src[src_pos..][0..block_hdr.compressed_size];
+        try level0Block(allocator, block_payload, block_hdr.decompressed_size, file_pos_running, is_high, bitmap, total_decomp, &stats);
+        src_pos += block_hdr.compressed_size;
+        file_pos_running += block_hdr.decompressed_size;
     }
 
     return stats;
@@ -3161,33 +3123,33 @@ pub fn analyzeFile(allocator: std.mem.Allocator, src: []const u8) !FileStats {
             break;
         }
 
-        const bh = try frame.parseBlockHeader(src[src_pos..]);
-        if (bh.isEndMark()) break;
+        const block_hdr= try frame.parseBlockHeader(src[src_pos..]);
+        if (block_hdr.isEndMark()) break;
         src_pos += 8;
 
-        if (bh.uncompressed) {
+        if (block_hdr.uncompressed) {
             try stats.sub_chunks.append(allocator, .{
-                .total_bytes = bh.decompressed_size,
-                .clean_bytes = bh.decompressed_size,
+                .total_bytes = block_hdr.decompressed_size,
+                .clean_bytes = block_hdr.decompressed_size,
                 .first_cross_chunk_pos = null,
                 .token_count = 0,
                 .cross_chunk_token_count = 0,
             });
-            stats.total_bytes += bh.decompressed_size;
-            stats.total_clean += bh.decompressed_size;
-            src_pos += bh.compressed_size;
-            file_pos_running += bh.decompressed_size;
+            stats.total_bytes += block_hdr.decompressed_size;
+            stats.total_clean += block_hdr.decompressed_size;
+            src_pos += block_hdr.compressed_size;
+            file_pos_running += block_hdr.decompressed_size;
             continue;
         }
 
-        const block_payload = src[src_pos..][0..bh.compressed_size];
+        const block_payload = src[src_pos..][0..block_hdr.compressed_size];
         if (is_high) {
-            try analyzeHighBlock(allocator, block_payload, bh.decompressed_size, file_pos_running, byte_round, &stats);
+            try analyzeHighBlock(allocator, block_payload, block_hdr.decompressed_size, file_pos_running, byte_round, &stats);
         } else {
-            try analyzeFastBlock(allocator, block_payload, bh.decompressed_size, file_pos_running, byte_round, &stats);
+            try analyzeFastBlock(allocator, block_payload, block_hdr.decompressed_size, file_pos_running, byte_round, &stats);
         }
-        src_pos += bh.compressed_size;
-        file_pos_running += bh.decompressed_size;
+        src_pos += block_hdr.compressed_size;
+        file_pos_running += block_hdr.decompressed_size;
     }
 
     return stats;

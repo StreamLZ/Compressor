@@ -1,5 +1,6 @@
 //! Greedy Fast LZ parser. Direct port of `FastParser.RunGreedyParser` in
 //! src/StreamLZ/Compression/Fast/FastParser.cs.
+//! Used by: Fast codec (L1-L5)
 //!
 //! Hot-loop design:
 //!   * All pointers are `[*]u8` — no slice bounds checks.
@@ -25,6 +26,8 @@ const FastStreamWriter = writer_mod.FastStreamWriter;
 const MatchHasher2x = match_hasher.MatchHasher2x;
 const HasherHashPos = match_hasher.HasherHashPos;
 
+const trace_tokens = false;
+
 /// (length, offset) pair returned by the hash-based match finders. Offset 0
 /// means "reuse the parser's current recent offset".
 pub const LengthAndOffset = struct {
@@ -46,10 +49,10 @@ pub const LengthAndOffset = struct {
 ///
 /// `window_base` is the base pointer of the whole COMPRESS WINDOW (the
 /// pointer that hash-table-stored positions are measured from). For the
-/// C# parity behavior we use `src.ptr` — the hash table is persistent
+/// We use `src.ptr` — the hash table is persistent
 /// across sub-chunks, and stored positions are in whole-input coordinates.
 /// Cross-sub-chunk stale entries then give huge offsets that fail the
-/// sub-chunk-local bound check, matching C# `RunGreedyParser`.
+/// sub-chunk-local bound check.
 ///
 /// `min_match_length_table` has 32 entries indexed by `31 - log2(offset)`.
 pub fn runGreedyParser(
@@ -93,7 +96,7 @@ pub fn runGreedyParser(
         const hash_index: usize = @intCast((word_at_cursor *% hash_mult) >> hash_shift);
         // `stored_pos` is a position TRUNCATED to T's width (u16 or u32). The
         // offset is computed as `(cur_pos_T - stored_pos_T)` with wrap-around
-        // mod 2^width, matching C# `T.CreateTruncating(...)` semantics. For
+        // mod 2^width. For
         // T=u16 this means offsets > 65535 collapse into apparent small
         // offsets and get filtered by the byte comparison below.
         const stored_pos_t: T = hash_table[hash_index];
@@ -212,7 +215,7 @@ pub fn runGreedyParser(
             continue :outer;
         }
 
-        // Extend match backward into the literal run. C# FastParser.cs:142 bounds
+        // Extend match backward into the literal run. Bounds
         // the extension with:
         //   (sourceBlock - sourceCursor) + hasherBaseAdjustment < currentOffset
         // With hasherBaseAdjustment = SrcBaseOffset - blockBasePosition = -startPos,
@@ -235,7 +238,7 @@ pub fn runGreedyParser(
         const match_length: u32 = @intCast(@intFromPtr(match_end) - @intFromPtr(source_cursor));
         const lit_run_length: u32 = @intCast(@intFromPtr(source_cursor) - @intFromPtr(literal_start));
 
-        if (std.process.hasEnvVarConstant("SLZ_TOKEN_TRACE")) {
+        if (comptime trace_tokens) {
             const src_pos: usize = @intFromPtr(source_cursor) - @intFromPtr(source_block_base);
             std.debug.print("[tok] pos={d} lit={d} mlen={d} off={d} curOff={d}\n", .{
                 src_pos, lit_run_length, match_length, offset_or_recent, current_offset,
@@ -279,7 +282,7 @@ pub fn runGreedyParser(
 }
 
 // ────────────────────────────────────────────────────────────
-//  Lazy-parser helpers (port of Matcher.cs)
+//  Lazy-parser helpers
 // ────────────────────────────────────────────────────────────
 
 /// Count matching bytes 8-then-4 wide, starting at `p`. Port of
