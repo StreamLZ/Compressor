@@ -24,6 +24,7 @@ pub const id_text: u32 = 3;
 pub const id_xml: u32 = 4;
 pub const id_css: u32 = 5;
 pub const id_js: u32 = 6;
+pub const id_general: u32 = 7;
 
 pub const builtin_dicts: []const DictInfo = &.{
     .{
@@ -62,6 +63,12 @@ pub const builtin_dicts: []const DictInfo = &.{
         .data = @embedFile("builtin/js.dict"),
         .extensions = &.{ ".js", ".mjs", ".cjs", ".ts" },
     },
+    .{
+        .id = id_general,
+        .name = "general",
+        .data = @embedFile("builtin/general.dict"),
+        .extensions = &.{},
+    },
 };
 
 pub fn findByName(name: []const u8) ?*const DictInfo {
@@ -80,16 +87,15 @@ pub fn findById(id: u32) ?*const DictInfo {
 
 pub fn findByExtension(path: []const u8) ?*const DictInfo {
     const ext = std.fs.path.extension(path);
-    if (ext.len == 0) return null;
-    // Lowercase comparison.
+    if (ext.len == 0) return findByName("general");
     var lower_buf: [16]u8 = undefined;
-    const ext_lower = toLower(ext, &lower_buf) orelse return null;
+    const ext_lower = toLower(ext, &lower_buf) orelse return findByName("general");
     for (builtin_dicts) |*d| {
         for (d.extensions) |e| {
             if (std.mem.eql(u8, ext_lower, e)) return d;
         }
     }
-    return null;
+    return findByName("general");
 }
 
 fn toLower(s: []const u8, buf: *[16]u8) ?[]const u8 {
