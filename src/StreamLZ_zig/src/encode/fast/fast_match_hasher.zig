@@ -95,6 +95,18 @@ pub fn FastMatchHasher(comptime T: type) type {
         pub fn reset(self: *Self) void {
             @memset(self.hash_table, 0);
         }
+
+        /// Insert dictionary positions into the hash table so the first
+        /// chunk can find matches against dictionary content.
+        pub fn preloadDictionary(self: *Self, src: [*]const u8, dict_len: usize) void {
+            if (dict_len < 8) return;
+            var pos: usize = 0;
+            while (pos + 8 <= dict_len) : (pos += 1) {
+                const word = std.mem.readInt(u64, (src + pos)[0..8], .little);
+                const idx: usize = @intCast((word *% self.hash_mult) >> self.hash_shift);
+                self.hash_table[idx] = @intCast(pos + 1);
+            }
+        }
     };
 }
 

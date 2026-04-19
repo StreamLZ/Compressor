@@ -75,6 +75,22 @@ pub fn compressFramedOne(
     });
     pos += hdr_len;
 
+    // ── Dictionary preload ──────────────────────────────────────────────
+    // If a dictionary is provided, create a combined window: dict ++ src.
+    // The encoder sees dictionary bytes as prior output, enabling matches
+    // against dictionary content from the very first chunk.
+    const dict = opts.dictionary orelse &[_]u8{};
+    const dict_len = dict.len;
+    var combined_buf: ?[]u8 = null;
+    const effective_src: []const u8 = if (dict_len > 0) blk: {
+        const buf = allocator.alloc(u8, dict_len + src.len) catch return error.OutOfMemory;
+        @memcpy(buf[0..dict_len], dict);
+        @memcpy(buf[dict_len..], src);
+        combined_buf = buf;
+        break :blk buf;
+    } else src;
+    defer if (combined_buf) |buf| allocator.free(buf);
+
     // ── Resolve per-input parameters ───────────────────────────────────
     const resolved = resolveParams(src, opts);
     // Per-level engine hash-bit caps
@@ -148,8 +164,22 @@ pub fn compressFramedOne(
     if (greedy_hasher_u32) |*h| h.reset();
     if (chain_hasher) |*h| {
         h.reset();
-        h.setSrcBase(src.ptr);
+        h.setSrcBase(effective_src.ptr);
         h.setBaseWithoutPreload(0);
+    }
+
+    // Pre-fill hashers with dictionary positions so the first chunk
+    // can find matches against dictionary content.
+    if (dict_len > 0) {
+        if (greedy_hasher_u16) |*h| {
+            h.preloadDictionary(effective_src.ptr, dict_len);
+        }
+        if (greedy_hasher_u32) |*h| {
+            h.preloadDictionary(effective_src.ptr, dict_len);
+        }
+        if (chain_hasher) |*h| {
+            h.preloadDictionary(effective_src.ptr, dict_len);
+        }
     }
 
     // ── ONE frame block wraps all internal 256 KB chunks ───────────────
@@ -194,10 +224,10 @@ pub fn compressFramedOne(
     //            else backfill chunk hdr
     const check_plain_huffman: bool = resolved.use_entropy and resolved.engine_level >= 4;
 
-    var src_off: usize = 0;
-    while (can_compress and src_off < src.len) {
-        const block_src_len: usize = @min(src.len - src_off, lz_constants.chunk_size);
-        const block_src: []const u8 = src[src_off..][0..block_src_len];
+    var src_off: usize = dict_len;
+    while (can_compress and src_off < effective_src.len) {
+        const block_src_len: usize = @min(effective_src.len - src_off, lz_constants.chunk_size);
+        const block_src: []const u8 = effective_src[src_off..][0..block_src_len];
 
         // SC mode: the backward-extend bound + hasher visibility must be
         // block-local so no LZ back-reference reaches across 256 KB chunks.
@@ -212,7 +242,7 @@ pub fn compressFramedOne(
                 h.setBaseWithoutPreload(0);
             }
         }
-        const window_base_ptr: [*]const u8 = if (self_contained) block_src.ptr else src.ptr;
+        const window_base_ptr: [*]const u8 = if (self_contained) block_src.ptr else effective_src.ptr;
 
         const block_start: usize = pos;
         // For SC mode, EVERY block is a keyframe (independently decodable).

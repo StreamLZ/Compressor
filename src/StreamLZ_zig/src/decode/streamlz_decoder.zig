@@ -182,11 +182,35 @@ fn decompressOneFrame(
 
     if (hdr.content_size) |cs| {
         const needed: usize = @intCast(cs + safe_space);
-        if (dst.len < needed) return error.OutputTooSmall;
+        // Extra space for dictionary prefix (matches are resolved
+        // relative to dict + output, then the prefix is stripped).
+        const dict_registry = @import("../dict/dictionary.zig");
+        const dict_overhead: usize = if (hdr.dictionary_id) |did|
+            if (dict_registry.findById(did)) |d| d.data.len + safe_space else 0
+        else
+            0;
+        if (dst.len < needed + dict_overhead) return error.OutputTooSmall;
     }
 
     var pos: usize = hdr.header_size;
-    var dst_off: usize = 0;
+
+    // Dictionary support: if the frame has a dictionary_id, look up the
+    // built-in dictionary and pre-fill the output buffer. The dictionary
+    // bytes go at dst[0..dict_len], and actual output goes at
+    // dst[dict_len..]. LZ back-references can reach into the dictionary
+    // prefix. After decompression, the dictionary prefix is stripped.
+    const dict_mod2 = @import("../dict/dictionary.zig");
+    var dict_prefix_len: usize = 0;
+    if (hdr.dictionary_id) |dict_id| {
+        if (dict_mod2.findById(dict_id)) |d| {
+            if (d.data.len + safe_space <= dst.len) {
+                @memcpy(dst[0..d.data.len], d.data);
+                dict_prefix_len = d.data.len;
+            }
+        }
+    }
+
+    var dst_off: usize = dict_prefix_len;
     // Scratch buffer for Fast decoder tables and stream storage.
     var scratch: [constants.scratch_size]u8 = undefined;
 
@@ -334,10 +358,17 @@ fn decompressOneFrame(
         pos += block_hdr.compressed_size;
     }
 
+    const actual_output = dst_off - dict_prefix_len;
     if (hdr.content_size) |cs| {
-        if (dst_off != cs) return error.SizeMismatch;
+        if (actual_output != cs) return error.SizeMismatch;
     }
-    return .{ .src_consumed = pos, .dst_written = dst_off };
+    // Move decompressed bytes to the start of dst, stripping the
+    // dictionary prefix. This ensures the caller sees only the
+    // original content, not the dictionary bytes.
+    if (dict_prefix_len > 0 and actual_output > 0) {
+        std.mem.copyForwards(u8, dst[0..actual_output], dst[dict_prefix_len..][0..actual_output]);
+    }
+    return .{ .src_consumed = pos, .dst_written = actual_output };
 }
 
 /// Whole-chunk match copy: reads `length` bytes from `dst - offset` into

@@ -453,6 +453,11 @@ pub const MatchHasher2 = struct {
         self.src_cur_offset = 0;
     }
 
+    pub fn preloadDictionary(self: *MatchHasher2, src: [*]const u8, dict_len: usize) void {
+        if (dict_len < 8) return;
+        self.insertRange(src, dict_len - 7);
+    }
+
     pub inline fn setSrcBase(self: *MatchHasher2, base: [*]const u8) void {
         self.src_base = base;
     }
