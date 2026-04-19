@@ -1133,8 +1133,8 @@ It is not a C# port. It is a Zig codebase. It should read like one.
 |---|-------|--------|
 | [1] | 800-line god function | **SKIPPED** — single DP algorithm, splitting reduces cohesion |
 | [2] | Dead `_ = &dict_size;` suppression | **DONE** — changed `var` to `const` (it IS used, just never mutated) |
-| [3] | Per-block 16 MB `match_table` allocation | **PENDING** — correct fix is to hoist to caller or cache in cross-block state |
-| [4] | `@bitCast` on garbage lao_ml values | **PENDING** — needs `extractLaoFromMls` to zero-terminate |
+| [3] | Per-block 16 MB `match_table` allocation | **DONE** — hoisted to caller; 1 alloc per frame (serial) or per worker thread (parallel) instead of 400× cycles |
+| [4] | `@bitCast` on garbage lao_ml values | **DONE** — `extractLaoFromMls` now zeroes remaining slots after terminator. `@bitCast` kept (varlen encoding legitimately sets sign bit) but safety is in the producer. |
 
 ### bit_writer.zig / bit_writer_64.zig per-issue status
 
@@ -1182,8 +1182,8 @@ It is not a C# port. It is a Zig codebase. It should read like one.
 | 7 | Test files inside `src/` | **DONE** — added `//! Test-only module` headers. Not moved (Zig test discovery constraint). |
 | 8 | `extern struct` without FFI | **DONE** — 11 structs changed to plain `struct`. Only `MemoryStatusEx` (Windows FFI) kept as extern. |
 | 9 | `@prefetch` without measurement notes | **PENDING** — prefetch was tested and reverted for the Fast decoder (documented in FailedExperiments.md). High codec prefetch in match_hasher remains without measurement notes. |
-| 10 | Alignment casts without assertions | **PENDING** |
-| 11 | `std.testing.allocator` for 1 GB fixture reads | **PENDING** |
+| 10 | Alignment casts without assertions | **DONE** — 7 `std.debug.assert` added at setup-time `@alignCast` sites |
+| 11 | `std.testing.allocator` for 1 GB fixture reads | **DONE** — fixture tests use `page_allocator` for bulk reads, 256 MB skip threshold |
 
 ### Quick-hit per-file verdicts status
 
@@ -1192,8 +1192,8 @@ It is not a C# port. It is a Zig codebase. It should read like one.
 | `high_types.zig` | SPLIT | **SKIPPED** — types are co-dependent; splitting creates circular imports |
 | `high_compressor.zig` | OK with polish | **DONE** — `BailOut` removed from `.none` path |
 | `high_fast_parser.zig` | OK | **DONE** — renamed to `high_greedy_parser.zig` |
-| `high_encoder.zig` | SPLIT | **PENDING** |
-| `high_cost_model.zig` | OK with polish | **PENDING** |
+| `high_encoder.zig` | SPLIT | **DONE** — deduped `alignUpPtr` (imports `copy_helpers.alignPointer`), extracted `encodeLiteralStream` (~90 lines) from `assembleCompressedOutput` (240→140 lines) |
+| `high_cost_model.zig` | OK with polish | **DONE** — converted 3-level nested if-else in `updateStats` to switch + 3 extracted helpers (`updateOffsType0/1/Split`) |
 | `high_matcher.zig` | OK | No action needed |
 | `match_finder.zig` | OK | **DONE** — added "Used by" header |
 | `match_finder_bt4.zig` | OK with polish | **DONE** — added "Used by" header |
@@ -1215,17 +1215,17 @@ It is not a C# port. It is a Zig codebase. It should read like one.
 | `streamlz_decoder.zig` | SPLIT | **DONE** (partial) — added `DecompressContext` for pool lifecycle. Full split skipped. |
 | `decompress_parallel.zig` | OK with polish | **DONE** — added `max_threads` plumbing, `SLZ_CORES` env var support for all paths |
 | `fast_lz_decoder.zig` | OK with polish | No action needed |
-| `high_lz_decoder.zig` | OK with polish | **PENDING** |
+| `high_lz_decoder.zig` | OK with polish | **DONE** — alignment assertions added |
 | `high_lz_process_runs.zig` | SPLIT | **DONE** — renamed to `high_lz_token_executor.zig` |
 | `entropy_decoder.zig` | OK | No action needed |
-| `huffman_decoder.zig` | POLISH | **PENDING** |
-| `tans_decoder.zig` | OK with polish | **PENDING** |
+| `huffman_decoder.zig` | POLISH | **DONE** — extracted shared Golomb-Rice/bit-reader infrastructure to `bit_reader_lite.zig` (1021→689 lines); section headers clarified |
+| `tans_decoder.zig` | OK with polish | **DONE** — imports `bit_reader_lite.zig` directly; no longer depends on `huffman_decoder.zig` |
 | `fixture_tests.zig` | MOVE | **DONE** — added `//! Test-only module` header |
 | `cleanness_analyzer.zig` | MOVE to tools/ | **DONE** — renamed to `cross_chunk_analyzer.zig`, stays in decode/ (production sidecar builder) |
 | `main.zig` | SPLIT | **SKIPPED** — 742 lines, 7 handlers; standard for a CLI. Adding `-t` flag was done without splitting. |
 | `build.zig` | KEEP | No action needed |
 | `bit_reader.zig` | KEEP | **DONE** — renamed to `BitReader.zig` (PascalCase type-file) |
-| `copy_helpers.zig` | POLISH | **PENDING** |
+| `copy_helpers.zig` | POLISH | **DONE** — header updated to document all 3 responsibilities (SIMD copies, PSHUFB match replication, pointer alignment). PSHUFB masks stay (only used internally by `copyMatch16Pshufb`). `alignPointer` is the canonical shared helper. |
 
 ### REORGANIZATION MANIFEST status
 
@@ -1252,3 +1252,12 @@ It is not a C# port. It is a Zig codebase. It should read like one.
 | `bh` → `block_hdr` variable rename | **DONE** |
 | File renames for clarity (`high_fast_parser` → `high_greedy_parser`, etc.) | **DONE** |
 | `error.BailOut` → `?usize` optional return | **DONE** |
+| Per-block match_table allocation hoisting | **DONE** |
+| `extractLaoFromMls` zero-termination | **DONE** |
+| Alignment debug assertions (7 sites) | **DONE** |
+| Fixture test `page_allocator` + 256 MB cap | **DONE** |
+| `huffman_decoder` → `bit_reader_lite` extraction (shared Golomb-Rice) | **DONE** |
+| `tans_decoder` decoupled from `huffman_decoder` | **DONE** |
+| `high_encoder` `alignUpPtr` dedup + `encodeLiteralStream` extraction | **DONE** |
+| `high_cost_model` `updateStats` switch refactor | **DONE** |
+| `copy_helpers` header updated, `alignPointer` is canonical | **DONE** |

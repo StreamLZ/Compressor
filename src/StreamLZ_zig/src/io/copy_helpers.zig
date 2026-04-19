@@ -1,9 +1,18 @@
-//! SIMD copy helpers via Zig `@Vector`.
+//! SIMD copy helpers, PSHUFB match-replication masks, and pointer alignment.
+//!
+//! This module is the single source of truth for low-level memory-copy
+//! primitives used by both the encoder and decoder hot paths:
+//!
+//!   * **Bulk copies** — `copy64`, `copy16`, `copy64Bytes`, `wildCopy16`.
+//!   * **Delta-coded literal copies** — `copy64Add`, `copy16Add`.
+//!   * **PSHUFB match replication** — `match_copy_pshufb_masks` and
+//!     `copyMatch16Pshufb` for short-distance LZ match copies (d <= 16).
+//!   * **Pointer alignment** — `alignPointer`.
 //!
 //! Design notes:
 //!   * `copy64Bytes` writes 64 bytes via 4× 16-byte vectors (SSE2-sized);
-//!     32-byte AVX2 loads caused frequency
-//!     throttling on Arrow Lake and 16-byte is optimal for this workload.
+//!     32-byte AVX2 loads caused frequency throttling on Arrow Lake and
+//!     16-byte is optimal for this workload.
 //!   * `wildCopy16` stays on two u64 halves per iteration, sequenced
 //!     load-store-load-store so that small-offset LZ match overlaps
 //!     propagate correctly. A wider vector load here would break the

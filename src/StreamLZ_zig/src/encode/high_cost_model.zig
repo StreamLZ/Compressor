@@ -62,6 +62,48 @@ pub fn rescaleAddStats(s: *Stats, t: *const Stats, chunk_type_same: bool) void {
     }
 }
 
+/// Type-0 offset histogram update: split low/high threshold encoding.
+fn updateOffsType0(histo: *ByteHistogram, offset: u32, increment: u32) void {
+    if (offset >= lz_constants.high_offset_threshold) {
+        const low_limit: u32 = @intCast(lz_constants.low_offset_encoding_limit);
+        const log_part: u32 = std.math.log2_int(u32, offset - low_limit);
+        const high_marker: u32 = @intCast(lz_constants.high_offset_marker);
+        const tv: u32 = log_part | high_marker;
+        histo.count[tv] += increment;
+    } else {
+        const bias: u32 = @intCast(lz_constants.offset_bias_constant);
+        const top_bits: u32 = std.math.log2_int(u32, offset + bias) - 9;
+        const tv: u32 = ((offset - 8) & 0xF) + 16 * top_bits;
+        histo.count[tv] += increment;
+    }
+}
+
+/// Type-1 offset histogram update: log-bucketed encoding.
+fn updateOffsType1(histo: *ByteHistogram, offset: u32, increment: u32) void {
+    const shifted: u32 = offset + 8;
+    const tv: u32 = std.math.log2_int(u32, shifted) - 3;
+    const u: u32 = 8 * tv | ((shifted >> @intCast(tv)) ^ 8);
+    histo.count[u] += increment;
+}
+
+/// Type-N (N >= 2) offset histogram update: split high/low with divisor.
+fn updateOffsTypeSplit(
+    histo: *ByteHistogram,
+    lo_histo: *ByteHistogram,
+    offset: u32,
+    offs_encode_type: i32,
+    increment: u32,
+) void {
+    const divisor: u32 = @intCast(offs_encode_type);
+    const offset_high: u32 = offset / divisor;
+    const offset_low: u32 = offset % divisor;
+    const shifted_h: u32 = offset_high + 8;
+    const tv: u32 = std.math.log2_int(u32, shifted_h) - 3;
+    const u: u32 = 8 * tv | ((shifted_h >> @intCast(tv)) ^ 8);
+    histo.count[u] += increment;
+    lo_histo.count[offset_low] += increment;
+}
+
 /// Increments histogram counts for each symbol a token sequence would
 /// encode.
 pub fn updateStats(
@@ -112,33 +154,10 @@ pub fn updateStats(
         } else {
             recent_field = 3;
             const offset: u32 = @intCast(offset_i32);
-            if (h.offs_encode_type == 0) {
-                if (offset >= lz_constants.high_offset_threshold) {
-                    const low_limit: u32 = @intCast(lz_constants.low_offset_encoding_limit);
-                    const log_part: u32 = std.math.log2_int(u32, offset - low_limit);
-                    const high_marker: u32 = @intCast(lz_constants.high_offset_marker);
-                    const tv: u32 = log_part | high_marker;
-                    h.offs_histo.count[tv] += increment;
-                } else {
-                    const bias: u32 = @intCast(lz_constants.offset_bias_constant);
-                    const top_bits: u32 = std.math.log2_int(u32, offset + bias) - 9;
-                    const tv: u32 = ((offset - 8) & 0xF) + 16 * top_bits;
-                    h.offs_histo.count[tv] += increment;
-                }
-            } else if (h.offs_encode_type == 1) {
-                const shifted: u32 = offset + 8;
-                const tv: u32 = std.math.log2_int(u32, shifted) - 3;
-                const u: u32 = 8 * tv | ((shifted >> @intCast(tv)) ^ 8);
-                h.offs_histo.count[u] += increment;
-            } else {
-                const divisor: u32 = @intCast(h.offs_encode_type);
-                const offset_high: u32 = offset / divisor;
-                const offset_low: u32 = offset % divisor;
-                const shifted_h: u32 = offset_high + 8;
-                const tv: u32 = std.math.log2_int(u32, shifted_h) - 3;
-                const u: u32 = 8 * tv | ((shifted_h >> @intCast(tv)) ^ 8);
-                h.offs_histo.count[u] += increment;
-                h.offs_lo_histo.count[offset_low] += increment;
+            switch (h.offs_encode_type) {
+                0 => updateOffsType0(&h.offs_histo, offset, increment),
+                1 => updateOffsType1(&h.offs_histo, offset, increment),
+                else => updateOffsTypeSplit(&h.offs_histo, &h.offs_lo_histo, offset, h.offs_encode_type, increment),
             }
         }
 

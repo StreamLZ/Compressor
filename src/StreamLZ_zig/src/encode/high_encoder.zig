@@ -15,6 +15,7 @@ const entropy_enc = @import("entropy_encoder.zig");
 const offset_enc = @import("offset_encoder.zig");
 const cost_coeffs = @import("cost_coefficients.zig");
 const high_types = @import("high_types.zig");
+const copy = @import("../io/copy_helpers.zig");
 const ptr_math = @import("../io/ptr_math.zig");
 
 const ByteHistogram = hist_mod.ByteHistogram;
@@ -119,7 +120,7 @@ pub fn initializeStreamWriter(
 
     // 4-byte align for the u32 streams — required because
     // `HighStreamWriter` stores them as `[*]u32` (default align=4).
-    p = alignUpPtr(p, 4);
+    p = copy.alignPointer(p, 4);
     const far_offsets_ptr: [*]u32 = @ptrCast(@alignCast(p));
     writer.far_offsets_start = far_offsets_ptr;
     writer.far_offsets = far_offsets_ptr;
@@ -129,7 +130,7 @@ pub fn initializeStreamWriter(
     writer.literal_run_lengths = p;
     p += run_length8_capacity;
 
-    p = alignUpPtr(p, 4);
+    p = copy.alignPointer(p, 4);
     const overflow_lengths_ptr: [*]u32 = @ptrCast(@alignCast(p));
     writer.overflow_lengths_start = overflow_lengths_ptr;
     writer.overflow_lengths = overflow_lengths_ptr;
@@ -138,11 +139,6 @@ pub fn initializeStreamWriter(
     writer.encode_flags = encode_flags;
 }
 
-inline fn alignUpPtr(p: [*]u8, comptime alignment: usize) [*]u8 {
-    const addr: usize = @intFromPtr(p);
-    const aligned: usize = (addr + (alignment - 1)) & ~@as(usize, alignment - 1);
-    return @ptrFromInt(aligned);
-}
 
 // ────────────────────────────────────────────────────────────
 //  Per-token stream writers
@@ -343,6 +339,120 @@ pub fn addFinalLiterals(
 //  Top-level AssembleCompressedOutput
 // ────────────────────────────────────────────────────────────
 
+/// Result from literal stream encoding: bytes written + cost + chunk type.
+const LiteralEncodeResult = struct {
+    bytes_written: usize,
+    cost: f32,
+    chunk_type: i32,
+};
+
+/// Encodes the literal sub-stream, choosing between raw and delta-coded
+/// literals based on estimated entropy cost. Returns the encoded size
+/// and cost, or `null` on bail-out (caller treats as uncompressed).
+fn encodeLiteralStream(
+    ctx: *const HighEncoderContext,
+    writer: *const HighStreamWriter,
+    stats: ?*Stats,
+    dst: [*]u8,
+    dst_end: [*]u8,
+) !?LiteralEncodeResult {
+    const num_lits: usize = @intFromPtr(writer.literals) - @intFromPtr(writer.literals_start);
+    const memcpy_cost: f32 = @floatFromInt(num_lits + 3);
+    const level = ctx.compression_level;
+
+    if (num_lits < 32 or level <= -4) {
+        const dst_remaining: usize = @intFromPtr(dst_end) - @intFromPtr(dst);
+        const dst_slice: []u8 = dst[0..dst_remaining];
+        const src_slice: []const u8 = writer.literals_start[0..num_lits];
+        const n = entropy_enc.encodeArrayU8Memcpy(dst_slice, src_slice) catch return null;
+        return .{ .bytes_written = n, .cost = memcpy_cost, .chunk_type = 1 };
+    }
+
+    var lits_histo: ByteHistogram = .{};
+    lits_histo.countBytes(writer.literals_start[0..num_lits]);
+
+    const has_litsub: bool = @intFromPtr(writer.delta_literals) != @intFromPtr(writer.delta_literals_start);
+    var litsub_histo: ByteHistogram = .{};
+    if (has_litsub) {
+        litsub_histo.countBytes(writer.delta_literals_start[0..num_lits]);
+    }
+
+    if (stats) |s| {
+        s.lit_raw = lits_histo;
+        if (has_litsub) s.lit_sub = litsub_histo;
+    }
+
+    var lit_n: isize = -1;
+    var lit_cost: f32 = std.math.inf(f32);
+    var chunk_type: i32 = 1;
+    var skip_normal_lit: bool = false;
+
+    if (has_litsub) {
+        const litsub_extra_cost: f32 = @as(f32, @floatFromInt(num_lits)) *
+            cost_coeffs.high_lit_sub_extra_cost_per_lit *
+            ctx.speed_tradeoff;
+
+        const lits_approx_f: f32 = @floatFromInt(offset_enc.getHistoCostApprox(&lits_histo.count, @intCast(num_lits)));
+        const litsub_approx_f: f32 = @floatFromInt(offset_enc.getHistoCostApprox(&litsub_histo.count, @intCast(num_lits)));
+        const skip_litsub: bool = level < 6 and
+            lits_approx_f * cost_coeffs.cost_to_bits_factor <=
+            litsub_approx_f * cost_coeffs.cost_to_bits_factor + litsub_extra_cost;
+
+        if (!skip_litsub) {
+            var litsub_cost: f32 = std.math.inf(f32);
+            const dst_remaining: usize = @intFromPtr(dst_end) - @intFromPtr(dst);
+            const dst_slice: []u8 = dst[0..dst_remaining];
+            const src_slice: []const u8 = writer.delta_literals_start[0..num_lits];
+            const n = entropy_enc.encodeArrayU8WithHisto(
+                ctx.allocator,
+                dst_slice,
+                src_slice,
+                litsub_histo,
+                ctx.entropy_options,
+                ctx.speed_tradeoff,
+                &litsub_cost,
+                @intCast(@max(level, 0)),
+            ) catch return null;
+            litsub_cost += litsub_extra_cost;
+            if (n > 0 and n < num_lits and litsub_cost <= memcpy_cost) {
+                lit_cost = litsub_cost;
+                lit_n = @intCast(n);
+                chunk_type = 0;
+                if (level < 6) skip_normal_lit = true;
+            }
+        }
+    }
+
+    if (!skip_normal_lit) {
+        var raw_cost: f32 = std.math.inf(f32);
+        const dst_remaining: usize = @intFromPtr(dst_end) - @intFromPtr(dst);
+        const dst_slice: []u8 = dst[0..dst_remaining];
+        const src_slice: []const u8 = writer.literals_start[0..num_lits];
+        const n = entropy_enc.encodeArrayU8WithHisto(
+            ctx.allocator,
+            dst_slice,
+            src_slice,
+            lits_histo,
+            ctx.entropy_options,
+            ctx.speed_tradeoff,
+            &raw_cost,
+            @intCast(@max(level, 0)),
+        ) catch return null;
+        if (n > 0) {
+            lit_n = @intCast(n);
+            lit_cost = raw_cost;
+            chunk_type = 1;
+        }
+    }
+
+    if (lit_n < 0) return null;
+    return .{
+        .bytes_written = @intCast(lit_n),
+        .cost = lit_cost,
+        .chunk_type = chunk_type,
+    };
+}
+
 /// Entropy-encodes the 5 sub-streams and concatenates them into the
 /// final compressed output. Decides between raw (chunk type 1) and
 /// delta-coded (chunk type 0) literals based on estimated entropy
@@ -381,97 +491,12 @@ pub fn assembleCompressedOutput(
     const flag_ignore_u32_length: bool = false; // always 0 here.
     std.debug.assert((ctx.encode_flags & 1) == 0);
 
-    const num_lits: usize = @intFromPtr(writer.literals) - @intFromPtr(writer.literals_start);
-    var lit_cost: f32 = std.math.inf(f32);
-    const memcpy_cost: f32 = @floatFromInt(num_lits + 3);
-
-    if (num_lits < 32 or level <= -4) {
-        chunk_type_out.* = 1;
-        const dst_remaining: usize = @intFromPtr(dst_end) - @intFromPtr(dst);
-        const dst_slice: []u8 = dst[0..dst_remaining];
-        const src_slice: []const u8 = writer.literals_start[0..num_lits];
-        const n = entropy_enc.encodeArrayU8Memcpy(dst_slice, src_slice) catch return source_length;
-        dst += n;
-        lit_cost = memcpy_cost;
-    } else {
-        var lits_histo: ByteHistogram = .{};
-        lits_histo.countBytes(writer.literals_start[0..num_lits]);
-
-        const has_litsub: bool = @intFromPtr(writer.delta_literals) != @intFromPtr(writer.delta_literals_start);
-        var litsub_histo: ByteHistogram = .{};
-        if (has_litsub) {
-            litsub_histo.countBytes(writer.delta_literals_start[0..num_lits]);
-        }
-
-        if (stats) |s| {
-            s.lit_raw = lits_histo;
-            if (has_litsub) s.lit_sub = litsub_histo;
-        }
-
-        var lit_n: isize = -1;
-        var skip_normal_lit: bool = false;
-
-        if (has_litsub) {
-            const litsub_extra_cost: f32 = @as(f32, @floatFromInt(num_lits)) *
-                cost_coeffs.high_lit_sub_extra_cost_per_lit *
-                ctx.speed_tradeoff;
-
-            const lits_approx_f: f32 = @floatFromInt(offset_enc.getHistoCostApprox(&lits_histo.count, @intCast(num_lits)));
-            const litsub_approx_f: f32 = @floatFromInt(offset_enc.getHistoCostApprox(&litsub_histo.count, @intCast(num_lits)));
-            const skip_litsub: bool = level < 6 and
-                lits_approx_f * cost_coeffs.cost_to_bits_factor <=
-                litsub_approx_f * cost_coeffs.cost_to_bits_factor + litsub_extra_cost;
-
-            if (!skip_litsub) {
-                chunk_type_out.* = 0;
-                var litsub_cost: f32 = std.math.inf(f32);
-                const dst_remaining: usize = @intFromPtr(dst_end) - @intFromPtr(dst);
-                const dst_slice: []u8 = dst[0..dst_remaining];
-                const src_slice: []const u8 = writer.delta_literals_start[0..num_lits];
-                const n = entropy_enc.encodeArrayU8WithHisto(
-                    ctx.allocator,
-                    dst_slice,
-                    src_slice,
-                    litsub_histo,
-                    ctx.entropy_options,
-                    ctx.speed_tradeoff,
-                    &litsub_cost,
-                    @intCast(@max(level, 0)),
-                ) catch return source_length;
-                litsub_cost += litsub_extra_cost;
-                if (n > 0 and n < num_lits and litsub_cost <= memcpy_cost) {
-                    lit_cost = litsub_cost;
-                    lit_n = @intCast(n);
-                    if (level < 6) skip_normal_lit = true;
-                }
-            }
-        }
-
-        if (!skip_normal_lit) {
-            var raw_cost: f32 = std.math.inf(f32);
-            const dst_remaining: usize = @intFromPtr(dst_end) - @intFromPtr(dst);
-            const dst_slice: []u8 = dst[0..dst_remaining];
-            const src_slice: []const u8 = writer.literals_start[0..num_lits];
-            const n = entropy_enc.encodeArrayU8WithHisto(
-                ctx.allocator,
-                dst_slice,
-                src_slice,
-                lits_histo,
-                ctx.entropy_options,
-                ctx.speed_tradeoff,
-                &raw_cost,
-                @intCast(@max(level, 0)),
-            ) catch return source_length;
-            if (n > 0) {
-                lit_n = @intCast(n);
-                lit_cost = raw_cost;
-                chunk_type_out.* = 1;
-            }
-        }
-
-        if (lit_n < 0) return source_length;
-        dst += @as(usize, @intCast(lit_n));
-    }
+    // ── Literal stream (raw vs delta-coded selection) ──
+    const lit_result = try encodeLiteralStream(ctx, writer, stats, dst, dst_end) orelse
+        return source_length;
+    dst += lit_result.bytes_written;
+    const lit_cost: f32 = lit_result.cost;
+    chunk_type_out.* = lit_result.chunk_type;
 
     // ── Token stream ──
     var token_cost: f32 = std.math.inf(f32);

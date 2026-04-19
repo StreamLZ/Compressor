@@ -14,7 +14,7 @@
 
 const std = @import("std");
 const constants = @import("../format/streamlz_constants.zig");
-const huffman = @import("huffman_decoder.zig");
+const brl = @import("bit_reader_lite.zig");
 
 pub const DecodeError = error{
     BadTableFormat,
@@ -25,7 +25,7 @@ pub const DecodeError = error{
     DestinationTooSmall,
     StreamMismatch,
     StateOutOfRange,
-} || huffman.DecodeError;
+} || brl.DecodeError;
 
 // ────────────────────────────────────────────────────────────
 //  Data structures
@@ -74,28 +74,28 @@ pub const TansDecoderParams = struct {
 // ────────────────────────────────────────────────────────────
 
 pub fn decodeTable(
-    br: *huffman.BitReaderState,
+    br: *brl.BitReaderState,
     log_table_bits: u32,
     tans_data: *TansData,
 ) DecodeError!void {
     if (log_table_bits < 8 or log_table_bits > 12) return error.BadLogTableBits;
 
-    huffman.bitReaderRefill(br);
+    brl.bitReaderRefill(br);
 
-    if (huffman.bitReaderReadBitNoRefill(br) != 0) {
+    if (brl.bitReaderReadBitNoRefill(br) != 0) {
         // Golomb-Rice coded
-        const q_raw = huffman.bitReaderReadBitsNoRefill(br, 3);
+        const q_raw = brl.bitReaderReadBitsNoRefill(br, 3);
         const q: u5 = @intCast(q_raw);
-        const num_symbols = huffman.bitReaderReadBitsNoRefill(br, 8) + 1;
+        const num_symbols = brl.bitReaderReadBitsNoRefill(br, 8) + 1;
         if (num_symbols < 2) return error.BadTableFormat;
 
-        const fluff_init = huffman.bitReaderReadFluff(br, num_symbols);
+        const fluff_init = brl.bitReaderReadFluff(br, num_symbols);
         const total_rice_values: u32 = fluff_init + num_symbols;
         if (total_rice_values > 512) return error.BadTableFormat;
 
         var rice: [512 + 16]u8 = undefined;
 
-        var br2: huffman.BitReader2 = .{
+        var br2: brl.BitReader2 = .{
             .p = undefined,
             .p_end = br.p_end,
             .bit_pos = @intCast(@as(u32, @bitCast(@as(i32, @truncate((br.bit_pos - 24) & 7))))),
@@ -103,22 +103,22 @@ pub fn decodeTable(
         const step_back: usize = @intCast((24 - br.bit_pos + 7) >> 3);
         br2.p = br.p - step_back;
 
-        try huffman.decodeGolombRiceLengths(&rice, total_rice_values, &br2);
+        try brl.decodeGolombRiceLengths(&rice, total_rice_values, &br2);
         @memset(rice[total_rice_values..][0..16], 0);
 
         // Reset the bit reader to br2's position.
         br.bit_pos = 24;
         br.p = br2.p;
         br.bits = 0;
-        huffman.bitReaderRefill(br);
+        brl.bitReaderRefill(br);
         const br2_bp: u5 = @intCast(br2.bit_pos);
         br.bits <<= br2_bp;
         br.bit_pos += @intCast(br2.bit_pos);
 
         if ((fluff_init >> 1) >= 133) return error.BadTableFormat;
 
-        var range_buf: [133]huffman.HuffRange = undefined;
-        const num_ranges = try huffman.huffConvertToRanges(
+        var range_buf: [133]brl.HuffRange = undefined;
+        const num_ranges = try brl.huffConvertToRanges(
             &range_buf,
             num_symbols,
             fluff_init,
@@ -127,7 +127,7 @@ pub fn decodeTable(
         );
         if (num_ranges == 0) return error.BadTableFormat;
 
-        huffman.bitReaderRefill(br);
+        brl.bitReaderRefill(br);
 
         const l_val: u32 = @as(u32, 1) << @intCast(log_table_bits);
         var cur_rice_ptr: [*]const u8 = &rice;
@@ -147,7 +147,7 @@ pub fn decodeTable(
             if (num == 0 or num > 256) return error.BadTableFormat;
 
             while (true) {
-                huffman.bitReaderRefill(br);
+                brl.bitReaderRefill(br);
                 if (@intFromPtr(cur_rice_ptr) >= @intFromPtr(cur_rice_end)) return error.BadTableFormat;
                 const rice_byte: u32 = cur_rice_ptr[0];
                 cur_rice_ptr += 1;
@@ -156,7 +156,7 @@ pub fn decodeTable(
 
                 const nextra_u6: u6 = @intCast(nextra);
                 const nextra_u5: u5 = @intCast(nextra);
-                const raw = huffman.bitReaderReadBitsNoRefillZero(br, nextra_u6);
+                const raw = brl.bitReaderReadBitsNoRefillZero(br, nextra_u6);
                 var v: i32 = @as(i32, @intCast(raw)) +
                     @as(i32, @intCast(@as(u32, 1) << nextra_u5)) -
                     @as(i32, @intCast(@as(u32, 1) << q));
@@ -200,10 +200,10 @@ pub fn decodeTable(
     // ── Sparse/explicit path ──
     var seen: [256]bool = @splat(false);
     const l_val: u32 = @as(u32, 1) << @intCast(log_table_bits);
-    var count = huffman.bitReaderReadBitsNoRefill(br, 3) + 1;
+    var count = brl.bitReaderReadBitsNoRefill(br, 3) + 1;
     const bits_per_sym_u32 = std.math.log2_int(u32, log_table_bits) + 1;
     const bits_per_sym: u5 = @intCast(bits_per_sym_u32);
-    const max_delta_bits = huffman.bitReaderReadBitsNoRefill(br, bits_per_sym);
+    const max_delta_bits = brl.bitReaderReadBitsNoRefill(br, bits_per_sym);
     if (max_delta_bits == 0 or max_delta_bits > log_table_bits) return error.BadTableFormat;
 
     var a_used: u32 = 0;
@@ -212,11 +212,11 @@ pub fn decodeTable(
     var total_weights: u32 = 0;
 
     while (count != 0) : (count -= 1) {
-        huffman.bitReaderRefill(br);
-        const sym = huffman.bitReaderReadBitsNoRefill(br, 8);
+        brl.bitReaderRefill(br);
+        const sym = brl.bitReaderReadBitsNoRefill(br, 8);
         if (seen[sym]) return error.BadTableFormat;
         const delta_u5: u5 = @intCast(max_delta_bits);
-        const delta = huffman.bitReaderReadBitsNoRefill(br, delta_u5);
+        const delta = brl.bitReaderReadBitsNoRefill(br, delta_u5);
         weight += delta;
         if (weight == 0) return error.BadTableFormat;
 
@@ -231,8 +231,8 @@ pub fn decodeTable(
         total_weights += weight;
     }
 
-    huffman.bitReaderRefill(br);
-    const last_sym = huffman.bitReaderReadBitsNoRefill(br, 8);
+    brl.bitReaderRefill(br);
+    const last_sym = brl.bitReaderReadBitsNoRefill(br, 8);
     if (seen[last_sym]) return error.BadTableFormat;
 
     // Valid if totalWeights == L (exact) or L-1 (rounding).
@@ -604,18 +604,18 @@ pub fn highDecodeTans(
     const src_end_orig: [*]const u8 = src_in + src_size;
     var src_end: [*]const u8 = src_end_orig;
 
-    var br: huffman.BitReaderState = .{
+    var br: brl.BitReaderState = .{
         .p = src_in,
         .p_end = src_end,
         .bits = 0,
         .bit_pos = 24,
     };
-    huffman.bitReaderRefill(&br);
+    brl.bitReaderRefill(&br);
 
     // Reserved bit must be 0.
-    if (huffman.bitReaderReadBitNoRefill(&br) != 0) return error.BadTableFormat;
+    if (brl.bitReaderReadBitNoRefill(&br) != 0) return error.BadTableFormat;
 
-    const log_table_bits: u32 = huffman.bitReaderReadBitsNoRefill(&br, 2) + 8;
+    const log_table_bits: u32 = brl.bitReaderReadBitsNoRefill(&br, 2) + 8;
 
     var tans_data: TansData = .{};
     try decodeTable(&br, log_table_bits, &tans_data);
