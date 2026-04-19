@@ -1190,3 +1190,51 @@ data-derived stats from the start.
 **Disposition**: Reverted. The ~0.01% ratio gain doesn't justify 2x
 CPU cost on the first block. StreamLZ's greedy pre-pass already
 captures most of the benefit that zstd's two-pass provides.
+
+---
+
+## Long Distance Matching (LDM) for L11 (zstd-style) (2026-04-19)
+
+**Context**: zstd's ultra levels use a dedicated Long Distance Matching
+subsystem alongside the BT4 match finder. LDM uses a gear-hash sampled
+position table to find very long matches (≥32 bytes) across the full
+128 MB window. It's designed to catch matches that the regular match
+finder misses due to hash collisions.
+
+**Implementation**: Built a complete LDM subsystem (~200 lines):
+- Gear hash (rolling hash) samples ~1/128th of positions
+- Bucket hash table (2^18 entries, 16 entries/bucket, circular eviction)
+- 64-bit hash with 32-bit checksum for fast rejection
+- Forward + backward match extension
+- Stride-4 sub-match insertion for the DP parser
+- Merged into MLS at positions where BT4 found no matches
+
+**Results** (enwik8 100 MB, L11 with 128 MB dictionary):
+
+| Config | Size | Delta |
+|--------|------|-------|
+| Baseline (64 MB dict) | 26,903,621 | — |
+| 128 MB dict | 26,827,870 | -75,751 |
+| 128 MB dict + LDM | 26,826,268 | -77,353 |
+| **LDM contribution** | | **-1,602 bytes** |
+
+**Why so small**: LDM is designed to help hash-based match finders
+(zstd levels 1-17) that miss long-distance matches due to hash
+collisions. StreamLZ L11 uses BT4 (binary tree), which performs an
+ordered tree walk at every position and finds all matches regardless
+of distance, up to the dictionary window. BT4 already captures
+essentially everything LDM would find. The 1.6 KB gain is from
+backward match extension at gear-hash sample points, which
+occasionally extends a BT4 match by a few bytes.
+
+**Disposition**: Reverted. 1.6 KB ratio gain doesn't justify the
+~2.3 MB memory overhead and code complexity. LDM would be valuable
+if StreamLZ added a hash-based path at L9-L10 (which use
+`findMatchesHashBased`, not BT4), but for L11 (BT4) it's redundant.
+
+**What worked from the zstd investigation**:
+- **128 MB dictionary**: +0.25% ratio, committed as `211975e`
+- **Two-pass stats**: +0.01%, not worth 2x CPU (documented above)
+- **LDM**: +0.006%, redundant with BT4 (this entry)
+- **Remaining**: minMatch=3 (format change), deeper BT4 search
+  (diminishing returns at current depth)
