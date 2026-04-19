@@ -872,3 +872,162 @@ time (`text_detector.zig`) but the decoder has no access to it.
 **Verdict**: Reverted. The C# prefetch may help on .NET's less-optimized hot
 loop; the Zig decoder is tight enough that the overhead outweighs the benefit
 on mixed workloads.
+
+---
+
+## Fast decoder: unconditional PSHUFB match copy for short-token path (2026-04-19)
+
+**Context**: VTune uarch-exploration on L5 enwik8 (2000 runs, post-sidecar
+optimization at 12.2 GB/s) showed `writeInt` (from `copy64`) as the
+dominant clock consumer: 246.9B + 111.5B + 22.7B = 381B instructions,
+225.6B cycles. The short-token match copy does 2× `copy64` (= 2 loads +
+2 stores per token). `copyMatch16Pshufb` was identified in the previous
+failed experiment (branched copy16) as "option (b)" — a branchless
+PSHUFB-based approach that handles all distances without a branch.
+
+**Change**: Replace the 2× `copy64` in the short-token match path with
+a single `copyMatch16Pshufb(dst, match_ptr, distance)`. No branch on
+distance — the PSHUFB mask table handles d=1..15 via pattern replication
+and d>=16 via identity mask, all in one code path.
+
+```zig
+// Before: 2 loads + 2 stores
+copy.copy64(dst, match_ptr);
+copy.copy64(dst + 8, match_ptr + 8);
+
+// After: 1 load + 1 PSHUFB + 1 store + 1 table load
+const distance: usize = @intCast(-recent_offs);
+copy.copyMatch16Pshufb(dst, match_ptr, distance);
+```
+
+**Results** (100 runs, enwik8):
+
+| Level | Metric | Baseline | PSHUFB | Change |
+|-------|--------|----------|--------|--------|
+| L3 | best | 38,492 MB/s | 38,764 MB/s | +0.7% (noise) |
+| L3 | mean | 33,203 MB/s | 32,486 MB/s | −2.2% |
+| L5 | best | 12,932 MB/s | 12,776 MB/s | −1.2% |
+| L5 | mean | 11,879 MB/s | 11,841 MB/s | −0.3% |
+
+**Why it didn't help**: The PSHUFB approach saves 1 store µop per token
+but adds: (1) a `neg` + `intCast` to compute distance from `recent_offs`,
+(2) a `min` + `intCast` to clamp the mask index, (3) a table load from
+`match_copy_pshufb_masks[idx]`, and (4) the PSHUFB instruction itself
+(1 cycle latency, port 5). On Arrow Lake, the store port isn't the
+bottleneck — the retirement width (6 µops/cycle) and OoO scheduling
+already overlap the 2 stores with surrounding work. The extra ALU +
+table-load µops offset the store-port savings exactly.
+
+**Disposition**: Reverted. The 2× `copy64` short-token match copy is at
+its optimization floor for the current wire format. The only path to
+fewer stores would be an encoder guarantee that all offsets >= 16,
+eliminating the overlap concern entirely (format change).
+
+---
+
+## Parallel worker output-region prefetch (2026-04-19)
+
+**Context**: Same VTune session. `fastL14WorkerFn` showed CPI = 2.15
+with 131.8B memory-bound slots and 99.2B L1D_PENDING.LOAD. Hypothesis:
+workers stall on page faults and TLB misses when first touching their
+output region in dst.
+
+**Change 1 — Page-level write prefetch**: Before the sidecar scatter
+and decode loop, walk the worker's output region in 4KB strides issuing
+`@prefetch(.write, .locality=1)` to trigger demand-zero page faults
+early.
+
+**Result**: L5 best 12,768 MB/s (baseline 12,932) — slight regression.
+L3 neutral.
+
+**Why**: In a warm benchmark loop (100+ iterations), pages are already
+mapped and cache-hot from the prior iteration. The prefetch loop adds
+~25 instructions per worker per call for zero benefit. In a cold
+single-shot scenario the prefetch might help, but benchmarks can't
+measure that.
+
+**Change 2 — Sidecar scatter prefetch**: Prefetch the next sidecar
+literal's dst position while writing the current one, hiding the
+read-for-ownership latency on scattered writes.
+
+**Result**: L5 best 12,864 MB/s (baseline 12,932) — noise.
+
+**Why**: Sidecar literal positions are sorted ascending, so sequential
+access is already hardware-prefetcher friendly. The explicit prefetch
+adds 1 µop per literal for zero benefit.
+
+**Root cause of high CPI**: The 2.15 CPI in `fastL14WorkerFn` is
+inherent to the parallel architecture — read-for-ownership traffic on
+dst cache lines during sidecar scatter, and cross-worker false sharing
+at chunk boundaries (the 64-byte guard save/restore). These are
+fundamental costs of parallel decode, not fixable without a wire format
+change.
+
+**Disposition**: Both reverted. The parallel worker overhead is at its
+floor for the current architecture.
+
+---
+
+## writeInt microarchitecture analysis (2026-04-19)
+
+**Context**: After all optimization attempts, `writeInt` (mem.zig:1940,
+inlined from `copy64` in copy_helpers.zig) remains the dominant hotspot
+at 383.4B instructions / 226.6B cycles (CPI 0.59). This analysis
+explains WHY it dominates and why further optimization is infeasible.
+
+**VTune source-line breakdown** (uarch-exploration, L5 enwik8, 2000 runs):
+
+| Counter | Value | Meaning |
+|---------|-------|---------|
+| L1 hit loads | 178.1B | 79.8% of loads hit L1 |
+| L1 miss loads | 45.1B | 20.2% miss rate — match reads from random offsets |
+| Split loads | 1.75B | 11.6% — unaligned 8-byte access crossing cache lines |
+| Split stores | 1.72B | 11.6% — same cause |
+| Store buffer full (XQ.FULL) | 0.84B | Negligible — NOT store-throughput limited |
+| Memory-bound slots | 343.2B | 90% of writeInt's stall is load-latency |
+| DSB uops | 435.8B | 99.8% from µop cache — no frontend issues |
+
+**Key insight**: The high cycle count on `writeInt` is NOT from store
+pressure. It's from **match-load latency** — `readInt` and `writeInt`
+are on the same inlined `copy64` call, so VTune attributes the load
+miss stall to the store instruction (IP skid from out-of-order
+retirement). The 45.1B L1 misses at ~10-cycle L2 penalty = ~451B stall
+cycles. OoO execution overlaps ~50% of this with other work, yielding
+the observed 226.6B cycles.
+
+**Why it can't be improved**:
+
+1. **The L1 misses are fundamental to LZ decompression.** Match
+   back-references point to arbitrary positions in the 100MB output
+   buffer. A 48KB L1 cache can only hold ~0.048% of the buffer. The
+   20.2% miss rate is actually good — it means 80% of matches
+   reference recent output that's still in L1.
+
+2. **Prefetch was already tried and failed.** Lookahead prefetch of the
+   next match source address adds µops to the hot loop (peek at next
+   cmd + off16, compute address, issue prefetch = ~6 µops). The loop
+   is ~25 µops; adding 6 is a 24% frontend-dispatch increase that
+   overwhelms any cache-hit conversion. See "Fast decoder: lookahead
+   prefetch for next match" above.
+
+3. **Store-forwarding works.** Only 9.6M store-forwards (negligible),
+   meaning the load-store overlap in the `copy64` cascade is handled
+   correctly by the CPU without penalty.
+
+4. **Split accesses are unavoidable.** 11.6% split rate is the
+   expected value for unaligned 8-byte accesses on random-aligned
+   pointers (8/64 = 12.5% theoretical). Aligning `dst` or `match_ptr`
+   would require padding that breaks the wire format.
+
+5. **Store buffer is not full.** XQ.FULL = 0.84B means the store
+   buffer has capacity. Reducing stores (e.g., PSHUFB 16→1 store)
+   wouldn't help because the bottleneck isn't store throughput.
+
+**Conclusion**: `writeInt` dominates the profile because LZ
+decompression IS memory copies. The decoder is running at ~12.2 GB/s
+on L5 parallel enwik8, which is ~500 MB/s per core. At 3.7 GHz and
+8 bytes per `copy64`, that's ~0.93 copies/cycle — within 7% of the
+1.0 stores/cycle theoretical throughput. The remaining gap is the L1
+miss penalty on match loads, which cannot be hidden without a format
+change (e.g., reordering matches to improve locality, at the cost of
+compression ratio).
