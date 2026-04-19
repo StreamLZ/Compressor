@@ -15,6 +15,7 @@ const copy = @import("../../io/copy_helpers.zig");
 const BitReader = @import("../../io/BitReader.zig").BitReader;
 const entropy = @import("../entropy/entropy_decoder.zig");
 const runs = @import("high_lz_token_executor.zig");
+const fallback_allocator = std.heap.c_allocator;
 
 pub const DecodeError = error{
     BadMode,
@@ -364,6 +365,13 @@ pub const SubChunkPhase1Result = struct {
     /// `processLzRuns` with the correct free-region pointer.
     scratch_free: [*]u8 = undefined,
     scratch_end: [*]u8 = undefined,
+    /// Pre-resolved token array (Type 1 only). When non-null, phase 1
+    /// has already resolved tokens and scattered literals into dst.
+    /// Phase 2 can skip resolveTokens and literal copies.
+    resolved_tokens: ?[*]const runs.LzToken = null,
+    resolved_count: u32 = 0,
+    /// Heap-allocated fallback for the token array (must be freed after phase 2).
+    fallback_tokens: ?[]runs.LzToken = null,
 };
 
 /// Per-chunk result for two-phase decode. Sub-chunks are numbered
@@ -470,15 +478,51 @@ pub fn phase1ProcessChunk(
                 );
 
                 const sub_ptr: *SubChunkPhase1Result = if (sub_idx == 0) &result.sub0 else &result.sub1;
+                const base_offset: usize = @intFromPtr(dst) - @intFromPtr(dst_start);
                 sub_ptr.* = .{
                     .mode = mode,
-                    .dst_offset = @intFromPtr(dst) - @intFromPtr(dst_start),
+                    .dst_offset = base_offset,
                     .dst_size = dst_count,
                     .is_lz = true,
                     .lz_table = lz_ptr,
                     .scratch_free = sub_scratch + scratch_usage,
                     .scratch_end = sub_scratch_end,
                 };
+
+                // For Type 1 (raw literals): pre-resolve tokens during
+                // parallel phase 1 so phase 2 can skip resolveTokens.
+                if (mode == 1 and lz_ptr.cmd_stream_size > 0) preresolve: {
+                    const token_count = lz_ptr.cmd_stream_size;
+                    const token_bytes: usize = @as(usize, token_count) * @sizeOf(runs.LzToken);
+                    const sfree = sub_ptr.scratch_free;
+                    const send = sub_ptr.scratch_end;
+
+                    var tokens_ptr: [*]runs.LzToken = undefined;
+                    var fallback: ?[]runs.LzToken = null;
+
+                    const aligned = (@intFromPtr(sfree) + 15) & ~@as(usize, 15);
+                    if (aligned + token_bytes <= @intFromPtr(send)) {
+                        tokens_ptr = @ptrFromInt(aligned);
+                    } else {
+                        const slice = fallback_allocator.alignedAlloc(runs.LzToken, .fromByteUnits(16), token_count) catch
+                            break :preresolve;
+                        fallback = slice;
+                        tokens_ptr = slice.ptr;
+                    }
+
+                    var offs_final: [*]align(1) const i32 = undefined;
+                    var len_final: [*]align(1) const i32 = undefined;
+                    const start_off: usize = if (base_offset == 0) 8 else 0;
+                    const dst_run_size: i32 = @intCast(dst_count - start_off);
+                    const resolved = runs.resolveTokens(lz_ptr, tokens_ptr, dst_run_size, &offs_final, &len_final) catch {
+                        if (fallback) |f| fallback_allocator.free(f);
+                        break :preresolve;
+                    };
+
+                    sub_ptr.resolved_tokens = tokens_ptr;
+                    sub_ptr.resolved_count = resolved;
+                    sub_ptr.fallback_tokens = fallback;
+                }
             } else if (src_used > dst_count or mode != 0) {
                 return error.InvalidChunkHeader;
             } else {

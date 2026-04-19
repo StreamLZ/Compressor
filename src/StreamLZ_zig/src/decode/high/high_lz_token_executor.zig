@@ -43,6 +43,52 @@ pub fn processLzRuns(
     }
 }
 
+/// Execute Type 1 tokens that were pre-resolved during phase 1.
+/// Skips resolveTokens (already done) but still executes both literal
+/// copies and match copies via executeTokensType1 + trailing literals.
+pub fn processLzRunsType1PreResolved(
+    tokens: [*]const LzToken,
+    token_count: u32,
+    lz: *const high.HighLzTable,
+    dst: [*]u8,
+    dst_size: usize,
+    base_offset: usize,
+) DecodeError!void {
+    if (dst_size == 0) return error.OutputTruncated;
+    const dst_end: [*]u8 = dst + dst_size;
+    const dst_start: [*]const u8 = @ptrFromInt(@intFromPtr(dst) - base_offset);
+    const dst_run_start: [*]u8 = dst + (if (base_offset == 0) @as(usize, 8) else 0);
+
+    var lit_stream = lz.lit_stream;
+    const lit_stream_end = lz.lit_stream + lz.lit_stream_size;
+
+    if (token_count > 0) {
+        try executeTokensType1(tokens, token_count, dst_run_start, dst_end, dst_start, &lit_stream);
+    }
+
+    // Advance dst past all tokens for trailing literal calculation.
+    var dst_after: [*]u8 = dst_run_start;
+    if (token_count > 0) {
+        const last = tokens[token_count - 1];
+        dst_after = dst_run_start + @as(usize, @intCast(last.dst_pos + last.lit_len + last.match_len));
+    }
+
+    // Trailing literals.
+    var trailing: usize = @intFromPtr(dst_end) - @intFromPtr(dst_after);
+    if (trailing != @intFromPtr(lit_stream_end) - @intFromPtr(lit_stream)) return error.StreamMismatch;
+    while (trailing >= 8) {
+        copy.copy64(dst_after, lit_stream);
+        dst_after += 8;
+        lit_stream += 8;
+        trailing -= 8;
+    }
+    while (trailing > 0) : (trailing -= 1) {
+        dst_after[0] = lit_stream[0];
+        dst_after += 1;
+        lit_stream += 1;
+    }
+}
+
 /// Fallback allocator for the Type 1 token array when the scratch buffer
 /// is exhausted. Uses libc malloc/free via Zig's c_allocator — matches the
 /// `NativeMemory.Alloc` and avoids the ~5µs syscall cost of page_allocator
@@ -255,14 +301,14 @@ fn copyMatchExact(dst_in: [*]u8, src_in: [*]const u8, length: usize) void {
 //  Type 1 — raw literals, two-phase
 // ────────────────────────────────────────────────────────────
 
-const LzToken = struct {
+pub const LzToken = struct {
     dst_pos: i32,
     offset: i32,
     lit_len: i32,
     match_len: i32,
 };
 
-fn resolveTokens(
+pub fn resolveTokens(
     lz: *const high.HighLzTable,
     tokens: [*]LzToken,
     dst_size: i32,
@@ -543,3 +589,4 @@ inline fn processOneToken(
     }
     lit_stream_inout.* = lit_stream;
 }
+

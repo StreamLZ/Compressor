@@ -797,18 +797,35 @@ pub fn decompressCoreTwoPhase(
             const sub_count = r.sub_chunk_count;
             var s: u32 = 0;
             while (s < sub_count) : (s += 1) {
-                const sub: *const high.SubChunkPhase1Result = if (s == 0) &r.sub0 else &r.sub1;
+                const sub: *high.SubChunkPhase1Result = if (s == 0) &r.sub0 else &r.sub1;
                 if (!sub.is_lz) continue;
-                const sub_dst_ptr: [*]u8 = dst[sub.dst_offset..].ptr;
-                try high_runs.processLzRuns(
-                    sub.mode,
-                    sub_dst_ptr,
-                    sub.dst_size,
-                    sub.dst_offset,
-                    sub.lz_table.?,
-                    sub.scratch_free,
-                    sub.scratch_end,
-                );
+
+                if (sub.resolved_tokens) |tokens| {
+                    const sub_dst_ptr: [*]u8 = dst[sub.dst_offset..].ptr;
+                    try high_runs.processLzRunsType1PreResolved(
+                        tokens,
+                        sub.resolved_count,
+                        sub.lz_table.?,
+                        sub_dst_ptr,
+                        sub.dst_size,
+                        sub.dst_offset,
+                    );
+                    if (sub.fallback_tokens) |f| {
+                        std.heap.c_allocator.free(f);
+                        sub.fallback_tokens = null;
+                    }
+                } else {
+                    const sub_dst_ptr: [*]u8 = dst[sub.dst_offset..].ptr;
+                    try high_runs.processLzRuns(
+                        sub.mode,
+                        sub_dst_ptr,
+                        sub.dst_size,
+                        sub.dst_offset,
+                        sub.lz_table.?,
+                        sub.scratch_free,
+                        sub.scratch_end,
+                    );
+                }
             }
         }
 
