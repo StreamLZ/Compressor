@@ -1031,3 +1031,92 @@ on L5 parallel enwik8, which is ~500 MB/s per core. At 3.7 GHz and
 miss penalty on match loads, which cannot be hidden without a format
 change (e.g., reordering matches to improve locality, at the cost of
 compression ratio).
+
+---
+
+## L9-L11 sidecar for parallel phase 2 (2026-04-19)
+
+**Context**: L9 decompress was 2.3 GB/s with serial two-phase decode
+(phase 1 parallel entropy decode, phase 2 serial token execution).
+After moving `resolveTokens` to parallel phase 1 (+17-24%, committed
+as `72bee2f`), phase 2 was still 63-77ms serial = 67-76% of wall time.
+A sidecar (like the L1-L5 Fast parallel decode sidecar) would
+parallelize phase 2 across 24 cores for a potential 3-5x speedup.
+
+### What worked: parallel resolveTokens (+17-24%)
+
+Moving the Type 1 token resolution (carousel walk, offset/length
+decode) from serial phase 2 to parallel phase 1. Phase 2 then uses
+`processLzRunsType1PreResolved` which skips resolveTokens and goes
+straight to executeTokensType1 with the pre-built token array.
+
+| Corpus | Baseline | Pre-resolved | Change |
+|--------|----------|-------------|--------|
+| enwik8 L9 mean | 2,131 MB/s | 2,505 MB/s | +17.6% |
+| silesia L9 mean | 2,345 MB/s | 2,740 MB/s | +16.8% |
+
+This is committed and shipping.
+
+### What failed: L9-L11 sidecar (prohibitive size)
+
+**Approach**: After encoding, walk the compressed frame's token streams
+to identify match copies that cross 16-chunk (4 MB) slice boundaries.
+Collect the final byte values at those positions from the original
+source. Compress with L1 entropy coding.
+
+**Results** (enwik8 100 MB, L9):
+
+| Metric | Value |
+|--------|-------|
+| Cross-slice positions | 17,708,012 (17.7% of output) |
+| Raw sidecar body | 19,663 KB |
+| Compressed sidecar (L1) | 13,684 KB |
+| Ratio cost | +14.0 pp (28.3% → 42.3%) |
+
+**Why it's so large**: The High codec's optimal parser uses the full
+64 MB dictionary window. Cross-slice references are extensive — nearly
+1 in 5 output bytes is read cross-slice by a match in a different
+4 MB region. For comparison, the L1-L5 Fast sidecar is typically <1%
+of output because Fast uses short-distance matches.
+
+**Disposition**: Abandoned. A 14 pp ratio cost on a level that users
+explicitly chose for ratio is unacceptable. The sidecar approach that
+works well for L1-L5 (short matches, small closures) fundamentally
+doesn't scale to L9-L11 (long-range optimal parser matches).
+
+### What also failed: separate literal scatter for match-only phase 2
+
+**Approach**: Scatter Type 1 (raw) literals to their dst positions
+during parallel phase 1, then run a match-only executor in phase 2
+that skips literal copies.
+
+**Result**: Incorrect output. The original `processOneToken` uses
+`copy16` for literal copies, which always writes 16 bytes regardless
+of `lit_len`. When `lit_len < 16`, the overshoot bytes (from
+`lit_stream` beyond the current literal) land in the match-copy
+region. If the match offset is small and negative, the match copy
+reads those just-written overshoot bytes. The separate scatter
+(using exact `@memcpy`) doesn't reproduce this overshoot, so match
+copies read different (stale) bytes and produce wrong output.
+
+**Lesson**: In LZ decoders with wide SIMD copies, the literal copy
+and match copy within a single token are NOT independent operations.
+The match can read from the literal copy's overshoot region. Any
+attempt to split them across phases must reproduce the exact same
+write pattern, including overshoot.
+
+### Remaining L9-L11 parallelism strategies (not yet tried)
+
+1. **SC grouping at L9-L11**: Use `self_contained = true` to forbid
+   cross-group references, enabling group-parallel decode (like L6-L8).
+   Already implemented as L6-L8 — would just need enabling at L9-L11.
+   Cost: ratio regression from constraining the dictionary window.
+
+2. **Larger slices**: Instead of 16-chunk (4 MB) slices, use 64- or
+   128-chunk (16-32 MB) slices. Fewer cross-slice references = smaller
+   sidecar. But fewer parallel workers = less speedup.
+
+3. **Hybrid approach**: Use SC grouping within the existing format but
+   with larger group sizes (e.g., 16 chunks = 4 MB per group instead
+   of 4 chunks = 1 MB). Already works with the existing decoder.
+   Trades ratio for parallelism at a user-chosen granularity.
