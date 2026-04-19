@@ -240,7 +240,7 @@ pub fn compressFramedHigh(
         // clamps to 0 (no cross-block reference). Without this cap,
         // blocks beyond the cap see a larger preload and
         // the match finder picks up extra matches.
-        const local_dict_size: usize = 64 * 1024 * 1024;
+        const local_dict_size: usize = if (mapping.codec_level >= 9 and !self_contained) 128 * 1024 * 1024 else 64 * 1024 * 1024;
 
         var src_off: usize = 0;
         while (src_off < src.len) {
