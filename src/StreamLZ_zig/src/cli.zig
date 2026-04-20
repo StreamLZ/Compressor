@@ -441,11 +441,12 @@ fn runDecompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !v
     };
     defer allocator.free(dst);
 
-    const written = decoder.decompressFramedParallelThreaded(allocator, src, dst, args.threads) catch |err| {
+    const dec_result = decoder.decompressFramedParallelThreaded(allocator, src, dst, args.threads) catch |err| {
         try w.print("error: decompression failed: {s}\n", .{@errorName(err)});
         try w.flush();
         std.process.exit(1);
     };
+    const written = dec_result.written;
 
     // Derive output path
     const out_path_owned = if (args.output) |_| @as(?[]const u8, null) else try deriveDecompressOutput(allocator, in_path);
@@ -458,7 +459,7 @@ fn runDecompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !v
         std.process.exit(1);
     };
     defer out_file.close();
-    out_file.writeAll(dst[0..written]) catch |err| {
+    out_file.writeAll(dst[dec_result.offset..][0..written]) catch |err| {
         try w.print("error: cannot write '{s}': {s}\n", .{ out_path, @errorName(err) });
         try w.flush();
         std.process.exit(1);

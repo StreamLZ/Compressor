@@ -35,8 +35,17 @@ pub const DecompressError = error{
 /// Streams `src` (an SLZ1-framed buffer) into `dst`, returning the number
 /// of bytes written to `dst`. `dst.len` must be at least `content_size + safe_space`
 /// bytes when the frame declares a content size.
+pub const DecompressResult = struct {
+    written: usize,
+    offset: usize = 0,
+};
+
 pub fn decompressFramed(src: []const u8, dst: []u8) DecompressError!usize {
-    return decompressFramedInner(null, src, dst, 0);
+    const r = try decompressFramedInner(null, src, dst, 0);
+    if (r.offset > 0 and r.written > 0) {
+        std.mem.copyForwards(u8, dst[0..r.written], dst[r.offset..][0..r.written]);
+    }
+    return r.written;
 }
 
 /// Parallel variant of `decompressFramed`. Uses `allocator` to spawn
@@ -47,17 +56,19 @@ pub fn decompressFramedParallel(
     src: []const u8,
     dst: []u8,
 ) DecompressError!usize {
-    return decompressFramedInner(allocator, src, dst, 0);
+    const r = try decompressFramedInner(allocator, src, dst, 0);
+    if (r.offset > 0 and r.written > 0) {
+        std.mem.copyForwards(u8, dst[0..r.written], dst[r.offset..][0..r.written]);
+    }
+    return r.written;
 }
 
-/// Like `decompressFramedParallel` but caps the worker count to
-/// `max_threads`. Pass 0 for auto (same as `decompressFramedParallel`).
 pub fn decompressFramedParallelThreaded(
     allocator: std.mem.Allocator,
     src: []const u8,
     dst: []u8,
     max_threads: usize,
-) DecompressError!usize {
+) DecompressError!DecompressResult {
     return decompressFramedInner(allocator, src, dst, max_threads);
 }
 
@@ -86,31 +97,21 @@ pub const DecompressContext = struct {
         };
     }
 
-    pub fn decompress(self: *DecompressContext, src: []const u8, dst: []u8) DecompressError!usize {
-        if (src.len == 0) return 0;
+    pub fn decompress(self: *DecompressContext, src: []const u8, dst: []u8) DecompressError!DecompressResult {
+        if (src.len == 0) return .{ .written = 0, .offset = 0 };
         var src_pos: usize = 0;
         var dst_off: usize = 0;
+        var dict_off: usize = 0;
         while (src_pos < src.len) {
             const piece_src = src[src_pos..];
             const piece_dst = dst[dst_off..];
             const pair = try decompressOneFrame(self.allocator, &self.pool, piece_src, piece_dst, self.max_threads);
             src_pos += pair.src_consumed;
-            if (pair.dst_offset > 0 and pair.dst_written > 0) {
-                const off = pair.dst_offset;
-                const total = pair.dst_written;
-                var copied: usize = 0;
-                while (copied + off <= total) : (copied += off) {
-                    @memcpy(piece_dst[copied..][0..off], piece_dst[copied + off ..][0..off]);
-                }
-                if (copied < total) {
-                    const rem = total - copied;
-                    @memcpy(piece_dst[copied..][0..rem], piece_dst[copied + off ..][0..rem]);
-                }
-            }
-            dst_off += pair.dst_written;
+            if (dict_off == 0 and pair.dst_offset > 0) dict_off = pair.dst_offset;
+            dst_off += pair.dst_offset + pair.dst_written;
             if (pair.src_consumed == 0) break;
         }
-        return dst_off;
+        return .{ .written = dst_off - dict_off, .offset = dict_off };
     }
 
     pub fn deinit(self: *DecompressContext) void {
@@ -154,8 +155,8 @@ fn decompressFramedInner(
     src: []const u8,
     dst: []u8,
     max_threads: usize,
-) DecompressError!usize {
-    if (src.len == 0) return 0;
+) DecompressError!DecompressResult {
+    if (src.len == 0) return .{ .written = 0, .offset = 0 };
 
     // Lazy thread pool — only init on first parallel dispatch. Fast
     // codec inputs and single-chunk inputs skip pool init entirely.
@@ -169,31 +170,17 @@ fn decompressFramedInner(
     // iteration via the empty-trailer check.
     var src_pos: usize = 0;
     var dst_off: usize = 0;
+    var dict_off: usize = 0;
     while (src_pos < src.len) {
         const piece_src = src[src_pos..];
         const piece_dst = dst[dst_off..];
         const pair = try decompressOneFrame(allocator_opt, &lazy_pool, piece_src, piece_dst, max_threads);
         src_pos += pair.src_consumed;
-        if (pair.dst_offset > 0 and pair.dst_written > 0) {
-            // Shift output left by dst_offset bytes. The gap between
-            // source and destination equals dst_offset (the dictionary
-            // prefix length, typically 32KB). Copy in dst_offset-sized
-            // chunks to avoid overlap within each memcpy call.
-            const off = pair.dst_offset;
-            const total = pair.dst_written;
-            var copied: usize = 0;
-            while (copied + off <= total) : (copied += off) {
-                @memcpy(piece_dst[copied..][0..off], piece_dst[copied + off ..][0..off]);
-            }
-            if (copied < total) {
-                const rem = total - copied;
-                @memcpy(piece_dst[copied..][0..rem], piece_dst[copied + off ..][0..rem]);
-            }
-        }
-        dst_off += pair.dst_written;
+        if (dict_off == 0 and pair.dst_offset > 0) dict_off = pair.dst_offset;
+        dst_off += pair.dst_offset + pair.dst_written;
         if (pair.src_consumed == 0) break;
     }
-    return dst_off;
+    return .{ .written = dst_off - dict_off, .offset = dict_off };
 }
 
 const FrameResult = struct {
