@@ -545,7 +545,11 @@ fn runBenchCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args)
     defer dec_ctx.deinit();
 
     // Warm-up decompress.
-    _ = try dec_ctx.decompress(compressed[0..comp_size], decompressed);
+    var dec_off: usize = 0;
+    {
+        const wr = try dec_ctx.decompress(compressed[0..comp_size], decompressed);
+        dec_off = wr.offset;
+    }
 
     // Decompress benchmark.
     const dec_times = try allocator.alloc(u64, runs);
@@ -565,13 +569,13 @@ fn runBenchCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args)
     try w.print("  Decompress median: {d:.0}ms ({d:.1} MB/s)\n\n", .{ dec_median_ms, dec_median_mbps });
 
     // Round-trip check.
-    if (std.mem.eql(u8, src, decompressed[0..src.len])) {
+    if (std.mem.eql(u8, src, decompressed[dec_off..][0..src.len])) {
         try w.writeAll("Round-trip: PASS\n");
     } else {
         var first_fail: usize = 0;
         var fail_count: usize = 0;
         for (0..src.len) |bi| {
-            if (src[bi] != decompressed[bi]) {
+            if (src[bi] != decompressed[dec_off + bi]) {
                 if (fail_count == 0) first_fail = bi;
                 fail_count += 1;
             }
