@@ -29,6 +29,7 @@ pub const DecompressError = error{
     OutputTooSmall,
     ChecksumMismatch,
     ChunkSizeMismatch,
+    UnknownDictionary,
 } || fast.DecodeError || high.DecodeError || std.mem.Allocator.Error || std.Thread.SpawnError || std.Thread.CpuCountError;
 
 /// Streams `src` (an SLZ1-framed buffer) into `dst`, returning the number
@@ -194,20 +195,14 @@ fn decompressOneFrame(
 
     var pos: usize = hdr.header_size;
 
-    // Dictionary support: if the frame has a dictionary_id, look up the
-    // built-in dictionary and pre-fill the output buffer. The dictionary
-    // bytes go at dst[0..dict_len], and actual output goes at
-    // dst[dict_len..]. LZ back-references can reach into the dictionary
-    // prefix. After decompression, the dictionary prefix is stripped.
     const dict_mod2 = @import("../dict/dictionary.zig");
     var dict_prefix_len: usize = 0;
     if (hdr.dictionary_id) |dict_id| {
-        if (dict_mod2.findById(dict_id)) |d| {
-            if (d.data.len + safe_space <= dst.len) {
-                @memcpy(dst[0..d.data.len], d.data);
-                dict_prefix_len = d.data.len;
-            }
-        }
+        const d = dict_mod2.findById(dict_id) orelse return error.UnknownDictionary;
+        const needed = d.data.len + (if (hdr.content_size) |cs| @as(usize, @intCast(cs)) else 0) + safe_space;
+        if (needed > dst.len) return error.OutputTooSmall;
+        @memcpy(dst[0..d.data.len], d.data);
+        dict_prefix_len = d.data.len;
     }
 
     var dst_off: usize = dict_prefix_len;
@@ -627,7 +622,7 @@ fn decompressCompressedBlock(
 
     while (dst_remaining > 0) {
         const dst_off = dst_off_inout.*;
-        const at_chunk_boundary = (dst_off & (constants.chunk_size - 1)) == 0;
+        const at_chunk_boundary = ((dst_off - sc_start_dst_off) & (constants.chunk_size - 1)) == 0;
 
         if (at_chunk_boundary or internal_hdr == null) {
             if (src_pos + 2 > block_src.len) return error.Truncated;
