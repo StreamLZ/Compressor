@@ -604,8 +604,12 @@ fn runBenchDecompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Arg
         std.process.exit(1);
     };
 
-    const dst = allocator.alloc(u8, content_size + decoder.safe_space) catch |err| {
-        try w.print("error: cannot allocate {d} bytes: {s}\n", .{ content_size + decoder.safe_space, @errorName(err) });
+    const db_dict_overhead: usize = if (hdr.dictionary_id) |did|
+        if (dict_mod.findById(did)) |d| d.data.len + decoder.safe_space else 0
+    else
+        0;
+    const dst = allocator.alloc(u8, content_size + decoder.safe_space + db_dict_overhead) catch |err| {
+        try w.print("error: cannot allocate {d} bytes: {s}\n", .{ content_size + decoder.safe_space + db_dict_overhead, @errorName(err) });
         try w.flush();
         std.process.exit(1);
     };

@@ -95,6 +95,9 @@ pub const DecompressContext = struct {
             const piece_dst = dst[dst_off..];
             const pair = try decompressOneFrame(self.allocator, &self.pool, piece_src, piece_dst, self.max_threads);
             src_pos += pair.src_consumed;
+            if (pair.dst_offset > 0 and pair.dst_written > 0) {
+                std.mem.copyForwards(u8, piece_dst[0..pair.dst_written], piece_dst[pair.dst_offset..][0..pair.dst_written]);
+            }
             dst_off += pair.dst_written;
             if (pair.src_consumed == 0) break;
         }
@@ -162,13 +165,20 @@ fn decompressFramedInner(
         const piece_dst = dst[dst_off..];
         const pair = try decompressOneFrame(allocator_opt, &lazy_pool, piece_src, piece_dst, max_threads);
         src_pos += pair.src_consumed;
+        if (pair.dst_offset > 0 and pair.dst_written > 0) {
+            std.mem.copyForwards(u8, piece_dst[0..pair.dst_written], piece_dst[pair.dst_offset..][0..pair.dst_written]);
+        }
         dst_off += pair.dst_written;
         if (pair.src_consumed == 0) break;
     }
     return dst_off;
 }
 
-const FrameResult = struct { src_consumed: usize, dst_written: usize };
+const FrameResult = struct {
+    src_consumed: usize,
+    dst_written: usize,
+    dst_offset: usize = 0,
+};
 
 fn decompressOneFrame(
     allocator_opt: ?std.mem.Allocator,
@@ -357,13 +367,11 @@ fn decompressOneFrame(
     if (hdr.content_size) |cs| {
         if (actual_output != cs) return error.SizeMismatch;
     }
-    // Move decompressed bytes to the start of dst, stripping the
-    // dictionary prefix. This ensures the caller sees only the
-    // original content, not the dictionary bytes.
-    if (dict_prefix_len > 0 and actual_output > 0) {
-        std.mem.copyForwards(u8, dst[0..actual_output], dst[dict_prefix_len..][0..actual_output]);
-    }
-    return .{ .src_consumed = pos, .dst_written = actual_output };
+    return .{
+        .src_consumed = pos,
+        .dst_written = actual_output,
+        .dst_offset = dict_prefix_len,
+    };
 }
 
 /// Whole-chunk match copy: reads `length` bytes from `dst - offset` into

@@ -947,7 +947,16 @@ pub fn buildPpocSidecar(
     src: []const u8,
     dst_ref: []const u8,
 ) !PpocSidecar {
-    return buildPpocSidecarInner(allocator, src, dst_ref);
+    return buildPpocSidecarInner(allocator, src, dst_ref, 0);
+}
+
+pub fn buildPpocSidecarWithDict(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+    dst_ref: []const u8,
+    dict_prefix_len: usize,
+) !PpocSidecar {
+    return buildPpocSidecarInner(allocator, src, dst_ref, dict_prefix_len);
 }
 
 fn computeTransitiveDepth(
@@ -1027,6 +1036,7 @@ fn buildPpocSidecarInner(
     allocator: std.mem.Allocator,
     src: []const u8,
     dst_ref: []const u8,
+    dict_prefix_len: usize,
 ) !PpocSidecar {
     var sidecar: PpocSidecar = .{
         .match_ops = .{},
@@ -1037,7 +1047,10 @@ fn buildPpocSidecarInner(
 
     const hdr = try frame.parseHeader(src);
     if (hdr.codec != .fast and hdr.codec != .turbo) return sidecar;
-    const total_decomp: u64 = if (hdr.content_size) |cs| cs else return sidecar;
+    const content_size: u64 = if (hdr.content_size) |cs| cs else return sidecar;
+    // With dictionary, the token stream uses positions in [dict_prefix_len, dict_prefix_len + content_size).
+    // The arrays are sized to cover the full range.
+    const total_decomp: u64 = content_size + dict_prefix_len;
 
     if (dst_ref.len < total_decomp) return error.OutputTooSmall;
 
@@ -1053,30 +1066,28 @@ fn buildPpocSidecarInner(
     var tokens: std.ArrayList(TokenInfo) = .{};
     defer tokens.deinit(allocator);
 
-    var file_pos_running: u64 = 0;
+    var file_pos_running: u64 = dict_prefix_len;
     var src_pos: usize = hdr.header_size;
     while (src_pos < src.len) {
         if (src_pos + 4 > src.len) break;
         const first_word = std.mem.readInt(u32, src[src_pos..][0..4], .little);
         if (first_word == frame.end_mark) break;
-        const block_hdr= try frame.parseBlockHeader(src[src_pos..]);
-        if (block_hdr.isEndMark()) break;
+        const block_hdr_s = try frame.parseBlockHeader(src[src_pos..]);
+        if (block_hdr_s.isEndMark()) break;
         src_pos += 8;
-        // v2: parallel-decode-metadata blocks carry no decompressable
-        // bytes — skip them when walking the frame for sidecar building.
-        if (block_hdr.parallel_decode_metadata) {
-            src_pos += block_hdr.compressed_size;
+        if (block_hdr_s.parallel_decode_metadata) {
+            src_pos += block_hdr_s.compressed_size;
             continue;
         }
-        if (block_hdr.uncompressed) {
-            src_pos += block_hdr.compressed_size;
-            file_pos_running += block_hdr.decompressed_size;
+        if (block_hdr_s.uncompressed) {
+            src_pos += block_hdr_s.compressed_size;
+            file_pos_running += block_hdr_s.decompressed_size;
             continue;
         }
-        const block_payload = src[src_pos..][0..block_hdr.compressed_size];
-        try partitionFastBlock(allocator, block_payload, block_hdr.decompressed_size, file_pos_running, byte_earliest, producer_map, total_decomp, &tokens);
-        src_pos += block_hdr.compressed_size;
-        file_pos_running += block_hdr.decompressed_size;
+        const block_payload = src[src_pos..][0..block_hdr_s.compressed_size];
+        try partitionFastBlock(allocator, block_payload, block_hdr_s.decompressed_size, file_pos_running, byte_earliest, producer_map, total_decomp, &tokens);
+        src_pos += block_hdr_s.compressed_size;
+        file_pos_running += block_hdr_s.decompressed_size;
     }
 
     // Two-pass parallel decode sidecar: only store literal bytes at
@@ -1112,25 +1123,36 @@ fn buildPpocSidecarInner(
     // 16 chunks = 4 MB per slice, supporting up to ~24 workers on
     // a 100 MB file while keeping the sidecar small (~1 MB for L5).
     const slice_align: u64 = 16;
+    const dpl: u64 = dict_prefix_len;
     for (tokens.items) |t| {
         if (t.src_start < 0 or t.length == 0) continue;
         const chunk_start_signed: i64 = @intCast(t.chunk_start);
         if (t.src_start >= chunk_start_signed) continue;
         const src_u: u64 = @intCast(t.src_start);
-        const tgt_chunk: u64 = t.target_start / cs;
-        const src_chunk: u64 = src_u / cs;
-        if (tgt_chunk / slice_align == src_chunk / slice_align) continue;
-        const src_lo: u64 = src_u;
-        const src_hi: u64 = @min(src_lo + t.length, total_decomp);
+        // Dictionary positions are always pre-filled by the decoder.
+        if (src_u + t.length <= dpl) continue;
+        // Chunk/slice indices relative to content start (after dict prefix).
+        const tgt_rel: u64 = if (t.target_start >= dpl) t.target_start - dpl else 0;
+        const tgt_chunk: u64 = tgt_rel / cs;
+        const tgt_slice: u64 = tgt_chunk / slice_align;
+        const src_rel: u64 = if (src_u >= dpl) src_u - dpl else 0;
+        const src_first_slice: u64 = (src_rel / cs) / slice_align;
+        const src_last_u: u64 = @min(src_u + t.length, total_decomp);
+        const src_last_rel: u64 = if (src_last_u > dpl) src_last_u - dpl else 0;
+        const src_last_slice: u64 = if (src_last_rel > 0) ((src_last_rel - 1) / cs) / slice_align else src_first_slice;
+        if (src_first_slice == tgt_slice and src_last_slice == tgt_slice) continue;
+        const src_lo: u64 = @max(src_u, dpl);
+        const src_hi: u64 = @min(src_u + t.length, total_decomp);
         var p: u64 = src_lo;
         while (p < src_hi) : (p += 1) {
-            if (p / cs == tgt_chunk) continue;
-            // Include ALL depths — depth-0 sources at inter-slice
-            // boundaries may not be decoded yet when another worker reads.
+            const p_rel: u64 = if (p >= dpl) p - dpl else 0;
+            const p_slice: u64 = (p_rel / cs) / slice_align;
+            if (p_slice == tgt_slice) continue;
             if (lit_seen[@intCast(p)] != 0) continue;
             lit_seen[@intCast(p)] = 1;
+            // Sidecar positions are frame-output-relative (subtract dict prefix).
             try sidecar.literal_bytes.append(allocator, .{
-                .position = p,
+                .position = p - dpl,
                 .byte_value = dst_ref[@intCast(p)],
             });
         }

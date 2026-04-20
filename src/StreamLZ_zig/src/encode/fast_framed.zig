@@ -517,7 +517,10 @@ pub fn compressFramedOne(
     // path; extending parallel-decode support to it is a separate
     // task (probably needs a distinct codepath).
     if (opts.emit_parallel_decode_metadata and opts.level >= 1 and opts.level <= 5 and can_compress) {
-        const sidecar_result = cleanness.buildPpocSidecar(allocator, dst[0..pos], src);
+        const sidecar_result = if (dict_len > 0)
+            cleanness.buildPpocSidecarWithDict(allocator, dst[0..pos], effective_src, dict_len)
+        else
+            cleanness.buildPpocSidecar(allocator, dst[0..pos], src);
         if (sidecar_result) |*sc| {
             var sidecar = sc.*;
             defer sidecar.deinit(allocator);
@@ -592,7 +595,7 @@ pub fn compressFramedOne(
                     dst[5] |= @as(u8, 1) << 4; // parallel_decode_metadata_present
                 }
             }
-        } else |_| {
+        } else |err| {
             // buildPpocSidecar failed (probably OOM from the 400+ MB
             // byte_earliest + producer_map). Silently continue without
             // a sidecar — the frame is still correct, just slower to
