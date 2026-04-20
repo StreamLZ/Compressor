@@ -48,6 +48,10 @@ pub const HighEncoderContext = struct {
     /// parser (and the fast parser) to enable per-position SC max-back
     /// enforcement and the LAO pre-filter pass.
     self_contained: bool = false,
+    /// Dictionary prefix length for SC max-back extension. When > 0,
+    /// the SC constraint allows backward references `dpl` bytes further
+    /// than `start_pos + pos` to reach dictionary content.
+    dict_prefix_len: u32 = 0,
     /// Optional cross-block state. When present, the optimal parser
     /// reads `prev_stats` to seed the cost model and writes back the
     /// final stats for the next block. `null` = independent blocks.

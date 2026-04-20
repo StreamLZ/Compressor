@@ -537,7 +537,7 @@ fn optimalOnePass(
             var match_arr: [8]LengthAndOffset = @splat(.{ .length = 0, .offset = 0 });
             var match_found_offset_bits: [8]i32 = @splat(0);
             var num_match: usize = 0;
-            const sc_max_back: i64 = if (sc) @intCast(sc_pos_in_chunk + @as(i32, @intCast(pos))) else std.math.maxInt(i64);
+            const sc_max_back: i64 = if (sc) @intCast(sc_pos_in_chunk + @as(i32, @intCast(pos)) + @as(i32, @intCast(ctx.dict_prefix_len))) else std.math.maxInt(i64);
 
             var lao_index: usize = 0;
             while (lao_index < 4) : (lao_index += 1) {

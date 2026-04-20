@@ -286,6 +286,7 @@ fn scWorkerFn(shared: *ScShared) void {
     // that processes 1, 6, 11, ...
     var worker_cross_block: high_encoder.HighCrossBlockState = .{};
     worker_ctx.cross_block = &worker_cross_block;
+    worker_ctx.dict_prefix_len = @intCast(shared.dict_prefix_len);
 
     var hasher: high_compressor.HighHasher = .{ .none = {} };
     defer hasher.deinit();
