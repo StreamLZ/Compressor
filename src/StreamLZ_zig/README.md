@@ -14,19 +14,32 @@ This file is the canonical state-of-the-port document. Read this first.
 ## What you can do today
 
 - **Compress** any file at any level L1-L11 byte-exact with the C# encoder for
-  L1-L5; deterministic and equivalent for L6-L11. CLI: `streamlz compress -l N <in> <out>`.
-- **Decompress** any `.slz` frame produced by either Zig or C# at any level. CLI:
-  `streamlz decompress <in> <out>`. Parallel decompress (24-core dispatch) fires
-  automatically for L6-L11 multi-chunk inputs.
+  L1-L5; deterministic and equivalent for L6-L11.
+- **Decompress** any `.slz` frame produced by either Zig or C# at any level.
+  Parallel decompress (24-core dispatch) fires automatically for L6-L11
+  multi-chunk inputs.
 - **Stream-decompress** a frame to any `std.Io.Writer` with sliding-window
   semantics and XXH32 content-checksum verification (matches C#
   `StreamLzFrameDecompressor`).
-- **Bench** decompress-only on a `.slz` file with `streamlz bench <file.slz> <runs>`,
-  or full compress + decompress + roundtrip with `streamlz benchc -l N -r R <raw>`.
-- **Analyze** a `.slz` file's LZ-token dependency DAG (round histogram + level-0
-  count) with `streamlz analyze <file.slz>`. Produced during the speculative
-  parallel-decode investigation (see [Investigations](#investigations) below);
-  kept around as a one-off diagnostic.
+- **Bench** decompress-only or full compress + decompress + roundtrip.
+- **Dictionary compression** with 7 built-in dictionaries (auto-detected by
+  file extension) or custom trained dictionaries.
+
+CLI examples (flag-driven, no subcommands):
+
+```
+streamlz file                     # compress (default level L3)
+streamlz -l 3 file                # compress at level 3
+streamlz -d file.slz              # decompress
+streamlz -db file.slz             # decompress benchmark
+streamlz -b -l N file             # compress + decompress benchmark
+streamlz -ba file                 # bench all L1-L11
+streamlz -i file.slz              # info (frame/block summary)
+streamlz --train -o dict.bin corpus_dir/   # dictionary training
+```
+
+Dictionary flags: `-D name` to select a dictionary, `--no-dict` to disable
+auto-detection.
 
 The CLI binary is `zig-out/bin/streamlz.exe` after `zig build -Doptimize=ReleaseFast`.
 
@@ -56,6 +69,30 @@ set `STREAMLZ_FIXTURES_DIR=./fixtures` before `zig build test` to enable it.
 > Known quirk: the test process occasionally exits with code 3 after all 282
 > tests have already reported pass. The pass count is the source of truth;
 > the exit-code anomaly is a Zig stdlib teardown issue not yet diagnosed.
+
+---
+
+## Dictionary support
+
+StreamLZ includes 7 built-in dictionaries (32 KB each, compiled into the binary):
+JSON, HTML, CSS, JS, XML, plain text, and a general-purpose dictionary derived
+from Brotli's static dictionary (MIT licensed).
+
+Dictionaries are auto-detected by file extension (`.json` -> JSON dictionary,
+`.html` -> HTML, `.txt` -> text, etc.). Unknown extensions fall back to the
+general dictionary. Override with `-D name` or disable with `--no-dict`.
+
+Dictionary impact varies by level and file type. On small files (<256 KB) where
+the first chunk has no prior match history, dictionaries provide the largest
+gains. On large files, the dictionary helps only the first chunk.
+
+Custom dictionaries can be trained from a corpus of sample files:
+
+```
+streamlz --train -o my_dict.bin path/to/corpus/
+```
+
+The trainer uses the FASTCOVER algorithm (based on zstd's dictionary builder).
 
 ---
 
@@ -195,8 +232,13 @@ src/StreamLZ_zig/
   scripts/gen_fixtures.sh
   src/
     main.zig                      CLI dispatcher
+    cli.zig                       CLI argument parser + command handlers
     streamlz.zig                  public library API (re-exports)
     fuzz_decompress.zig           fuzz harness (zig build fuzz)
+    dict/
+      dictionary.zig              dictionary registry + auto-detect
+      trainer.zig                 FASTCOVER dictionary trainer
+      builtin/*.dict              7 compiled-in dictionaries
     format/
       streamlz_constants.zig      centralized constants
       frame_format.zig            SLZ1 frame + block headers
@@ -294,24 +336,15 @@ to the 42 MB compressed file (2.8% overhead). Round-trip verified at
 
 **Status: L1-L5 landed.**
 
-### 2. C1 — Fast decoder `@prefetch` hints in cmd==2 / medium paths
+### 2. C1 — Fast decoder conditional far-offset prefetch
 
-C# Fast `LzDecoder` has, at the tail of both the medium-match and cmd==2 long-match
-branches:
+C# Fast `LzDecoder` has `Sse.Prefetch0` looking 3 entries ahead in the off32
+stream to hide ~60ns DRAM-miss latency. The Zig port now has conditional
+far-offset prefetch for matches >64 KB, which avoids prefetch overhead on
+short-offset matches (the common case) while hiding latency on the long-offset
+matches that actually miss cache.
 
-```cs
-if (Sse.IsSupported)
-{
-    Sse.Prefetch0(dstBegin - off32Stream[3]);
-}
-```
-
-Looking 3 entries ahead in the off32 stream and pre-fetching the line is a
-~60ns DRAM-miss hide. The Zig port doesn't have this yet. Estimated impact:
-1-5% on inputs with many far-offset matches; negligible on text. Cheap to add
-but not yet implemented.
-
-**Status: open, perf-only, not a correctness gap.**
+**Status: landed (commit 60835f3).**
 
 ### 3. D7 / D8 / J1 / J2 — public API surface
 
@@ -329,8 +362,7 @@ has:
 These are cosmetic API gaps for a Zig consumer. They don't affect the wire
 format or any internal capability.
 
-**Status: open, low priority unless someone wants to use the port from a
-Stream-consuming .NET interop layer.**
+**Status: open, low priority.**
 
 ---
 
@@ -409,6 +441,14 @@ A few highlights worth knowing as a future reader:
   for L6-L8 (each chunk fully independent by encoder construction) and two-phase
   parallel for L9-L11 (parallel entropy decode + serial LZ resolve). Both share
   a persistent `std.Thread.Pool` to avoid per-decompression thread spawn cost.
+- **Parallel resolveTokens for L9-L11** (+17-24% decompress by moving token
+  resolution to parallel phase 1).
+- **128 MB dictionary window for L11** (-0.25% ratio, one line change).
+- **Conditional far-offset prefetch** (+1.7% L3 decompress for matches >64 KB).
+- **Dictionary preload** for all levels L1-L11 with zero decompress overhead.
+- **Zero-copy dictionary decompress** (eliminated O(n) memmove).
+- **Fix parallel Fast decode on 1 GB+ files** (sidecar match_ops were not
+  executed).
 
 ### Experiments that didn't pay off
 

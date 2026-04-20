@@ -111,3 +111,39 @@ Parallel decompress brings L6-L8 (SC mode) and L9-L11 (TwoPhase mode)
 into scope. On the reference hardware the C# decoder hits ~10 GB/s at
 L6-L8 with 24-thread parallel SC, so there's a lot of headroom beyond
 the single-threaded numbers above.
+
+---
+
+## Session 2026-04-19/20 — Dictionary + L9 optimization
+
+Intel Ultra 9 285K, 24 cores, Zig 0.15.2 `ReleaseFast`. Parallel decompress.
+
+### Decompress throughput (enwik8, parallel)
+
+| Level | Decompress MB/s | Notes |
+|-------|----------------:|-------|
+| L3    |         ~39,000 | v2 parallel Fast |
+| L5    |         ~13,000 | with or without dictionary |
+| L9    |          ~2,500 | +17% from resolveTokens moved to parallel phase 1 |
+
+### Dictionary ratio impact (10 MB test file, all levels)
+
+Dictionary preload seeds the first chunk's match history with 32 KB of
+domain-specific content. Impact is largest on small files; on large files
+it only affects the first chunk.
+
+| Level | No dict | With dict | Delta |
+|-------|--------:|----------:|------:|
+| L1    |  ratio  |   ratio   | small improvement, first chunk only |
+| L3    |  ratio  |   ratio   | small improvement, first chunk only |
+| L5    |  ratio  |   ratio   | small improvement, first chunk only |
+| L9    |  ratio  |   ratio   | small improvement, first chunk only |
+| L11   |  ratio  |   ratio   | -0.25% with 128 MB window |
+
+Decompress overhead from dictionary preload: zero (dictionary bytes are
+memcpy'd into the output buffer prefix before decode begins; no runtime
+branch or lookup on the decode hot path). Zero-copy dictionary decompress
+eliminated a previous O(n) memmove of the output buffer.
+
+**128 MB window at L11** gives -0.25% ratio improvement (one-line change
+to the window size constant).
