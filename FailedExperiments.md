@@ -1232,6 +1232,31 @@ occasionally extends a BT4 match by a few bytes.
 if StreamLZ added a hash-based path at L9-L10 (which use
 `findMatchesHashBased`, not BT4), but for L11 (BT4) it's redundant.
 
+---
+
+## Known bug: sidecar closure incomplete on 1GB+ files (2026-04-19)
+
+**Symptom**: Parallel Fast L1-L5 decompress produces 2-4 byte errors
+on enwik9 (1 GB) at worker slice boundaries (chunks 160, 320 with
+160-chunk aligned slices). The decompressed bytes are zeros where the
+correct output has non-zero values.
+
+**Root cause**: The encoder's `cross_chunk_analyzer.buildPpocSidecar`
+BFS closure computation misses some cross-slice match dependencies
+on very large files. When the parallel decoder's worker reads from
+a position that should have been pre-populated by the sidecar, it
+gets a zero byte instead.
+
+**Affected**: Only parallel Fast decompress on files > ~500 MB.
+Serial decompress (`-t 1`) is always correct. Files up to 212 MB
+(silesia) pass parallel roundtrip correctly.
+
+**Workaround**: Use `-t 1` for files > 500 MB, or use L6+ (SC/High)
+which uses a different parallel strategy.
+
+**Status**: Open. Fix requires debugging the BFS closure in
+`cross_chunk_analyzer.zig` (~1000 lines of dependency graph code).
+
 **What worked from the zstd investigation**:
 - **128 MB dictionary**: +0.25% ratio, committed as `211975e`
 - **Two-pass stats**: +0.01%, not worth 2x CPU (documented above)
