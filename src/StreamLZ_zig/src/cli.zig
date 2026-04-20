@@ -491,14 +491,25 @@ fn runBenchCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args)
     const bound = encoder.compressBound(src.len);
     const compressed = try allocator.alloc(u8, bound);
     defer allocator.free(compressed);
-    const decompressed = try allocator.alloc(u8, src.len + decoder.safe_space);
-    defer allocator.free(decompressed);
-
     const mb: f64 = @as(f64, @floatFromInt(src.len)) / (1024.0 * 1024.0);
     try w.print("Input: {s} ({d} bytes, {d:.2} MB)\n", .{ in_path, src.len, mb });
 
+    // Dictionary resolution (same logic as runCompress).
+    var dict_data_b: ?[]const u8 = null;
+    var dict_id_b: ?u32 = null;
+    if (args.dict_name) |name| {
+        if (dict_mod.findByName(name)) |d| { dict_data_b = d.data; dict_id_b = d.id; }
+    } else if (!args.no_dict) {
+        if (dict_mod.findByExtension(in_path)) |d| { dict_data_b = d.data; dict_id_b = d.id; }
+    }
+
+    const dict_buf_extra: usize = if (dict_data_b) |d| d.len + decoder.safe_space else 0;
+    const decompressed = try allocator.alloc(u8, src.len + decoder.safe_space + dict_buf_extra);
+    defer allocator.free(decompressed);
+
     // Warm-up compress.
-    var comp_size: usize = try encoder.compressFramed(allocator, src, compressed, .{ .level = level });
+    const comp_opts: encoder.Options = .{ .level = level, .dictionary = dict_data_b, .dictionary_id = dict_id_b };
+    var comp_size: usize = try encoder.compressFramed(allocator, src, compressed, comp_opts);
 
     // Compress benchmark.
     const comp_times = try allocator.alloc(u64, runs);
@@ -506,7 +517,7 @@ fn runBenchCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args)
     var r: u32 = 0;
     while (r < runs) : (r += 1) {
         var timer = try std.time.Timer.start();
-        const n = try encoder.compressFramed(allocator, src, compressed, .{ .level = level });
+        const n = try encoder.compressFramed(allocator, src, compressed, comp_opts);
         comp_times[r] = timer.read();
         comp_size = n;
         const run_ms = @as(f64, @floatFromInt(comp_times[r])) / 1_000_000.0;
