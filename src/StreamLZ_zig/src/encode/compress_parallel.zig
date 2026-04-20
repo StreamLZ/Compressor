@@ -259,6 +259,7 @@ const ScShared = struct {
     backing_allocator: std.mem.Allocator,
     mapping: HighMapping,
     sc_flag_bit: u8,
+    dict_prefix_len: usize,
     /// Per-chunk result slots (one per 256 KB output chunk).
     tmp_bufs: []const []u8,
     written: []usize,
@@ -314,37 +315,35 @@ fn scWorkerFn(shared: *ScShared) void {
         const last_chunk = @min(first_chunk + group_size, shared.num_chunks);
         const chunks_in_group = last_chunk - first_chunk;
 
+        const dpl = shared.dict_prefix_len;
         const group_src_off = first_chunk * lz_constants.chunk_size;
-        const group_src_end = @min(group_src_off + chunks_in_group * lz_constants.chunk_size, shared.src.len);
-        const group_src = shared.src[group_src_off..group_src_end];
+        const group_content_len = @min(chunks_in_group * lz_constants.chunk_size, shared.src.len - dpl - group_src_off);
+        // Include dictionary prefix so matches can reference it.
+        // shared.src is [dict ++ original_src]. Slice from 0 to
+        // include dict, through end of this group's content.
+        const group_window_end = dpl + group_src_off + group_content_len;
+        const group_src = shared.src[0..group_window_end];
+        const finder_preload = dpl + group_src_off;
 
-        // Reset arena once per group so the per-group MLS alloc +
-        // match-finder working set are released before the next group.
         _ = arena.reset(.retain_capacity);
 
-        // Per-group match finder → MLS rooted at group-relative
-        // positions. This enforces the SC "no cross-group refs"
-        // invariant by construction — matches discovered against
-        // `group_src` can only reach other bytes inside the same
-        // `group_src` slice.
-        var mls = mls_mod.ManagedMatchLenStorage.init(arena.allocator(), group_src.len + 1, 8.0) catch {
+        var mls = mls_mod.ManagedMatchLenStorage.init(arena.allocator(), group_content_len + 1, 8.0) catch {
             _ = shared.error_flag.store(1, .monotonic);
             _ = shared.captured_err.cmpxchgStrong(0, @intFromError(error.OutOfMemory), .monotonic, .monotonic);
             return;
         };
-        // No `mls.deinit()` — arena owns the allocation.
         mls.window_base_offset = 0;
         mls.round_start_pos = 0;
 
         const mf_ok = blk: {
             if (shared.mapping.use_bt4) {
-                match_finder_bt4.findMatchesBT4(arena.allocator(), group_src, &mls, 4, 0, 96) catch |err| {
+                match_finder_bt4.findMatchesBT4(arena.allocator(), group_src, &mls, 4, finder_preload, 96) catch |err| {
                     const code: u16 = @intFromError(err);
                     _ = shared.captured_err.cmpxchgStrong(0, code, .monotonic, .monotonic);
                     break :blk false;
                 };
             } else {
-                match_finder.findMatchesHashBased(arena.allocator(), group_src, &mls, 4, 0) catch |err| {
+                match_finder.findMatchesHashBased(arena.allocator(), group_src, &mls, 4, finder_preload) catch |err| {
                     const code: u16 = @intFromError(err);
                     _ = shared.captured_err.cmpxchgStrong(0, code, .monotonic, .monotonic);
                     break :blk false;
@@ -357,28 +356,23 @@ fn scWorkerFn(shared: *ScShared) void {
             return;
         }
 
-        // Compress each chunk in the group sequentially. The shared
-        // source slice view lets `compressOneHighBlock` compute offsets
-        // into `group_src` via `(src_off + sub_off) % sc_group_bytes`,
-        // but because we're passing `group_src` (not `shared.src`) as
-        // the source buffer, the % reduces to `src_off + sub_off`
-        // within the group — same effect.
+        // Content-only slice for the block compressor. Contiguous with
+        // the dictionary prefix in memory so pointer arithmetic reaches
+        // dictionary bytes via negative offsets from the content start.
+        const group_content = shared.src[finder_preload..group_window_end];
+
         var ci: usize = 0;
         while (ci < chunks_in_group) : (ci += 1) {
             const chunk_idx = first_chunk + ci;
             const in_group_src_off = ci * lz_constants.chunk_size;
-            const block_src_len = @min(group_src.len - in_group_src_off, lz_constants.chunk_size);
-            // Only the first chunk in each group is a keyframe — matches
-            //
-            // The block header keyframe bit (0x40) is part of the 2-byte
-            // header so getting this wrong shifts every block's bytes.
+            const block_src_len = @min(group_content_len - in_group_src_off, lz_constants.chunk_size);
             const keyframe = (ci == 0);
 
             const n_or_err = compressOneHighBlock(
                 &worker_ctx,
                 &hasher,
                 &mls,
-                group_src,
+                group_content,
                 in_group_src_off,
                 block_src_len,
                 shared.tmp_bufs[chunk_idx],
@@ -406,8 +400,10 @@ pub fn compressInternalParallelSc(
     mapping: HighMapping,
     sc_flag_bit: u8,
     num_threads: u32,
+    dict_prefix_len_sc: usize,
 ) CompressError!usize {
-    const num_chunks: usize = (src.len + lz_constants.chunk_size - 1) / lz_constants.chunk_size;
+    const content_len = src.len - dict_prefix_len_sc;
+    const num_chunks: usize = (content_len + lz_constants.chunk_size - 1) / lz_constants.chunk_size;
     const group_size = lz_constants.sc_group_size;
     const num_groups: usize = (num_chunks + group_size - 1) / group_size;
 
@@ -419,8 +415,8 @@ pub fn compressInternalParallelSc(
     }
     for (tmp_bufs) |*b| b.* = &[_]u8{};
     for (tmp_bufs, 0..) |*b, i| {
-        const src_off = i * lz_constants.chunk_size;
-        const block_src_len = @min(src.len - src_off, lz_constants.chunk_size);
+        const blk_off = i * lz_constants.chunk_size;
+        const block_src_len = @min(content_len - blk_off, lz_constants.chunk_size);
         b.* = try allocator.alloc(u8, compressBound(block_src_len));
     }
 
@@ -434,6 +430,7 @@ pub fn compressInternalParallelSc(
         .backing_allocator = allocator,
         .mapping = mapping,
         .sc_flag_bit = sc_flag_bit,
+        .dict_prefix_len = dict_prefix_len_sc,
         .tmp_bufs = tmp_bufs,
         .written = written,
         .next_group = std.atomic.Value(usize).init(0),

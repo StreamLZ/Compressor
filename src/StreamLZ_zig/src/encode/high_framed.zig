@@ -152,18 +152,32 @@ pub fn compressFramedHigh(
         !self_contained and
         mapping.codec_level >= 5;
 
+    // Dictionary: shared combined buffer for SC and other paths.
+    const dict_g = opts.dictionary orelse &[_]u8{};
+    const dict_len_g = dict_g.len;
+    var combined_g: ?[]u8 = null;
+    const effective_src_g: []const u8 = if (dict_len_g > 0) blk: {
+        const buf = allocator.alloc(u8, dict_len_g + src.len) catch return error.OutOfMemory;
+        @memcpy(buf[0..dict_len_g], dict_g);
+        @memcpy(buf[dict_len_g..], src);
+        combined_g = buf;
+        break :blk buf;
+    } else src;
+    defer if (combined_g) |buf| allocator.free(buf);
+
     if (can_parallel_sc) {
         const frame_block_hdr_pos: usize = pos;
         pos += 8;
         const frame_block_start: usize = pos;
         const written = try compress_parallel.compressInternalParallelSc(
             allocator,
-            src,
+            effective_src_g,
             dst[pos..],
             &ctx,
             mapping,
             sc_flag_bit,
             resolved_threads,
+            dict_len_g,
         );
         pos += written;
         try emitScPrefixTable(src, dst, &pos);
