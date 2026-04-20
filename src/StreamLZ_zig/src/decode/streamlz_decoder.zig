@@ -96,7 +96,16 @@ pub const DecompressContext = struct {
             const pair = try decompressOneFrame(self.allocator, &self.pool, piece_src, piece_dst, self.max_threads);
             src_pos += pair.src_consumed;
             if (pair.dst_offset > 0 and pair.dst_written > 0) {
-                std.mem.copyForwards(u8, piece_dst[0..pair.dst_written], piece_dst[pair.dst_offset..][0..pair.dst_written]);
+                const off = pair.dst_offset;
+                const total = pair.dst_written;
+                var copied: usize = 0;
+                while (copied + off <= total) : (copied += off) {
+                    @memcpy(piece_dst[copied..][0..off], piece_dst[copied + off ..][0..off]);
+                }
+                if (copied < total) {
+                    const rem = total - copied;
+                    @memcpy(piece_dst[copied..][0..rem], piece_dst[copied + off ..][0..rem]);
+                }
             }
             dst_off += pair.dst_written;
             if (pair.src_consumed == 0) break;
@@ -166,7 +175,20 @@ fn decompressFramedInner(
         const pair = try decompressOneFrame(allocator_opt, &lazy_pool, piece_src, piece_dst, max_threads);
         src_pos += pair.src_consumed;
         if (pair.dst_offset > 0 and pair.dst_written > 0) {
-            std.mem.copyForwards(u8, piece_dst[0..pair.dst_written], piece_dst[pair.dst_offset..][0..pair.dst_written]);
+            // Shift output left by dst_offset bytes. The gap between
+            // source and destination equals dst_offset (the dictionary
+            // prefix length, typically 32KB). Copy in dst_offset-sized
+            // chunks to avoid overlap within each memcpy call.
+            const off = pair.dst_offset;
+            const total = pair.dst_written;
+            var copied: usize = 0;
+            while (copied + off <= total) : (copied += off) {
+                @memcpy(piece_dst[copied..][0..off], piece_dst[copied + off ..][0..off]);
+            }
+            if (copied < total) {
+                const rem = total - copied;
+                @memcpy(piece_dst[copied..][0..rem], piece_dst[copied + off ..][0..rem]);
+            }
         }
         dst_off += pair.dst_written;
         if (pair.src_consumed == 0) break;
@@ -215,6 +237,10 @@ fn decompressOneFrame(
         dict_prefix_len = d.data.len;
     }
 
+    // Output starts after the dictionary prefix. The chunk decoder
+    // uses dst.ptr as dst_start for LZ back-references, so the
+    // dictionary bytes at dst[0..dict_prefix_len] are reachable
+    // via negative offsets from the output region.
     var dst_off: usize = dict_prefix_len;
     // Scratch buffer for Fast decoder tables and stream storage.
     var scratch: [constants.scratch_size]u8 = undefined;

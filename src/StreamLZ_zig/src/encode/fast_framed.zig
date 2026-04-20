@@ -595,7 +595,7 @@ pub fn compressFramedOne(
                     dst[5] |= @as(u8, 1) << 4; // parallel_decode_metadata_present
                 }
             }
-        } else |err| {
+        } else |_| {
             // buildPpocSidecar failed (probably OOM from the 400+ MB
             // byte_earliest + producer_map). Silently continue without
             // a sidecar — the frame is still correct, just slower to
