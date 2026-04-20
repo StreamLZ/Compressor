@@ -48,93 +48,78 @@ pub const CompressError = error{
     DestinationTooSmall,
 } || std.mem.Allocator.Error || fast_enc.EncodeError || std.Thread.SpawnError;
 
+/// Compression options for `compressFramed`.
+///
 /// When the allocator cannot satisfy a single-piece compress, the encoder
 /// automatically splits the input into concatenated self-contained frames.
 /// The decompressor handles this transparently.
+///
+/// ## Quick start
+///
+/// Most callers only need `level`:
+/// ```zig
+/// const n = try compressFramed(allocator, src, dst, .{ .level = 5 });
+/// ```
+///
+/// ## Levels
+///
+/// - **L1-L5** (Fast codec): greedy/lazy parser, 40-100 MB/s compress,
+///   13-35 GB/s decompress. Higher = better ratio, slower compress.
+/// - **L6-L8** (High codec, self-contained): optimal parser + SC groups,
+///   40-78 MB/s compress, 15 GB/s decompress. Parallel compress + decompress.
+/// - **L9-L11** (High codec, non-SC): optimal parser + full dictionary window,
+///   1-8 MB/s compress, 2 GB/s decompress. Best ratio.
 pub const Options = struct {
-    /// User level 1–5 supported by the Fast encoder. (L6–L11 High codec
-    /// lands in a later phase.)
+    // ── Primary options (most callers only set these) ────────────────────
+
+    /// Compression level 1-11. Default: 1 (fastest).
     level: u8 = 1,
-    /// Include the content-size field in the frame header (strongly recommended).
+    /// Worker thread count. 0 = auto (uses all CPU cores).
+    /// 1 = serial (no thread pool).
+    num_threads: u32 = 0,
+    /// External dictionary for improved ratio on small files.
+    /// Auto-detected by the CLI from file extension; library callers
+    /// pass bytes directly. The decoder must have the same dictionary.
+    dictionary: ?[]const u8 = null,
+    /// Dictionary ID written to the frame header (decoder looks it up).
+    /// Built-in IDs: 1-6 (json/html/text/xml/css/js), 7 (general).
+    dictionary_id: ?u32 = null,
+
+    // ── Frame options ────────────────────────────────────────────────────
+
+    /// Include content-size in frame header. Default: true (recommended).
     include_content_size: bool = true,
-    /// Block size in the frame header. Must be a power of two between
-    /// `frame.min_block_size` and `frame.max_block_size`. We always emit
-    /// 256 KB blocks internally but the frame header can advertise larger.
+    /// Block size advertised in frame header.
     block_size: u32 = lz_constants.chunk_size,
-
-    // ── CompressOptions parity fields ────────────────────────────────────
-    // Most of
-    // these are plumbed here for API symmetry; the behavioral wiring lands
-    // with subsequent parity steps (see the punch list in memory).
-
-    /// Override the hash-table bit count (0 = adaptive). Matches
-    /// Override hash-table bit count (0 = adaptive).
-    hash_bits: u32 = 0,
-    /// Minimum match length override (0 = auto-derive from level + text
-    /// detection). Values below 4 are ignored. Matches
-    /// `CompressOptions.MinMatchLength`.
-    min_match_length: u32 = 0,
-    /// Maximum backward reference distance. 0 = `default_dictionary_size`.
-    /// Matches `CompressOptions.DictionarySize`.
-    dictionary_size: u32 = 0,
-    /// Maximum local dictionary size for self-contained mode. 0 = default
-    /// (4 MB). Matches `CompressOptions.MaxLocalDictionarySize`.
-    max_local_dictionary_size: u32 = 0,
-    /// Seek chunk length for seekable compression (0 = off). Matches
-    /// `CompressOptions.SeekChunkLen`.
-    seek_chunk_len: u32 = 0,
-    /// Number of bytes between seek-point resets (0 = off). Matches
-    /// `CompressOptions.SeekChunkReset`.
-    seek_chunk_reset: u32 = 0,
-    /// Space-speed tradeoff parameter in bytes. 0 = default (256). Matches
-    /// `CompressOptions.SpaceSpeedTradeoffBytes`.
-    space_speed_tradeoff_bytes: u32 = 0,
-    /// Whether to generate 3-byte CRC24 chunk-header checksums. Matches
-    /// `CompressOptions.GenerateChunkHeaderChecksum`. CRC24 algorithm is
-    /// not yet implemented on either side — flag parsed, not acted on.
-    generate_chunk_header_checksum: bool = false,
-    /// Whether each frame block is self-contained (enables parallel
-    /// decompression). Matches `CompressOptions.SelfContained`. When set,
-    /// the encoder also appends a per-chunk first-8-byte prefix table.
+    /// Force self-contained mode (each block independently decodable).
+    /// L6-L8 are always SC; this forces it for L9-L11 too.
     self_contained: bool = false,
-    /// Whether to use two-phase compression (self-contained + cross-chunk
-    /// patches). Matches `CompressOptions.TwoPhase`. When set, also forces
-    /// `self_contained = true`.
+
+    // ── Advanced (rarely changed) ───────────────────────────────────────
+
+    /// Override hash-table bit count (0 = adaptive from input size).
+    hash_bits: u32 = 0,
+    /// Minimum match length override (0 = auto from level + text detect).
+    min_match_length: u32 = 0,
+    /// Maximum backward reference distance. 0 = default (1 GB).
+    dictionary_size: u32 = 0,
+    /// Maximum local dictionary for SC mode. 0 = default (4 MB).
+    max_local_dictionary_size: u32 = 0,
+    /// Emit parallel-decode sidecar for Fast L1-L5 frames.
+    /// Default: true. Adds ~0.3-1% to compressed size.
+    emit_parallel_decode_metadata: bool = true,
+    /// Two-phase mode (implies self_contained).
     two_phase: bool = false,
 
-    // ── Decode-cost penalty knobs ────────────────────────────────────────
-    // These bias the optimal parser toward cheaper-to-decode matches.
-    // Only exercised by the High codec (L6+); Fast L1-L5 ignores them.
+    // ── Experimental / internal ─────────────────────────────────────────
 
-    /// Per-token fixed decode overhead penalty (32nds of a bit).
+    seek_chunk_len: u32 = 0,
+    seek_chunk_reset: u32 = 0,
+    space_speed_tradeoff_bytes: u32 = 0,
+    generate_chunk_header_checksum: bool = false,
     decode_cost_per_token: u32 = 0,
-    /// Penalty for matches with offset < 16 (byte-at-a-time copy). Applied
-    /// per match byte. In 32nds of a bit.
     decode_cost_small_offset: u32 = 0,
-    /// Penalty for very short matches (length 2-3). In 32nds of a bit.
     decode_cost_short_match: u32 = 0,
-
-    /// Worker thread count for parallel compress. `0` = auto (one per
-    /// CPU core, capped by the memory-aware heuristic from step 40).
-    /// `1` forces the serial path.
-    num_threads: u32 = 0,
-
-    /// v2: emit a parallel-decode sidecar block alongside the Fast
-    /// L1-L4 compressed data so new-format decoders can run phase-1
-    /// cross-chunk resolution before spawning phase-2 worker threads.
-    /// Defaults to on for Fast levels; ignored for High/Turbo paths.
-    /// The sidecar is ~0.3-1% of compressed size and has no impact on
-    /// compression ratio of the main payload.
-    emit_parallel_decode_metadata: bool = true,
-
-    /// External dictionary bytes to prepend as match-finder preload.
-    /// The encoder treats these as prior output that the decoder will
-    /// also have. When non-null, the frame header's dictionary_id field
-    /// is set to `dictionary_id`.
-    dictionary: ?[]const u8 = null,
-    /// Dictionary ID written into the frame header. Built-in IDs are
-    /// 1-255; custom dictionaries use IDs >= 0x1000_0000.
-    dictionary_id: ?u32 = null,
 };
 
 /// Resolved per-input parameters derived from `Options` + heuristics.
