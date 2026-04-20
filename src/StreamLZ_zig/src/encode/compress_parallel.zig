@@ -318,12 +318,21 @@ fn scWorkerFn(shared: *ScShared) void {
         const dpl = shared.dict_prefix_len;
         const group_src_off = first_chunk * lz_constants.chunk_size;
         const group_content_len = @min(chunks_in_group * lz_constants.chunk_size, shared.src.len - dpl - group_src_off);
-        // Include dictionary prefix so matches can reference it.
-        // shared.src is [dict ++ original_src]. Slice from 0 to
-        // include dict, through end of this group's content.
-        const group_window_end = dpl + group_src_off + group_content_len;
-        const group_src = shared.src[0..group_window_end];
-        const finder_preload = dpl + group_src_off;
+
+        const finder_preload: usize = dpl;
+        var dict_group_buf: ?[]u8 = null;
+        const group_src: []const u8 = if (dpl > 0) blk: {
+            const buf = shared.backing_allocator.alloc(u8, dpl + group_content_len) catch {
+                _ = shared.error_flag.store(1, .monotonic);
+                _ = shared.captured_err.cmpxchgStrong(0, @intFromError(error.OutOfMemory), .monotonic, .monotonic);
+                return;
+            };
+            @memcpy(buf[0..dpl], shared.src[0..dpl]);
+            @memcpy(buf[dpl..], shared.src[dpl + group_src_off ..][0..group_content_len]);
+            dict_group_buf = buf;
+            break :blk buf;
+        } else shared.src[group_src_off .. group_src_off + group_content_len];
+        defer if (dict_group_buf) |buf| shared.backing_allocator.free(buf);
 
         _ = arena.reset(.retain_capacity);
 
@@ -359,7 +368,7 @@ fn scWorkerFn(shared: *ScShared) void {
         // Content-only slice for the block compressor. Contiguous with
         // the dictionary prefix in memory so pointer arithmetic reaches
         // dictionary bytes via negative offsets from the content start.
-        const group_content = shared.src[finder_preload..group_window_end];
+        const group_content = group_src[dpl..];
 
         var ci: usize = 0;
         while (ci < chunks_in_group) : (ci += 1) {
