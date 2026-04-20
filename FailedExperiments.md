@@ -1234,28 +1234,26 @@ if StreamLZ added a hash-based path at L9-L10 (which use
 
 ---
 
-## Known bug: sidecar closure incomplete on 1GB+ files (2026-04-19)
+## Fixed: sidecar match_ops not executed in parallel decoder (2026-04-19)
 
-**Symptom**: Parallel Fast L1-L5 decompress produces 2-4 byte errors
-on enwik9 (1 GB) at worker slice boundaries (chunks 160, 320 with
-160-chunk aligned slices). The decompressed bytes are zeros where the
-correct output has non-zero values.
+**Symptom**: Parallel Fast L1-L5 decompress produced 2-4 byte errors
+on enwik9 (1 GB) at worker slice boundaries.
 
-**Root cause**: The encoder's `cross_chunk_analyzer.buildPpocSidecar`
-BFS closure computation misses some cross-slice match dependencies
-on very large files. When the parallel decoder's worker reads from
-a position that should have been pre-populated by the sidecar, it
-gets a zero byte instead.
+**Root cause**: The parallel decoder (`decompressFastL14Parallel`)
+applied sidecar `literal_bytes` (scattered by each worker) but
+completely ignored sidecar `match_ops`. The match_ops are sequential
+copy operations that propagate cross-chunk byte values produced by
+match chains — values that can't be represented as simple literal
+bytes. Without executing them, positions that depend on cross-slice
+match chain propagation got zeros.
 
-**Affected**: Only parallel Fast decompress on files > ~500 MB.
-Serial decompress (`-t 1`) is always correct. Files up to 212 MB
-(silesia) pass parallel roundtrip correctly.
+**Fix**: Execute `sidecar.literal_bytes` (serial scatter) and then
+`sidecar.match_ops` (serial sequential copies) BEFORE dispatching
+parallel workers. The workers still scatter literals in parallel for
+their own regions (redundant but harmless since the pre-scatter
+already placed the correct values).
 
-**Workaround**: Use `-t 1` for files > 500 MB, or use L6+ (SC/High)
-which uses a different parallel strategy.
-
-**Status**: Open. Fix requires debugging the BFS closure in
-`cross_chunk_analyzer.zig` (~1000 lines of dependency graph code).
+**Verified**: enwik9 (1 GB) L3 parallel roundtrip now correct.
 
 **What worked from the zstd investigation**:
 - **128 MB dictionary**: +0.25% ratio, committed as `211975e`

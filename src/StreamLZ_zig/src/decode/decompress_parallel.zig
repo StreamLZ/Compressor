@@ -1096,6 +1096,26 @@ pub fn decompressFastL14Parallel(
     for (scratches) |*s| s.* = &[_]u8{};
     for (scratches) |*s| s.* = try allocator.alloc(u8, sc_scratch_bytes);
 
+    // Apply sidecar literal bytes first (seeds for match ops).
+    for (sidecar.literal_bytes) |lit| {
+        const p: usize = dst_start_off + @as(usize, @intCast(lit.position));
+        if (p < dst.len) dst[p] = lit.byte_value;
+    }
+
+    // Execute sidecar match ops (sequential copies that propagate
+    // cross-chunk byte values from the literal seeds above).
+    for (sidecar.match_ops) |op| {
+        const tgt: usize = dst_start_off + @as(usize, @intCast(op.target_start));
+        const src_pos: usize = dst_start_off +% @as(usize, @bitCast(@as(isize, @intCast(op.src_start))));
+        const len: usize = op.length;
+        if (tgt + len <= dst.len and src_pos + len <= dst.len) {
+            var i: usize = 0;
+            while (i < len) : (i += 1) {
+                dst[tgt + i] = dst[src_pos + i];
+            }
+        }
+    }
+
     var shared: FastL14Shared = .{
         .chunks = scan.chunks,
         .block_src = block_src,
