@@ -99,74 +99,32 @@ The trainer uses the FASTCOVER algorithm (based on zstd's dictionary builder).
 ## Benchmarks
 
 Single host: Intel Core Ultra 9 285K (Arrow Lake-S), 24 cores, Windows 11.
-Built with `-Doptimize=ReleaseFast`. Decompression uses the full parallel
-dispatch (24-thread pool); compress uses the same. Decompress measured with
-`streamlz bench <file> 30`; compress measured with
-`streamlz benchc -l N -r {3..5}`. All numbers are MB/s referencing
-**decompressed** byte size.
+Built with `-Doptimize=ReleaseFast`. Decompress uses parallel dispatch at
+all levels. Compress is serial for L1-L5 (Fast codec) and parallel for
+L6-L11 (High codec). Numbers from `streamlz -ba -r 3 --no-dict enwik8`.
 
-### Decompress (parallel, 24 cores) — v1 frames
+### enwik8 (100 MB English text) — all levels
 
-These numbers are from v1 `.slz` frames, where Fast L1-L5 falls through to the
-serial decoder. For fresh v2 frames at L1-L4, see
-[v2 parallel Fast L1-L4 decompress](#v2-parallel-fast-l1-l4-decompress) below —
-throughput is 3-4× higher.
-
-#### enwik8 (100 MB English text)
-
-| Level | Zig best | Zig mean |
-|-------|---------:|---------:|
-| L1    |    6,258 |    6,139 |
-| L3    |    6,003 |    5,899 |
-| L5    |    4,833 |    4,725 |
-| L9    |    2,121 |    2,084 |
-| L11   |    1,970 |    1,902 |
-
-#### silesia (200 MB mixed binary)
-
-| Level | Zig best | Zig mean |
-|-------|---------:|---------:|
-| L1    |    6,947 |    6,693 |
-| L3    |    6,690 |    6,567 |
-| L5    |    5,704 |    5,615 |
-| L9    |    2,306 |    2,230 |
-| L11   |    2,267 |    2,215 |
-
-**Read:** Fast and High both use parallel dispatch
-(`decompressCoreParallel` for L6-L8 SC, `decompressCoreTwoPhase` for L9-L11).
-v1 Fast L1-L5 has no parallel path and runs single-thread on the decoder hot
-loop — the L1 number is already within ~5% of the per-core DRAM ceiling on
-Arrow Lake, so there is no remaining single-core headroom.
-
-### Compress (parallel, 24 cores)
-
-#### enwik8 (100 MB English text)
-
-| Level | Zig MB/s | Zig size   |
-|-------|---------:|-----------:|
-| L1    |     18.8 | 58,632,393 |
-| L3    |     17.3 | 56,522,874 |
-| L5    |     65.6 | 42,178,862 |
-| L9    |      7.7 | 27,430,876 |
-| L11   |      1.2 | 25,550,456 |
-
-#### silesia (200 MB mixed binary)
-
-| Level | Zig MB/s | Zig size    |
-|-------|---------:|------------:|
-| L1    |     24.8 | 100,270,195 |
-| L3    |     23.5 |  98,109,897 |
-| L5    |     89.5 |  77,477,582 |
-| L9    |     11.9 |  52,915,947 |
-| L11   |      2.7 |  51,331,016 |
+| Level | Compressed | Ratio | Compress | Decompress |
+|-------|------------|-------|----------|------------|
+| L1  | 59,102,816 | 59.1% |  98.6 MB/s | 34,947 MB/s |
+| L2  | 57,298,758 | 57.3% |  85.9 MB/s | 34,778 MB/s |
+| L3  | 56,937,334 | 56.9% |  81.8 MB/s | 32,548 MB/s |
+| L4  | 54,303,437 | 54.3% |  81.7 MB/s | 33,298 MB/s |
+| L5  | 43,112,965 | 43.1% |  39.3 MB/s | 13,009 MB/s |
+| L6  | 31,793,212 | 31.8% |  77.5 MB/s | 15,306 MB/s |
+| L7  | 31,717,862 | 31.7% |  55.1 MB/s | 15,706 MB/s |
+| L8  | 31,436,039 | 31.4% |  39.0 MB/s | 15,408 MB/s |
+| L9  | 28,396,689 | 28.4% |   7.8 MB/s |  2,136 MB/s |
+| L10 | 28,253,307 | 28.3% |   7.6 MB/s |  2,187 MB/s |
+| L11 | 26,850,856 | 26.9% |   1.2 MB/s |  2,033 MB/s |
 
 **Read:**
-- L1/L3 compress — Fast greedy parser (engine levels −2/−1/1/2) hasn't been
-  hot-pathed yet; the hot loop is the obvious next target.
-- L5 is the Fast greedy-chain parser and was tuned alongside the decoder.
-- L9/L11 — the `findMatchesHashBased` inner loop was vectorized with
-  `@Vector(4, i32)` + 64-byte hash-table alignment + dual-bucket prefetch
-  in commit `1423ac0`, which also made L9 4.4 → 7.7 MB/s (+70%).
+- L1-L4 decompress at **33-35 GB/s** — near DRAM bandwidth on Arrow Lake.
+- L5 at **13 GB/s** — limited by lazy-parser token density + parallel sidecar.
+- L6-L8 at **15 GB/s** — SC group-parallel (High codec).
+- L9-L11 at **2 GB/s** — serial token execution; +17% from parallel resolveTokens.
+- L11 uses 128 MB dictionary window (BT4) for best ratio.
 
 ### v2 parallel Fast L1-L4 decompress
 
