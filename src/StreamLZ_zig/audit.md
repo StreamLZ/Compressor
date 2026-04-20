@@ -1270,3 +1270,23 @@ It is not a C# port. It is a Zig codebase. It should read like one.
 | `build.zig`: `zig build safe` (ReleaseSafe) + `zig build fuzz` target | **DONE** |
 | Centralize scattered constants (`safe_space`, `sub_chunk_size`, `extended_length_threshold`) | **DONE** |
 | CLI arg parsing cleanup (`parseIntFlag` helper, ~48 lines removed) | **DONE** |
+| CLI rewrite: flag-driven matching C# (`-c`, `-d`, `-b`, `-db`, `-ba`, `-D`) | **DONE** |
+| Conditional far-offset prefetch for L5 Fast decode (+1.7% L3) | **DONE** |
+| L9-L11 parallel resolveTokens in phase 1 (+17-24% decompress) | **DONE** |
+| 128 MB dictionary window for L11 non-SC (-0.25% ratio) | **DONE** |
+| `optimal()` outer retry loop extraction (`optimalOnePass`) | **DONE** |
+| Dead `level` parameter removed from `calculateMaxThreads` | **DONE** |
+| OOM retry behavior documented in `Options` struct | **DONE** |
+| `mapHighLevel` table tests + frame builder edge case tests (9 tests) | **DONE** |
+| Dictionary support: 7 built-in dictionaries (JSON/HTML/CSS/JS/XML/text/general) | **DONE** |
+| Dictionary auto-detection by file extension with general fallback | **DONE** |
+| Dictionary encoder preload for L1-L11 (all levels) | **DONE** |
+| Dictionary decoder: pre-fill, bounds check, UnknownDictionary error | **DONE** |
+| FASTCOVER dictionary trainer (`--train` CLI command) | **DONE** |
+| Fix parallel Fast decode on 1GB+ files (sidecar match_ops execution) | **DONE** |
+| Chunk boundary detection relative to block start (dictionary compat) | **DONE** |
+| L9-L11 sidecar investigation (14pp ratio cost — abandoned) | Documented in FailedExperiments.md |
+| L9-L11 depth-0 analysis (95% cross-slice at 4MB) | Documented in FailedExperiments.md |
+| Two-pass stats seeding (0.01% gain — abandoned) | Documented in FailedExperiments.md |
+| LDM for L11 (1.6KB gain, redundant with BT4 — abandoned) | Documented in FailedExperiments.md |
+| writeInt microarchitecture analysis (load-latency bound) | Documented in FailedExperiments.md |
